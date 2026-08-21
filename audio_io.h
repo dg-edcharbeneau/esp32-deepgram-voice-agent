@@ -38,6 +38,19 @@
  * capture task, so it must not block for long. */
 typedef void (*audio_io_capture_sink_t)(const uint8_t *pcm, size_t len);
 
+/*
+ * Observer for mono 16-bit PCM at the moment it is handed to the hardware.
+ *
+ * The point of tapping here rather than at audio_io_play() is pacing: Deepgram
+ * delivers a whole turn faster than it plays -- that is what the ring buffer
+ * below absorbs -- so a visualizer fed from the network callback would race
+ * ahead and finish while the speaker is still talking. The playback tap fires
+ * from the drain loop, which is paced by the blocking codec write.
+ *
+ * Runs on the audio tasks: must not block, and must copy anything it keeps.
+ */
+typedef void (*audio_io_tap_t)(const int16_t *mono, size_t samples);
+
 /* Opens both codecs at the shared rate and starts the playback task. */
 esp_err_t audio_io_init(int sample_rate);
 
@@ -47,6 +60,13 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink);
 /* Queue mono PCM from the agent for playback. Non-blocking; returns
  * ESP_ERR_NO_MEM when the buffer was full and audio was dropped. */
 esp_err_t audio_io_play(const uint8_t *pcm, size_t len);
+
+/* Observe agent audio as it reaches the speaker. Pass NULL to detach. */
+void audio_io_set_playback_tap(audio_io_tap_t tap);
+
+/* Observe mic audio as it goes to the sink -- so the tap sees exactly what is
+ * sent upstream, including nothing at all while capture is gated. */
+void audio_io_set_capture_tap(audio_io_tap_t tap);
 
 /* Drop everything queued -- used for barge-in. */
 void audio_io_flush(void);

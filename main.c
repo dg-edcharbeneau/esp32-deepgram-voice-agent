@@ -24,12 +24,14 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
 
 #include "audio_io.h"
 #include "dg_agent.h"
+#include "spectrum_ui.h"
 #include "wifi_sta.h"
 
 static const char *TAG = "main";
@@ -55,6 +57,9 @@ static const char *state_name(dg_agent_state_t state)
 static void on_state(dg_agent_state_t state, void *ctx)
 {
     ESP_LOGI(TAG, "agent session %s", state_name(state));
+    /* Runs on the WebSocket task, so this must not touch LVGL -- it stores the
+     * literal and the frame timer picks it up. */
+    spectrum_ui_set_status(state_name(state), state == DG_AGENT_READY);
 }
 
 static void on_conversation_text(const char *role, const char *content, void *ctx)
@@ -102,12 +107,24 @@ void app_main(void)
      * arrives. */
     ESP_ERROR_CHECK(audio_io_init(DG_AUDIO_SAMPLE_RATE));
 
+    /* Non-blocking, and bringing the panel up costs ~1.2 s in the CO5300 reset
+     * sequence -- so start associating first and overlap the two. */
     ESP_ERROR_CHECK(wifi_sta_start());
+
+    spectrum_ui_set_status("connecting", false);
+    if (spectrum_ui_start() == ESP_OK) {
+        audio_io_set_playback_tap(spectrum_ui_feed_agent);
+        audio_io_set_capture_tap(spectrum_ui_feed_mic);
+    } else {
+        /* A dark screen is not a reason to give up the voice loop. */
+        ESP_LOGW(TAG, "spectrum display unavailable, continuing headless");
+    }
 
     err = wifi_sta_wait_connected(WIFI_CONNECT_TIMEOUT_MS);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "no network (%s) -- check SSID/password in menuconfig",
                  esp_err_to_name(err));
+        spectrum_ui_set_status("no network", false);
         return;
     }
 
@@ -128,10 +145,20 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(10000));
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
+        /*
+         * Internal RAM is the scarce resource once the display is up, and the
+         * case that bites is a WebSocket reconnect: the TLS handshake wants a
+         * burst of it with the render buffer already allocated. Largest-block
+         * matters more than the total -- if it sags towards 40 kB, shrink
+         * DRAW_ROWS in spectrum_ui.c before tuning anything else.
+         */
         ESP_LOGI(TAG, "%s | turns=%" PRIu32 " mic=%" PRIu32 " B rx=%" PRIu32
-                      " B played=%" PRIu32 " B dropped=%" PRIu32 " B | heap=%" PRIu32 " B",
+                      " B played=%" PRIu32 " B dropped=%" PRIu32
+                      " B | heap=%" PRIu32 " B internal=%u B (largest %u B)",
                  dg_agent_is_ready() ? "ready" : "not ready",
                  s_turns, captured, s_audio_bytes, played, dropped,
-                 esp_get_free_heap_size());
+                 esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     }
 }

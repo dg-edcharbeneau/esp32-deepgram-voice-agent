@@ -48,6 +48,8 @@ static esp_codec_dev_handle_t s_spk;
 static esp_codec_dev_handle_t s_mic;
 static StreamBufferHandle_t s_ring;
 static audio_io_capture_sink_t s_sink;
+static audio_io_tap_t s_play_tap;
+static audio_io_tap_t s_cap_tap;
 
 static volatile uint32_t s_played;
 static volatile uint32_t s_dropped;
@@ -130,6 +132,16 @@ static void playback_task(void *arg)
             carry_valid = false;
         }
 
+        /*
+         * Before the write, because the write is what blocks. Note this still
+         * runs ahead of what you hear: the I2S DMA holds 6 x 240 frames, ~90 ms
+         * at 16 kHz, so a visualizer fed from here leads the speaker by about
+         * three frames at steady state.
+         */
+        if (s_play_tap != NULL) {
+            s_play_tap(mono, samples);
+        }
+
         for (size_t i = 0; i < samples; i++) {
             stereo[2 * i] = mono[i];
             stereo[2 * i + 1] = mono[i];
@@ -209,6 +221,11 @@ static void capture_task(void *arg)
             continue;
         }
 #endif
+
+        /* After the gate above, so the tap sees what actually goes upstream. */
+        if (s_cap_tap != NULL) {
+            s_cap_tap(mono, CAPTURE_FRAMES);
+        }
 
         if (s_sink != NULL) {
             s_sink((const uint8_t *)mono, mono_bytes);
@@ -373,6 +390,16 @@ esp_err_t audio_io_play(const uint8_t *pcm, size_t len)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+void audio_io_set_playback_tap(audio_io_tap_t tap)
+{
+    s_play_tap = tap;
+}
+
+void audio_io_set_capture_tap(audio_io_tap_t tap)
+{
+    s_cap_tap = tap;
 }
 
 void audio_io_flush(void)

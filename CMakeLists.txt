@@ -4,6 +4,7 @@ idf_component_register(
         wifi_sta.c
         dg_agent.c
         audio_io.c
+        spectrum_ui.c
     INCLUDE_DIRS .
     REQUIRES
         esp_wifi
@@ -14,4 +15,7 @@ idf_component_register(
         json
         esp_codec_dev
         waveshare__esp32_s3_touch_amoled_1_75c
+        lvgl__lvgl
+        espressif__esp_lvgl_adapter
+        espressif__esp-dsp
 )
