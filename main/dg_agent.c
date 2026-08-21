@@ -115,14 +115,41 @@ static esp_err_t send_settings(void)
     cJSON *output = cJSON_AddObjectToObject(audio, "output");
     cJSON_AddStringToObject(output, "encoding", DG_AUDIO_ENCODING);
     cJSON_AddNumberToObject(output, "sample_rate", DG_AUDIO_SAMPLE_RATE);
+    /* Already the default, but stated because Flux TTS *rejects* containers and
+     * compressed encodings rather than ignoring them -- better a loud failure
+     * than a silent format mismatch feeding the codec. */
+    cJSON_AddStringToObject(output, "container", "none");
 
     cJSON *agent = cJSON_AddObjectToObject(root, "agent");
-    cJSON_AddStringToObject(agent, "language", "en");
 
     cJSON *listen_provider = cJSON_AddObjectToObject(
         cJSON_AddObjectToObject(agent, "listen"), "provider");
     cJSON_AddStringToObject(listen_provider, "type", "deepgram");
+
+#if CONFIG_SPEECH_STACK_FLUX
+    /*
+     * Flux. `version` is what selects it -- the model name alone is not enough,
+     * and v1 is assumed when the field is absent.
+     *
+     * No `language` here: that is a v1 listen-provider option. Flux takes
+     * `language_hints` instead, and flux-general-en already implies English.
+     * Thresholds are omitted unless configured, because the server defaults are
+     * the right starting point.
+     */
+    cJSON_AddStringToObject(listen_provider, "version", "v2");
+    cJSON_AddStringToObject(listen_provider, "model", "flux-general-en");
+    if (strlen(CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD) > 0) {
+        cJSON_AddStringToObject(listen_provider, "eot_threshold",
+                                CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD);
+    }
+#if CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS > 0
+    cJSON_AddNumberToObject(listen_provider, "eot_timeout_ms",
+                            CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS);
+#endif
+#else
+    cJSON_AddStringToObject(agent, "language", "en");
     cJSON_AddStringToObject(listen_provider, "model", "nova-3");
+#endif
 
     cJSON *think = cJSON_AddObjectToObject(agent, "think");
     cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
@@ -133,7 +160,15 @@ static esp_err_t send_settings(void)
     cJSON *speak_provider = cJSON_AddObjectToObject(
         cJSON_AddObjectToObject(agent, "speak"), "provider");
     cJSON_AddStringToObject(speak_provider, "type", "deepgram");
+#if CONFIG_SPEECH_STACK_FLUX
+    /* Same story as listen: "v2" is what picks Flux TTS. Omitting agent.speak
+     * entirely would also get Flux with flux-kit-en, but being explicit keeps
+     * the voice configurable. */
+    cJSON_AddStringToObject(speak_provider, "version", "v2");
+    cJSON_AddStringToObject(speak_provider, "model", CONFIG_DEEPGRAM_FLUX_VOICE);
+#else
     cJSON_AddStringToObject(speak_provider, "model", "aura-2-thalia-en");
+#endif
 
     if (strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
         cJSON_AddStringToObject(agent, "greeting", CONFIG_DEEPGRAM_AGENT_GREETING);

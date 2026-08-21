@@ -20,10 +20,16 @@ static const char *TAG = "audio_io";
 #define CODEC_BITS     16
 
 /*
- * Mono frames per capture read. 512 at 16 kHz is 32 ms, which is a comfortable
- * chunk for Deepgram and keeps the round trip snappy.
+ * Mono frames per capture read. 1280 at 16 kHz is 80 ms, the chunk size Flux
+ * recommends for best model performance and latency.
+ *
+ * It also cuts the send rate from ~31/s to ~12.5/s. That matters more than it
+ * looks: a WebSocket write that cannot complete inside its timeout returns 0,
+ * which the client treats as a dead connection and reconnects -- so fewer,
+ * larger writes directly reduce the pressure behind that failure. See the
+ * "short send timeout" section of the README.
  */
-#define CAPTURE_FRAMES 512
+#define CAPTURE_FRAMES 1280
 
 /*
  * Playback ring holds MONO bytes -- the stereo doubling happens in the drain

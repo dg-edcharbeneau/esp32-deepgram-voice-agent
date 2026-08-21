@@ -184,6 +184,67 @@ and must run *after* `dg_agent_stop()` has brought the WebSocket task to a halt.
 If a restarted session ever comes back as loud static, that is the first thing to
 check.
 
+## Speech stack: Flux or Nova-3 + Aura
+
+`menuconfig` -> "Speech stack" picks between:
+
+- **Flux** (default) — `flux-general-en` STT with model-integrated end-of-turn
+  detection, and Flux TTS (`CONFIG_DEEPGRAM_FLUX_VOICE`, default `flux-kit-en`).
+- **Nova-3 + Aura** — the previous stack, kept so the two can be compared on one
+  build.
+
+Both halves of Flux live inside the Agent API, so this is a `Settings` change
+rather than a second set of sockets. What selects Flux is
+`agent.{listen,speak}.provider.version = "v2"` — **the model name alone is not
+enough**, and `v1` is assumed when the field is absent.
+
+```json
+"listen": { "provider": { "type": "deepgram", "version": "v2", "model": "flux-general-en" } },
+"speak":  { "provider": { "type": "deepgram", "version": "v2", "model": "flux-kit-en" } }
+```
+
+### Why this works on this board at all
+
+Both Flux STT and Flux TTS support **linear16 at 16 kHz**. That is the whole
+reason the swap is cheap here: the ES7210 and ES8311 share one duplex I2S and
+cannot be clocked differently, so a stack that insisted on 24 kHz output would
+have needed on-device resampling. Flux TTS *defaults* to 24 kHz — the explicit
+`audio.output.sample_rate` in the `Settings` message is what keeps it at 16 kHz,
+and it is not optional here.
+
+`audio.output.container` is set to `"none"` explicitly. It is already the
+default, but Flux TTS *rejects* containers and compressed encodings rather than
+ignoring them, so stating it turns a possible silent format mismatch into a loud
+one.
+
+### Two things that differ from v1
+
+- **No `agent.language` on the Flux path.** `language` is a v1 listen-provider
+  option; Flux uses `language_hints`, and `flux-general-en` implies English. The
+  field is still sent on the Nova branch. If `SettingsApplied` ever stops
+  arriving after a Settings change, this is the first thing to check.
+- **Turn events stay internal.** Flux's `TurnInfo` / `StartOfTurn` /
+  `EndOfTurn` belong to `/v2/listen`. Inside the Agent API they are consumed by
+  the orchestrator and are *not* surfaced to the client, so the event decoding in
+  `dg_agent.c` is unchanged. `UserStartedSpeaking` still fires — verified on
+  hardware, and it matters because the barge-in path depends on it.
+
+`CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD` and `CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS`
+tune turn detection; both are omitted from the message when left at their empty
+/ zero defaults, which lets the server choose. Start there.
+
+### Capture chunk size
+
+`CAPTURE_FRAMES` is 1280 — **80 ms** at 16 kHz, the chunk size Flux recommends.
+Besides matching the model, it cuts mic sends from ~31/s to ~12.5/s, which
+directly reduces the write pressure behind the reconnect failure described
+below. Cost is ~4.6 kB more internal RAM for the capture buffers.
+
+One side effect: the spectrum ring's *mic* feed now arrives in 80 ms bursts
+against a 32 ms FFT hop, so the mic-driven ring updates a little lumpier.
+`spectrum_ui`'s `feed()` accumulates arbitrary chunk sizes so it stays correct,
+and agent-driven visuals are unaffected — those come off the playback tap.
+
 ## Speaker volume
 
 `AUDIO_OUT_VOLUME` is 100, and it is worth knowing what that does and does not

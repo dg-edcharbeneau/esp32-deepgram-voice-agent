@@ -24,6 +24,65 @@ menu "Deepgram Agent Device"
             Sent as "Authorization: Token <key>" on the WebSocket upgrade request.
             Create one at https://console.deepgram.com.
 
+    choice DEEPGRAM_SPEECH_STACK
+        prompt "Speech stack"
+        default SPEECH_STACK_FLUX
+        help
+            Which Deepgram STT and TTS models the Settings message asks for.
+
+            Both are selectable so the two stacks can be compared on one build.
+            The transport work in this project is sensitive to timing and write
+            cadence, so being able to fall back to the known-good stack without
+            editing code is worth keeping.
+
+        config SPEECH_STACK_FLUX
+            bool "Flux (conversational) -- flux-general-en + Flux TTS"
+            help
+                Deepgram's conversational stack. STT has model-integrated
+                end-of-turn detection instead of server-side VAD, and the TTS is
+                built to stream into an agent pipeline.
+
+                Both halves run at 16 kHz linear16, which is what makes this
+                usable here: the ES7210 and ES8311 share one duplex I2S and
+                cannot be clocked differently, so anything needing a second rate
+                would need resampling on-device.
+
+        config SPEECH_STACK_NOVA_AURA
+            bool "Nova-3 + Aura -- nova-3 + aura-2-thalia-en"
+            help
+                The previous stack. Keep for comparison.
+    endchoice
+
+    config DEEPGRAM_FLUX_VOICE
+        string "Flux TTS voice"
+        depends on SPEECH_STACK_FLUX
+        default "flux-kit-en"
+        help
+            One of the flux-<voice>-en models -- flux-kit-en, flux-hannah-en,
+            flux-haley-en, flux-cole-en and about thirty more. flux-kit-en is
+            what the Agent API picks when agent.speak is omitted entirely, so it
+            is the sensible default.
+
+    config DEEPGRAM_FLUX_EOT_THRESHOLD
+        string "Flux end-of-turn confidence threshold"
+        depends on SPEECH_STACK_FLUX
+        default ""
+        help
+            0.0-1.0, as a string (e.g. "0.7"). Higher waits for more confidence
+            before ending a turn: fewer interruptions, slower replies.
+
+            Leave empty to let the server choose, which is the right starting
+            point -- tune only after hearing the default behave badly.
+
+    config DEEPGRAM_FLUX_EOT_TIMEOUT_MS
+        int "Flux end-of-turn timeout (ms)"
+        depends on SPEECH_STACK_FLUX
+        default 0
+        range 0 10000
+        help
+            How long silence may run before a turn is force-ended. 0 omits the
+            field and uses the server default.
+
     config DEEPGRAM_AGENT_PROMPT
         string "Agent system prompt"
         default "You are a friendly assistant living inside a small ESP32 device. Keep every answer to one or two short sentences."
