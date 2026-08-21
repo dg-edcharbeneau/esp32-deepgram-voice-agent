@@ -1,0 +1,38 @@
+/*
+ * Start/stop control for the agent session.
+ *
+ * WHY A TASK
+ *
+ * Stopping is slow and blocking: closing the socket writes a CLOSE frame through
+ * mbedTLS, and if the press lands mid-handshake it waits out the client's
+ * network timeout. The gesture that triggers it arrives on the LVGL task, with
+ * the LVGL lock held -- blocking there stalls every render and invites lock
+ * inversion. And the WebSocket client refuses stop/close outright when called
+ * from its own event task. So the request is signalled, and a worker task
+ * pinned away from the audio core does the work.
+ *
+ * The input side is deliberately not part of this interface. Anything that can
+ * call toggle()/restart() works -- today it is a screen gesture, a GPIO button
+ * would be a couple of lines.
+ */
+#pragma once
+
+#include <stdbool.h>
+
+#include "esp_err.h"
+
+#include "dg_agent.h"
+
+/* Creates the worker task. Call after audio_io_init() and spectrum_ui_start().
+ * Does not open a session -- call session_ctl_request_start() for that. */
+esp_err_t session_ctl_start(const dg_agent_callbacks_t *callbacks);
+
+/* All non-blocking: they queue a request and return immediately. Safe from any
+ * task, including LVGL and WebSocket callbacks. */
+void session_ctl_request_start(void);
+void session_ctl_request_toggle(void);
+void session_ctl_request_restart(void);
+
+/* True while a session is meant to be up. Reflects intent, not connectivity --
+ * a session that is retrying its socket still counts as running. */
+bool session_ctl_is_running(void);

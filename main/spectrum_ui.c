@@ -42,7 +42,9 @@
 
 #include "bsp/display.h"
 #include "bsp/esp-bsp.h"
+#include "bsp/touch.h"
 #include "esp_lv_adapter.h"
+#include "esp_lv_adapter_input.h"
 
 #include "audio_io.h"
 #include "spectrum_ui.h"
@@ -81,6 +83,15 @@ static const char *TAG = "spectrum_ui";
 
 /* Frames per breath while idle -- 3 s in, 3 s out at FRAME_MS. */
 #define BREATHE_FRAMES 180
+
+/*
+ * The inner circle is the button. Touching anywhere else does nothing.
+ *
+ * Matches the inner ring arc drawn at R_INNER - 10, so the affordance on screen
+ * is exactly the hit area. The whole 466x466 screen used to be live, which made
+ * brushing the bezel enough to end a conversation.
+ */
+#define BUTTON_RADIUS (R_INNER - 10)
 
 /* Rows per LVGL render chunk, in internal RAM: 466 * rows * 2 bytes. Must stay
  * small enough that the SPI driver can allocate a DMA buffer of the same size,
@@ -140,6 +151,12 @@ static lv_color_t band_color_mic[STRIPE_COUNT];
 static lv_obj_t *canvas_obj;
 static lv_obj_t *status_label;
 static uint32_t s_frame;
+static lv_indev_t *s_touch;
+static void (*s_gesture_handler)(spectrum_ui_gesture_t gesture);
+static volatile bool s_stopped;
+/* Both LVGL-task only. Separate flags on purpose -- see gesture_event_cb. */
+static bool s_press_in_button;  /* gate: did this press start on the button? */
+static bool s_press_active;     /* visual: is a finger down on it right now? */
 
 /* Map a ring position to an analysis band, mirroring the second half back over
  * the first so the left and right sides match. */
@@ -201,6 +218,16 @@ void spectrum_ui_feed_mic(const int16_t *mono, size_t samples)
         return;
     }
     feed(mono, samples, SRC_MIC);
+}
+
+void spectrum_ui_set_gesture_handler(void (*handler)(spectrum_ui_gesture_t gesture))
+{
+    s_gesture_handler = handler;
+}
+
+void spectrum_ui_set_stopped(bool stopped)
+{
+    s_stopped = stopped;
 }
 
 void spectrum_ui_set_status(const char *text, bool session_live)
@@ -281,7 +308,11 @@ static void render_ring(bool idle, viz_source_t src)
      * breathes while nothing is. It is drawn every frame either way, so the
      * idle animation is free -- no lv_anim, no extra draw call. */
     lv_color_t ring_color = lv_color_hex(0x202020);
-    if (idle) {
+    if (s_press_active) {
+        /* The button has no other affordance, and a press that lands during the
+         * cooldown does nothing -- so show that the touch itself registered. */
+        ring_color = lv_color_hex(0x8ad4e8);
+    } else if (idle && !s_stopped) {
         float phase = (float)(s_frame % BREATHE_FRAMES) / BREATHE_FRAMES;
         float amp = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * phase);
         ring_color = lv_color_mix(lv_color_hex(0x1e5a6e), ring_color,
@@ -405,6 +436,71 @@ static void frame_timer_cb(lv_timer_t *timer)
 
 /* ---------------- setup ---------------- */
 
+/*
+ * SHORT_CLICKED and LONG_PRESSED, never CLICKED: CLICKED is sent on release
+ * regardless of long press, so pairing it with LONG_PRESSED would fire the tap
+ * action on every hold too. SHORT_CLICKED is emitted only when LVGL's
+ * long_pr_sent flag is clear -- the same flag LONG_PRESSED sets -- which makes
+ * the two gestures mutually exclusive by construction.
+ *
+ * The hit area is decided once, on PRESSED, and both gestures are gated on that
+ * decision. Testing the point at release instead would let a press that started
+ * on the bezel drift into the circle and count -- and LONG_PRESSED has no
+ * release point to test at all.
+ *
+ * Runs on the LVGL task holding the LVGL lock, so the handler only signals.
+ */
+static bool press_is_in_button(lv_event_t *e)
+{
+    lv_indev_t *indev = lv_event_get_indev(e);
+    if (indev == NULL) {
+        return false;
+    }
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    int32_t dx = p.x - CENTER_X;
+    int32_t dy = p.y - CENTER_Y;
+    return (dx * dx + dy * dy) <= (BUTTON_RADIUS * BUTTON_RADIUS);
+}
+
+static void gesture_event_cb(lv_event_t *e)
+{
+    switch (lv_event_get_code(e)) {
+    case LV_EVENT_PRESSED:
+        s_press_in_button = press_is_in_button(e);
+        s_press_active = s_press_in_button;
+        break;
+
+    case LV_EVENT_RELEASED:
+    case LV_EVENT_PRESS_LOST:
+        /*
+         * Only the highlight is cleared here. s_press_in_button must survive:
+         * LVGL sends RELEASED *before* SHORT_CLICKED (lv_indev.c, RELEASED at
+         * the top of indev_proc_release and the click events below it), so
+         * clearing the gate here would make every tap a no-op. It is set fresh
+         * on the next PRESSED, so leaving it set costs nothing.
+         */
+        s_press_active = false;
+        break;
+
+    case LV_EVENT_SHORT_CLICKED:
+        if (s_press_in_button && s_gesture_handler) {
+            s_gesture_handler(SPECTRUM_UI_TAP);
+        }
+        break;
+
+    case LV_EVENT_LONG_PRESSED:
+        if (s_press_in_button && s_gesture_handler) {
+            s_gesture_handler(SPECTRUM_UI_HOLD);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
 /* The CO5300 only accepts even start / odd end coordinates. bsp_display_start()
  * installs this; since we register the display ourselves, we must too. */
 static void rounder_event_cb(lv_event_t *e)
@@ -464,6 +560,32 @@ static lv_display_t *display_start(void)
         return NULL;
     }
     lv_display_add_event_cb(disp, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+
+    /*
+     * Touch, in the same slot bsp_display_start() uses. Only touch_flags is read
+     * out of this struct, and these three values are the ones the BSP pairs with
+     * a ROTATE_0 display -- they have to match or the axes come out wrong.
+     *
+     * bsp_touch_new() calls bsp_i2c_init() itself, which is already done by
+     * audio_io_init(). That is safe here, unlike the bsp_audio_init() trap: this
+     * guard tests the flag the same function sets, so the second call is a plain
+     * no-op returning the existing bus.
+     */
+    static esp_lcd_touch_handle_t tp;
+    bsp_display_cfg_t touch_cfg = {
+        .touch_flags = { .swap_xy = 0, .mirror_x = 1, .mirror_y = 1 },
+    };
+    if (bsp_touch_new(&touch_cfg, &tp) != ESP_OK) {
+        return NULL;
+    }
+    const esp_lv_adapter_touch_config_t tcfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, tp);
+    s_touch = esp_lv_adapter_register_touch(&tcfg);
+    if (s_touch == NULL) {
+        return NULL;
+    }
+    /* LVGL defaults to 400 ms, which is well inside an ordinary tap. A restart
+     * is destructive enough to want a deliberate hold. */
+    lv_indev_set_long_press_time(s_touch, 1000);
 
     /* Must follow bsp_display_new() -- brightness is a panel command over the
      * same io -- and precede the first flush. It sets full brightness itself. */
@@ -551,6 +673,19 @@ static esp_err_t build_ui(void)
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_24, LV_PART_MAIN);
     lv_obj_set_style_text_color(status_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_center(status_label);
+
+    /*
+     * The screen, not the canvas. lv_canvas derives from lv_image, whose
+     * constructor removes LV_OBJ_FLAG_CLICKABLE, and a non-clickable object is
+     * transparent to hit-testing rather than a blocker -- so a touch falls
+     * through the full-screen canvas and the label to the screen, which is
+     * clickable by default. The remove_flag(SCROLLABLE) above is load bearing
+     * too: LVGL suppresses LONG_PRESSED while a scroll object is latched.
+     */
+    lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     lv_timer_create(frame_timer_cb, FRAME_MS, NULL);
     return ESP_OK;

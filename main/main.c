@@ -31,6 +31,7 @@
 
 #include "audio_io.h"
 #include "dg_agent.h"
+#include "session_ctl.h"
 #include "spectrum_ui.h"
 #include "wifi_sta.h"
 
@@ -57,6 +58,12 @@ static const char *state_name(dg_agent_state_t state)
 static void on_state(dg_agent_state_t state, void *ctx)
 {
     ESP_LOGI(TAG, "agent session %s", state_name(state));
+    if (state == DG_AGENT_CONNECTED) {
+        /* A new socket is a new conversation, so the status line should describe
+         * this one rather than every session since boot. */
+        s_audio_bytes = 0;
+        s_turns = 0;
+    }
     /* Runs on the WebSocket task, so this must not touch LVGL -- it stores the
      * literal and the frame timer picks it up. */
     spectrum_ui_set_status(state_name(state), state == DG_AGENT_READY);
@@ -92,6 +99,28 @@ static void on_agent_audio_done(void *ctx)
     ESP_LOGI(TAG, "turn complete, %" PRIu32 " audio bytes received", s_audio_bytes);
 }
 
+/* Runs on the LVGL task with the LVGL lock held: signal only, never block. */
+static void on_gesture(spectrum_ui_gesture_t gesture)
+{
+    switch (gesture) {
+    case SPECTRUM_UI_TAP:
+        session_ctl_request_toggle();
+        break;
+    case SPECTRUM_UI_HOLD:
+        session_ctl_request_restart();
+        break;
+    }
+}
+
+/* File scope so session_ctl can reopen a session with the same callbacks. */
+static const dg_agent_callbacks_t s_callbacks = {
+    .on_state = on_state,
+    .on_conversation_text = on_conversation_text,
+    .on_audio = on_audio,
+    .on_agent_audio_done = on_agent_audio_done,
+    .on_user_started_speaking = on_user_started_speaking,
+};
+
 void app_main(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -115,31 +144,37 @@ void app_main(void)
     if (spectrum_ui_start() == ESP_OK) {
         audio_io_set_playback_tap(spectrum_ui_feed_agent);
         audio_io_set_capture_tap(spectrum_ui_feed_mic);
+        spectrum_ui_set_gesture_handler(on_gesture);
     } else {
         /* A dark screen is not a reason to give up the voice loop. */
         ESP_LOGW(TAG, "spectrum display unavailable, continuing headless");
     }
 
+    /*
+     * Capture before the session, and gated until one opens. The task cannot be
+     * created twice, so it has to outlive any individual session -- see
+     * audio_io_capture_set_enabled().
+     */
+    audio_io_capture_set_enabled(false);
+    ESP_ERROR_CHECK(audio_io_capture_start(mic_to_agent));
+
+    ESP_ERROR_CHECK(session_ctl_start(&s_callbacks));
+
     err = wifi_sta_wait_connected(WIFI_CONNECT_TIMEOUT_MS);
     if (err != ESP_OK) {
+        /*
+         * Not fatal any more. Returning here would leave a device with a live
+         * screen and no way to retry; the status loop and the touch handler stay
+         * up instead, so a long press can start a session once the network is
+         * back.
+         */
         ESP_LOGE(TAG, "no network (%s) -- check SSID/password in menuconfig",
                  esp_err_to_name(err));
+        spectrum_ui_set_stopped(true);
         spectrum_ui_set_status("no network", false);
-        return;
+    } else {
+        session_ctl_request_start();
     }
-
-    const dg_agent_callbacks_t callbacks = {
-        .on_state = on_state,
-        .on_conversation_text = on_conversation_text,
-        .on_audio = on_audio,
-        .on_agent_audio_done = on_agent_audio_done,
-        .on_user_started_speaking = on_user_started_speaking,
-    };
-    ESP_ERROR_CHECK(dg_agent_start(&callbacks));
-
-    /* Capture last: the sink drops audio until the session reports ready, so
-     * nothing is lost by starting it here rather than earlier. */
-    ESP_ERROR_CHECK(audio_io_capture_start(mic_to_agent));
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
@@ -155,7 +190,8 @@ void app_main(void)
         ESP_LOGI(TAG, "%s | turns=%" PRIu32 " mic=%" PRIu32 " B rx=%" PRIu32
                       " B played=%" PRIu32 " B dropped=%" PRIu32
                       " B | heap=%" PRIu32 " B internal=%u B (largest %u B)",
-                 dg_agent_is_ready() ? "ready" : "not ready",
+                 !session_ctl_is_running() ? "stopped"
+                     : dg_agent_is_ready() ? "ready" : "not ready",
                  s_turns, captured, s_audio_bytes, played, dropped,
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

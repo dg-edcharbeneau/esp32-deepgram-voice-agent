@@ -24,9 +24,29 @@
 
 #include "esp_err.h"
 
-/* Brings up the panel, registers it with LVGL, and starts the frame timer.
- * Blocks ~1.2 s in the CO5300 reset sequence. */
+/* Brings up the panel and the touch panel, registers both with LVGL, and starts
+ * the frame timer. Blocks ~1.2 s in the CO5300 reset sequence. */
 esp_err_t spectrum_ui_start(void);
+
+typedef enum {
+    SPECTRUM_UI_TAP,  /* short press: toggle */
+    SPECTRUM_UI_HOLD, /* long press: force restart */
+} spectrum_ui_gesture_t;
+
+/*
+ * Screen gestures. The handler runs on the LVGL task with the LVGL lock held,
+ * so it must not block -- signal another task and return.
+ */
+void spectrum_ui_set_gesture_handler(void (*handler)(spectrum_ui_gesture_t gesture));
+
+/*
+ * Freeze the idle animation.
+ *
+ * Distinct from spectrum_ui_set_status(..., false): the session is also "not
+ * live" while connecting, where the ring should keep breathing. This is only for
+ * a device that has been deliberately stopped, and dims the ring to a constant.
+ */
+void spectrum_ui_set_stopped(bool stopped);
 
 /* audio_io_tap_t-compatible. Agent audio wins when both are active. */
 void spectrum_ui_feed_agent(const int16_t *mono, size_t samples);

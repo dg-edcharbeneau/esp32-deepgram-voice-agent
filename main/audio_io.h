@@ -71,6 +71,28 @@ void audio_io_set_capture_tap(audio_io_tap_t tap);
 /* Drop everything queued -- used for barge-in. */
 void audio_io_flush(void);
 
+/*
+ * Stop or resume streaming captured audio.
+ *
+ * The capture task keeps reading the codec either way -- the ES7210 is clocked
+ * by the shared duplex I2S regardless, so stopping the read would only overflow
+ * the RX descriptor ring and produce a stale burst on resume. What this gates is
+ * everything downstream: the sink and the tap both stop, so the device goes
+ * quiet on the network and the visualizer stops reacting to the room.
+ */
+void audio_io_capture_set_enabled(bool enabled);
+
+/*
+ * Clear producer-side state between sessions.
+ *
+ * audio_io_flush() only empties the ring; it cannot touch the odd-byte carry,
+ * which lives on the WebSocket task. Left set, that byte is stitched onto the
+ * first byte of the *next* session and shifts every sample after it by 8 bits --
+ * the permanent full-scale noise described at the top of audio_io.c, not a
+ * click. Call this once the WebSocket task is known to be idle.
+ */
+void audio_io_reset(void);
+
 /* True while agent audio is playing or has only just stopped. */
 bool audio_io_playback_active(void);
 

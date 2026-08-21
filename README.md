@@ -94,6 +94,128 @@ C library allocator (its builtin one emits a 64 kB internal array), and the FFT
 scratch lives in PSRAM. If largest-block sags towards 40 kB, cut `DRAW_ROWS` in
 [main/spectrum_ui.c](main/spectrum_ui.c) before tuning anything else.
 
+## Ending and starting a conversation
+
+The **inner circle** is the control — the same circle the ring is drawn around,
+about 70 px in radius. **Tap** it to toggle: end the current conversation, or
+open a new one. **Hold it for a second** to force a restart from either state,
+for when a session is up but wedged. It lights up cyan while your finger is on
+it, since a press that lands during the cooldown otherwise gives no sign it was
+seen. Touches outside the circle are ignored — the whole panel used to be live,
+and brushing the bezel was enough to end a conversation.
+
+There is also a **1.5 s cooldown** after each action completes, and requests are
+refused outright while one is in progress rather than queued. Queueing was the
+old behaviour and it was worse than useless: `eSetValueWithOverwrite` collapsed a
+flurry of presses into one *extra* toggle that landed after the current one
+finished. Ignored presses are logged (`request ignored (busy|cooldown)`).
+
+The hit area is decided once, on `LV_EVENT_PRESSED`, and both gestures are gated
+on that decision — testing at release would let a press that started on the bezel
+drift inward and count, and `LONG_PRESSED` has no release point to test. Note
+that the gate flag must **not** be cleared on `LV_EVENT_RELEASED`: LVGL sends
+RELEASED *before* SHORT_CLICKED (`lv_indev.c`, `indev_proc_release`), so clearing
+it there makes every tap a silent no-op. Only the highlight is cleared on
+release.
+
+Ending is a real teardown — the socket closes, the mic stops streaming, and
+queued speech is dropped, so the agent goes quiet within about 100 ms rather than
+playing out its buffer. Starting again opens a *new* Deepgram session, so the
+agent has no memory of the previous conversation and re-speaks its greeting.
+While stopped the bars sit flat, the idle breathing stops, and the centre reads
+`stopped`.
+
+The board's second physical button would have been the obvious control, but its
+GPIO is not stated anywhere in the BSP (`BSP_CAPS_BUTTONS 0`), its Kconfig, or its
+README — the only evidence it exists at all is a string in the factory firmware.
+Rather than commit to a guessed pin, this uses the CST9217 touch panel, which the
+BSP already supports. [main/session_ctl.c](main/session_ctl.c) takes plain
+`toggle()` / `restart()` requests, so wiring a GPIO button alongside the gestures
+is a few lines once the pin is known.
+
+**The gestures must be `LV_EVENT_SHORT_CLICKED` and `LV_EVENT_LONG_PRESSED`.**
+`LV_EVENT_CLICKED` is sent on release *regardless of long press*, so pairing it
+with `LONG_PRESSED` fires the tap action on every hold too. `SHORT_CLICKED` is
+emitted only when LVGL's `long_pr_sent` flag is clear — the same flag
+`LONG_PRESSED` sets — which makes the two mutually exclusive by construction.
+
+### Why a control task rather than doing it in the callback
+
+Three separate reasons, any one of which is sufficient:
+
+- The gesture arrives on the **LVGL task with the LVGL lock held**. Closing a
+  socket there stalls every render and invites lock inversion.
+- `esp_websocket_client_stop/close/destroy` **refuse to run from the client's own
+  event task** — they compare the calling task handle and return `ESP_FAIL`. So a
+  teardown triggered by a server event has to be handed off regardless.
+- Stopping blocks. Typically 150–400 ms, but `esp_transport_connect()` runs
+  holding the client's mutex, so a stop that lands mid-handshake waits out
+  `network_timeout_ms`. That is why it was lowered to 5 s, and why `stopping` is
+  painted before the blocking work starts.
+
+The worker runs at priority 4 pinned to **core 0** — off the core the audio tasks
+live on, and far below Wi-Fi (23), lwIP (18) and esp_timer (22).
+
+### Why the session restarts in place
+
+`dg_agent_stop()` closes the socket but keeps the client handle;
+`dg_agent_init()` is the one-time setup and registers the event handler exactly
+once. Destroying and rebuilding the client per session would be the obvious
+alternative, and it is a trap: it leaves `s_client` dangling against the
+priority-7 capture task, and the natural fix — a transmit mutex — **deadlocks**.
+This build has no separate WS transmit lock, so sends take the same recursive
+mutex the WebSocket task holds across its loop. A lock ordered outside it gives
+you the control task holding ours and waiting on the client's, while the client
+task holds its own and waits on ours via `send_settings()`. It hangs permanently
+and silently, since neither party spins and only the idle tasks are watchdogged.
+
+Restarting in place costs ~8–10 kB kept allocated while stopped and removes the
+entire dangling-pointer surface. The client re-initialises its transport list on
+every start, so a new session really is new.
+
+### The carry byte, again
+
+`audio_io_flush()` empties the playback ring but cannot touch the odd-byte carry
+(`s_in_carry`), which is owned by the WebSocket task. Stop a session with a byte
+in flight and it gets stitched onto the first byte of the *next* session,
+shifting every following sample by 8 bits — the permanent full-scale noise
+described in the audio section below, not a click. `audio_io_reset()` clears it,
+and must run *after* `dg_agent_stop()` has brought the WebSocket task to a halt.
+If a restarted session ever comes back as loud static, that is the first thing to
+check.
+
+## Speaker volume
+
+`AUDIO_OUT_VOLUME` is 100, and it is worth knowing what that does and does not
+mean.
+
+`esp_codec_dev`'s default volume curve maps 0-100 onto **-50 dB to 0 dB**, so 100
+is unity gain, not the loudest the hardware goes. The value then passes through
+`hw_gain` = `20*log10(codec_dac_voltage / pa_voltage)` = `20*log10(3.3/5.0)` =
+**-3.6 dB**, which `es8311_set_vol()` *subtracts*, and lands in the ES8311's DAC
+volume register — whose range is **-95.5 dB to +32 dB**. So volume 100 puts the
+register at roughly 198 of 255, leaving about 28 dB unused.
+
+`AUDIO_OUT_EXTRA_GAIN_DB` (default 0) opens that up by installing a volume curve
+whose top point is above 0 dB instead of at it. It is digital gain on the PCM, so
+it clips: speech has a high crest factor and takes a few dB happily, but past
+that the loud passages distort before the quiet ones get usefully louder. Raise
+it in ~6 dB steps and stop at the first hint of harshness.
+
+Two ordering notes, both easy to get wrong:
+
+- `esp_codec_dev_set_out_vol()` **must be called after the codec is open**. It
+  runs `_verify_codec_ready()` first and returns without storing anything if the
+  codec is closed, so a call placed too early is silently discarded and the
+  device runs at `dev->volume`, which `calloc` left at 0. It works here only
+  because `es8311_codec_new()` opens the codec itself, before
+  `bsp_audio_codec_speaker_init()` returns.
+- `esp_codec_dev_set_vol_curve()` must precede `esp_codec_dev_set_out_vol()`,
+  since the curve is what converts the number into dB.
+
+The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
+(+0 dB), mic gain 24 dB`.
+
 ## Configure and build
 
 Credentials live in Kconfig, not in source, and `sdkconfig` is gitignored.
@@ -119,6 +241,7 @@ same monitor command works for both projects.
 | [main/dg_agent.c](main/dg_agent.c) | Agent API client: `Settings`, event decoding, KeepAlive |
 | [main/audio_io.c](main/audio_io.c) | both codecs: ES7210 capture, ES8311 playback, mono↔stereo, gating |
 | [main/spectrum_ui.c](main/spectrum_ui.c) | radial FFT display: panel bring-up, sample handoff, ring render |
+| [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
 | [main/Kconfig.projbuild](main/Kconfig.projbuild) | SSID / password / API key / prompt / greeting |
 | [sdkconfig.defaults](sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
 | [components/tcp_transport/](components/tcp_transport/) | one-line override of IDF's WS handshake — see below |
@@ -136,6 +259,81 @@ same monitor command works for both projects.
 - **Text frames get reassembled.** `esp_websocket_client` delivers at most
   `buffer_size` bytes per event, so a long `ConversationText` arrives in
   slices. Parsing each slice alone silently loses every long message.
+
+## Trap: a short send timeout silently kills the session
+
+Symptom: the agent re-speaks its greeting every few seconds. The greeting is only
+spoken once per session, on `SettingsApplied`, so a repeated greeting always
+means the socket dropped and the client reconnected into a **new** session —
+never that something "triggered" the agent. `SettingsApplied` is logged with a
+session number so this is unambiguous:
+
+```
+E websocket_client: esp_transport_write() returned 0, transport_error=ESP_OK, tls_error_code=0, tls_flags=0, errno=0
+I websocket_client: Reconnect after 5000 ms
+I dg_agent: SettingsApplied -- session #2 is live
+I dg_agent: assistant: Hi! I am running on an ESP32. ...
+```
+
+The cause is that **`esp_transport_ssl_write()` returns `0`, not an error, when
+its write poll times out** (`transport_ssl.c`: `if ((poll =
+esp_transport_poll_write(t, timeout_ms)) <= 0) return poll;`). The WebSocket
+client treats a zero-length write as fatal — `if (wlen < 0 || (wlen == 0 &&
+need_write != 0))` — and tears the connection down. Note the giveaway in the
+message: `transport_error=ESP_OK`, `tls_error_code=0`, `errno=0`. Nothing
+actually failed. The socket just wasn't writable in time.
+
+Mic audio is sent 31 times a second from the capture task, so it is by far the
+most likely write to hit that poll, and it is the one whose timeout matters. A
+200 ms deadline — which looks reasonable, since blocking the priority-7 capture
+task stalls `esp_codec_dev_read()` — dropped the session every few seconds. At
+`SEND_TIMEOUT` (2 s) the same setup runs indefinitely: measured 150 s, one
+session, `dropped=0`, 3.3 MB of mic audio streamed.
+
+So the trade is not "one lost 32 ms chunk vs. a 2 s stall". It is "one lost chunk
+vs. the entire conversation". If capture stalls ever do become a real problem,
+the fix is to move the send off the capture task onto its own queue and sender —
+not to shorten the timeout.
+
+### The other half: the TCP send buffer
+
+A generous timeout only helps if the socket becomes writable again inside it.
+With the stock send buffer it did not, and the same reconnect loop came back at
+a lower rate — this time with the poll genuinely timing out after the full 2 s:
+
+```
+E transport_ws: Error transport_poll_write(0)
+```
+
+The buffers here were asymmetric. `CONFIG_LWIP_TCP_WND_DEFAULT` had been raised
+to 32768 for the inbound agent audio, but `CONFIG_LWIP_TCP_SND_BUF_DEFAULT` was
+left at the stock **5760** — four times MSS. Against a *continuous* 32 kB/s
+upstream mic stream that is **180 ms** of audio. One Wi-Fi retransmission burst
+longer than that fills it, the socket reports unwritable, and the session dies.
+
+`CONFIG_LWIP_TCP_SND_BUF_DEFAULT=23040` (16 x MSS, ~700 ms) fixes it. It is a
+ceiling rather than a preallocation, so the memory is only consumed when the
+link is actually backed up — internal free dips briefly under load and recovers.
+
+Measured on the same AP at RSSI -68:
+
+| | sessions in ~2-4 min | poll-write timeouts |
+|---|---|---|
+| 200 ms send timeout, 5760 send buffer | 6 in 120 s | many |
+| 2 s send timeout, 5760 send buffer | 2 in 40 s | occasional |
+| 2 s send timeout, 23040 send buffer | **1 in 240 s** | **0** |
+
+The lesson generalises: any continuous uplink on this device needs the send
+buffer sized to it. Raising only the receive window is half a fix.
+
+### It is not the microphone
+
+Worth stating because it is the intuitive suspect: a hot mic feeding background
+noise to Deepgram cannot produce the greeting. It would produce
+`ConversationText` with `role: "user"` and then an LLM-generated reply, which
+would be logged as `user: ...` / `assistant: ...`. In 150 s of a quiet room there
+were **no `user:` lines at all**, and idle mic peaks sit around 20-30 against
+1200-2200 for speech — a healthy ratio at `MIC_IN_GAIN=24`.
 
 ## Known issue: ESP-IDF's `Host` header vs. the Agent endpoint
 

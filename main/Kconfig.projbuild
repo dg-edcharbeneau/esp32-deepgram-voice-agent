@@ -38,8 +38,30 @@ menu "Deepgram Agent Device"
 
     config AUDIO_OUT_VOLUME
         int "Speaker volume (0-100)"
-        default 80
+        default 100
         range 0 100
+        help
+            Beware what "100" means: esp_codec_dev's default volume curve maps
+            0-100 onto -50 dB to 0 dB, so 100 is unity gain, NOT the loudest the
+            hardware goes. The ES8311's DAC volume register reaches +32 dB. If
+            100 is still too quiet, that headroom is what
+            AUDIO_OUT_EXTRA_GAIN_DB opens up.
+
+    config AUDIO_OUT_EXTRA_GAIN_DB
+        int "Extra speaker gain above unity (dB)"
+        default 0
+        range 0 24
+        help
+            Replaces the default volume curve so that AUDIO_OUT_VOLUME=100 maps
+            to this many dB instead of 0 dB, reaching into the ES8311's +32 dB
+            range.
+
+            This is digital gain applied to the PCM, so it clips: speech has a
+            high crest factor and survives a few dB, but push far enough and
+            loud passages distort before quiet ones get usefully louder. Raise
+            it in ~6 dB steps and stop at the first sign of harshness.
+
+            0 keeps the stock curve.
 
     config MIC_IN_GAIN
         int "Microphone ADC gain (dB)"

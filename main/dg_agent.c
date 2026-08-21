@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,10 +30,27 @@ static const char *TAG = "dg_agent";
 
 #define SEND_TIMEOUT pdMS_TO_TICKS(2000)
 
+/*
+ * Mic audio uses the same deadline as everything else, and it must stay
+ * generous. A short one looks attractive -- this send runs on the priority-7
+ * capture task, so blocking stalls esp_codec_dev_read() -- but it is a trap:
+ * esp_transport_ssl_write() returns 0 when its write poll times out, and the
+ * WebSocket client treats a zero-length write as fatal and tears the session
+ * down. At 31 sends a second over a link that is also carrying TTS audio down,
+ * a 200 ms deadline dropped the session every few seconds and the agent
+ * re-greeted on every reconnect.
+ *
+ * So the cost of being impatient here is the whole conversation, not one 32 ms
+ * chunk. If capture stalls become a real problem, the fix is to move the send
+ * off the capture task, not to shorten this.
+ */
+#define AUDIO_SEND_TIMEOUT SEND_TIMEOUT
+
 static esp_websocket_client_handle_t s_client;
 static dg_agent_callbacks_t s_cb;
 static volatile bool s_ready;
 static TaskHandle_t s_keepalive_task;
+static volatile bool s_suppress_state;
 
 /* Reassembly buffer for JSON messages split across several DATA events. */
 static char *s_json;
@@ -41,9 +59,16 @@ static int s_json_len;
 static void set_state(dg_agent_state_t state)
 {
     s_ready = (state == DG_AGENT_READY);
-    if (s_cb.on_state) {
+    /* s_ready still tracks reality while suppressed -- only the notification is
+     * withheld, so nothing starts sending audio into a closing socket. */
+    if (s_cb.on_state && !s_suppress_state) {
         s_cb.on_state(state, s_cb.ctx);
     }
+}
+
+void dg_agent_suppress_state_events(bool suppress)
+{
+    s_suppress_state = suppress;
 }
 
 static esp_err_t send_json(cJSON *root, const char *what)
@@ -143,7 +168,10 @@ static void handle_json(const char *json, int len)
                  cJSON_IsString(rid) ? rid->valuestring : "?");
 
     } else if (strcmp(t, "SettingsApplied") == 0) {
-        ESP_LOGI(TAG, "SettingsApplied -- session is live");
+        static uint32_t sessions;
+        /* Numbered: the greeting is spoken once per session, so a greeting you
+         * did not ask for always has a new number in front of it. */
+        ESP_LOGI(TAG, "SettingsApplied -- session #%" PRIu32 " is live", ++sessions);
         set_state(DG_AGENT_READY);
 
     } else if (strcmp(t, "ConversationText") == 0) {
@@ -246,10 +274,13 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
         break;
 
     case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGE(TAG, "transport error: tls=%d handshake_status=%d errno=%d",
-                 ev->error_handle.esp_tls_last_esp_err,
-                 ev->error_handle.esp_ws_handshake_status_code,
-                 ev->error_handle.esp_transport_sock_errno);
+        /*
+         * The client formats a human-readable reason into the event *data* and
+         * only fills error_handle for handshake failures -- reading the handle
+         * here printed uninitialised numbers and hid the actual cause.
+         */
+        ESP_LOGE(TAG, "transport error: %.*s",
+                 ev->data_len, ev->data_ptr ? ev->data_ptr : "(no detail)");
         set_state(DG_AGENT_ERROR);
         break;
 
@@ -275,22 +306,24 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
  */
 static void keepalive_task(void *arg)
 {
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "KeepAlive");
-    char *text = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
+    /* A constant string, so there is nothing to build and nothing to free. The
+     * task outlives any one session: while stopped the guard below simply fails
+     * and it goes back to sleep, which is why nothing has to join or delete it
+     * on the teardown path. */
+    static const char KEEPALIVE[] = "{\"type\":\"KeepAlive\"}";
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(KEEPALIVE_PERIOD_MS));
         if (s_ready && esp_websocket_client_is_connected(s_client)) {
-            esp_websocket_client_send_text(s_client, text, strlen(text), SEND_TIMEOUT);
+            esp_websocket_client_send_text(s_client, KEEPALIVE, sizeof(KEEPALIVE) - 1,
+                                           SEND_TIMEOUT);
         }
     }
 }
 
 /* ---------------- public API ---------------- */
 
-esp_err_t dg_agent_start(const dg_agent_callbacks_t *callbacks)
+esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
 {
     if (strlen(CONFIG_DEEPGRAM_API_KEY) == 0) {
         ESP_LOGE(TAG, "CONFIG_DEEPGRAM_API_KEY is empty -- run `idf.py menuconfig`");
@@ -299,7 +332,6 @@ esp_err_t dg_agent_start(const dg_agent_callbacks_t *callbacks)
     if (s_client != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-
     if (callbacks != NULL) {
         s_cb = *callbacks;
     }
@@ -319,7 +351,13 @@ esp_err_t dg_agent_start(const dg_agent_callbacks_t *callbacks)
          * 4 kB default. */
         .task_stack = 6144,
         .reconnect_timeout_ms = 5000,
-        .network_timeout_ms = 10000,
+        /*
+         * esp_transport_connect() runs holding the client's own mutex, so this
+         * is also the worst-case wait for a stop that lands mid-handshake. Ten
+         * seconds of an unresponsive UI is too long now that stopping is a
+         * gesture rather than a reboot.
+         */
+        .network_timeout_ms = 5000,
         .disable_auto_reconnect = false,
     };
 
@@ -330,12 +368,18 @@ esp_err_t dg_agent_start(const dg_agent_callbacks_t *callbacks)
         return ESP_FAIL;
     }
 
-    ESP_ERROR_CHECK(esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY,
-                                                 on_ws_event, NULL));
-
-    ESP_LOGI(TAG, "connecting to %s", DG_AGENT_URI);
-    esp_err_t err = esp_websocket_client_start(s_client);
+    /*
+     * Exactly once, for the life of the process. Registering per session would
+     * stack duplicate handlers and fire every callback N times.
+     */
+    esp_err_t err = esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY,
+                                                  on_ws_event, NULL);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "event registration failed: %s", esp_err_to_name(err));
+        esp_websocket_client_destroy(s_client);
+        s_client = NULL;
+        free(s_json);
+        s_json = NULL;
         return err;
     }
 
@@ -345,25 +389,45 @@ esp_err_t dg_agent_start(const dg_agent_callbacks_t *callbacks)
     return ESP_OK;
 }
 
+esp_err_t dg_agent_start(void)
+{
+    if (s_client == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Stale bytes from a message that was cut off by the previous teardown. */
+    s_json_len = 0;
+
+    ESP_LOGI(TAG, "connecting to %s", DG_AGENT_URI);
+    esp_err_t err = esp_websocket_client_start(s_client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "client start failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 esp_err_t dg_agent_stop(void)
 {
     if (s_client == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (s_keepalive_task != NULL) {
-        vTaskDelete(s_keepalive_task);
-        s_keepalive_task = NULL;
-    }
-
     s_ready = false;
-    esp_websocket_client_close(s_client, portMAX_DELAY);
-    esp_websocket_client_destroy(s_client);
-    s_client = NULL;
 
-    free(s_json);
-    s_json = NULL;
-    s_json_len = 0;
+    /*
+     * The CLOSE frame is worth sending: Deepgram bills on session duration, and
+     * a half-open socket only finalises at the server's idle timeout. But only
+     * when connected -- otherwise close() is a guaranteed no-op that just logs
+     * an error. Neither call is checked: close() returns ESP_FAIL if the client
+     * is already down, and stop() returns ESP_FAIL when a successful close has
+     * already stopped the task. Both are expected, not failures.
+     */
+    if (esp_websocket_client_is_connected(s_client)) {
+        (void)esp_websocket_client_close(s_client, pdMS_TO_TICKS(1000));
+    }
+    (void)esp_websocket_client_stop(s_client);
+
+    ESP_LOGI(TAG, "session stopped");
     return ESP_OK;
 }
 
@@ -377,7 +441,8 @@ esp_err_t dg_agent_send_audio(const void *pcm, size_t len)
     if (!s_ready || len == 0) {
         return ESP_ERR_INVALID_STATE;
     }
-    int sent = esp_websocket_client_send_bin(s_client, (const char *)pcm, (int)len, SEND_TIMEOUT);
+    int sent = esp_websocket_client_send_bin(s_client, (const char *)pcm, (int)len,
+                                            AUDIO_SEND_TIMEOUT);
     return sent < 0 ? ESP_FAIL : ESP_OK;
 }
 

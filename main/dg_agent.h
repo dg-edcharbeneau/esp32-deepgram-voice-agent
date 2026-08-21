@@ -83,11 +83,43 @@ typedef struct {
 #define DG_AUDIO_ENCODING    "linear16"
 #define DG_AUDIO_SAMPLE_RATE 16000
 
-/* Opens the socket and starts the session. Returns as soon as the client task
- * is running; watch on_state (or dg_agent_is_ready) for progress. */
-esp_err_t dg_agent_start(const dg_agent_callbacks_t *callbacks);
+/*
+ * One-time setup: allocates the client and its reassembly buffer, registers the
+ * event handler, and starts the keepalive task. Call once at boot.
+ *
+ * Split from dg_agent_start() so that stopping and restarting a conversation
+ * reuses one long-lived client handle. That is a supported path -- the client
+ * re-initialises its transport list on every start -- and it means `s_client` is
+ * never dangling, which is what makes dg_agent_send_audio() safe to call from
+ * the capture task without a lock. Tearing the client down and rebuilding it per
+ * session would need one, and any lock ordered outside the client's own mutex
+ * deadlocks against the WebSocket task.
+ */
+esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks);
 
+/* Opens the socket and starts a session. Returns as soon as the client task is
+ * running; watch on_state (or dg_agent_is_ready) for progress. Safe to call
+ * again after dg_agent_stop() -- the new session is a genuinely new one, so the
+ * agent has no memory of the previous conversation. */
+esp_err_t dg_agent_start(void);
+
+/*
+ * Closes the session. The client handle survives for the next dg_agent_start().
+ *
+ * Do not call from a WebSocket callback: the client compares the calling task
+ * against its own and refuses. Hand the work to another task.
+ */
 esp_err_t dg_agent_stop(void);
+
+/*
+ * Silences on_state while a teardown is in progress.
+ *
+ * Closing the socket raises DISCONNECTED, which would otherwise overwrite a
+ * "stopping"/"stopped" message on the display with "disconnected". Keeping the
+ * suppression here rather than latching it in the caller puts the policy where
+ * the events are generated, and removes an ordering race between the two.
+ */
+void dg_agent_suppress_state_events(bool suppress);
 
 /* True once SettingsApplied has been received. */
 bool dg_agent_is_ready(void);

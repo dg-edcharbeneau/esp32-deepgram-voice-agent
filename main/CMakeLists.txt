@@ -5,6 +5,7 @@ idf_component_register(
         dg_agent.c
         audio_io.c
         spectrum_ui.c
+        session_ctl.c
     INCLUDE_DIRS .
     REQUIRES
         esp_wifi

@@ -48,6 +48,14 @@ CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
 CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=48
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+# The send side matters as much as the receive side here, and the stock 5760 is
+# only 4 x MSS -- 180 ms of the 32 kB/s mic stream. Once it fills, the socket
+# reports unwritable, esp_transport_ssl_write() returns 0 on the poll timeout,
+# and the WebSocket client treats that as fatal and reconnects (the agent then
+# re-greets). 23040 is 16 x MSS, ~700 ms of audio, so an ordinary Wi-Fi
+# retransmission burst no longer ends the session. It is a ceiling, not a
+# preallocation: the memory is only used when the link is actually backed up.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=23040
 
 # --- LVGL / display --------------------------------------------------------
 # CLIB malloc is not about the 434 kB canvas (those pixels are heap_caps_malloc'd

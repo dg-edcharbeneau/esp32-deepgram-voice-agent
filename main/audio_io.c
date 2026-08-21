@@ -56,6 +56,7 @@ static volatile uint32_t s_dropped;
 static volatile uint32_t s_captured;
 static volatile int64_t s_last_play_us;
 static volatile bool s_flush_pending;
+static volatile bool s_capture_enabled = true;
 static int s_rate;
 
 /*
@@ -222,7 +223,16 @@ static void capture_task(void *arg)
         }
 #endif
 
-        /* After the gate above, so the tap sees what actually goes upstream. */
+        /*
+         * Session gate. Ahead of the tap as well as the sink, so a stopped
+         * device neither streams nor visualizes the room -- a ring still
+         * dancing to background noise reads as broken, not as stopped.
+         */
+        if (!s_capture_enabled) {
+            continue;
+        }
+
+        /* After the gates above, so the tap sees what actually goes upstream. */
         if (s_cap_tap != NULL) {
             s_cap_tap(mono, CAPTURE_FRAMES);
         }
@@ -272,6 +282,30 @@ esp_err_t audio_io_init(int sample_rate)
         .bits_per_sample = CODEC_BITS,
     };
 
+#if CONFIG_AUDIO_OUT_EXTRA_GAIN_DB > 0
+    /*
+     * The stock curve tops out at unity, leaving most of the ES8311's +32 dB
+     * DAC range unused. Re-map the top of the scale before setting the volume.
+     * Only the top point moves: the bottom stays at -50 dB so the taper below
+     * full volume is unchanged.
+     */
+    esp_codec_dev_vol_map_t vol_map[2] = {
+        { .vol = 0,   .db_value = -50.0f },
+        { .vol = 100, .db_value = (float)CONFIG_AUDIO_OUT_EXTRA_GAIN_DB },
+    };
+    esp_codec_dev_vol_curve_t curve = { .vol_map = vol_map, .count = 2 };
+    int vol_err = esp_codec_dev_set_vol_curve(s_spk, &curve);
+    if (vol_err != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "volume curve rejected: %d", vol_err);
+    }
+#endif
+
+    /*
+     * Both of these must follow the codec _init() calls above, not precede
+     * them: esp_codec_dev_set_out_vol() checks that the codec is open and
+     * returns without storing anything if it is not. es8311_codec_new() opens
+     * it, so by here it is.
+     */
     esp_codec_dev_set_out_vol(s_spk, CONFIG_AUDIO_OUT_VOLUME);
     esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
 
@@ -298,9 +332,9 @@ esp_err_t audio_io_init(int sample_rate)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "codecs open: %d Hz, %d-bit, %d ch | volume %d, mic gain %d dB",
+    ESP_LOGI(TAG, "codecs open: %d Hz, %d-bit, %d ch | volume %d (+%d dB), mic gain %d dB",
              sample_rate, CODEC_BITS, CODEC_CHANNELS,
-             CONFIG_AUDIO_OUT_VOLUME, CONFIG_MIC_IN_GAIN);
+             CONFIG_AUDIO_OUT_VOLUME, CONFIG_AUDIO_OUT_EXTRA_GAIN_DB, CONFIG_MIC_IN_GAIN);
     return ESP_OK;
 }
 
@@ -412,6 +446,22 @@ void audio_io_flush(void)
     if (s_ring != NULL) {
         s_flush_pending = true;
     }
+}
+
+void audio_io_capture_set_enabled(bool enabled)
+{
+    s_capture_enabled = enabled;
+}
+
+void audio_io_reset(void)
+{
+    /* Safe only because the caller has already stopped the WebSocket task, which
+     * is the sole writer of the carry. */
+    s_in_carry_valid = false;
+    s_in_carry = 0;
+    s_played = 0;
+    s_dropped = 0;
+    s_captured = 0;
 }
 
 bool audio_io_playback_active(void)
