@@ -1,0 +1,400 @@
+#include <stdlib.h>
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "cJSON.h"
+#include "esp_crt_bundle.h"
+#include "esp_log.h"
+#include "esp_websocket_client.h"
+
+#include "dg_agent.h"
+
+static const char *TAG = "dg_agent";
+
+#define DG_AGENT_URI "wss://agent.deepgram.com/v1/agent/converse"
+
+/* Frames bigger than this are delivered to WEBSOCKET_EVENT_DATA in slices. */
+#define WS_RX_BUFFER      4096
+/* Ceiling on a reassembled JSON message. AgentThinking with a long chain of
+ * thought is the biggest thing the server sends; 8 kB has plenty of room. */
+#define JSON_REASSEMBLY_MAX 8192
+
+/* Deepgram closes an idle Agent socket after ~10 s of no audio. */
+#define KEEPALIVE_PERIOD_MS 5000
+
+#define WS_OPCODE_CONT   0x00
+#define WS_OPCODE_TEXT   0x01
+#define WS_OPCODE_BINARY 0x02
+
+#define SEND_TIMEOUT pdMS_TO_TICKS(2000)
+
+static esp_websocket_client_handle_t s_client;
+static dg_agent_callbacks_t s_cb;
+static volatile bool s_ready;
+static TaskHandle_t s_keepalive_task;
+
+/* Reassembly buffer for JSON messages split across several DATA events. */
+static char *s_json;
+static int s_json_len;
+
+static void set_state(dg_agent_state_t state)
+{
+    s_ready = (state == DG_AGENT_READY);
+    if (s_cb.on_state) {
+        s_cb.on_state(state, s_cb.ctx);
+    }
+}
+
+static esp_err_t send_json(cJSON *root, const char *what)
+{
+    char *text = cJSON_PrintUnformatted(root);
+    if (text == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    int sent = esp_websocket_client_send_text(s_client, text, strlen(text), SEND_TIMEOUT);
+    esp_err_t err = (sent < 0) ? ESP_FAIL : ESP_OK;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to send %s", what);
+    } else {
+        ESP_LOGI(TAG, "sent %s (%d bytes)", what, sent);
+    }
+
+    cJSON_free(text);
+    return err;
+}
+
+/*
+ * Builds the one message the session cannot start without.
+ *
+ * The shape below is the whole contract: `audio.input` describes what we will
+ * send, `audio.output` what we want back, and `agent.{listen,think,speak}`
+ * picks the three models Deepgram wires together internally. Omitting
+ * audio.output entirely is legal but leaves the format to the server's default,
+ * which is not what a fixed-rate codec on the other end wants.
+ */
+static esp_err_t send_settings(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(root, "type", "Settings");
+
+    cJSON *audio = cJSON_AddObjectToObject(root, "audio");
+    cJSON *input = cJSON_AddObjectToObject(audio, "input");
+    cJSON_AddStringToObject(input, "encoding", DG_AUDIO_ENCODING);
+    cJSON_AddNumberToObject(input, "sample_rate", DG_AUDIO_SAMPLE_RATE);
+    cJSON *output = cJSON_AddObjectToObject(audio, "output");
+    cJSON_AddStringToObject(output, "encoding", DG_AUDIO_ENCODING);
+    cJSON_AddNumberToObject(output, "sample_rate", DG_AUDIO_SAMPLE_RATE);
+
+    cJSON *agent = cJSON_AddObjectToObject(root, "agent");
+    cJSON_AddStringToObject(agent, "language", "en");
+
+    cJSON *listen_provider = cJSON_AddObjectToObject(
+        cJSON_AddObjectToObject(agent, "listen"), "provider");
+    cJSON_AddStringToObject(listen_provider, "type", "deepgram");
+    cJSON_AddStringToObject(listen_provider, "model", "nova-3");
+
+    cJSON *think = cJSON_AddObjectToObject(agent, "think");
+    cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
+    cJSON_AddStringToObject(think_provider, "type", "open_ai");
+    cJSON_AddStringToObject(think_provider, "model", "gpt-4o-mini");
+    cJSON_AddStringToObject(think, "prompt", CONFIG_DEEPGRAM_AGENT_PROMPT);
+
+    cJSON *speak_provider = cJSON_AddObjectToObject(
+        cJSON_AddObjectToObject(agent, "speak"), "provider");
+    cJSON_AddStringToObject(speak_provider, "type", "deepgram");
+    cJSON_AddStringToObject(speak_provider, "model", "aura-2-thalia-en");
+
+    if (strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
+        cJSON_AddStringToObject(agent, "greeting", CONFIG_DEEPGRAM_AGENT_GREETING);
+    }
+
+    esp_err_t err = send_json(root, "Settings");
+    cJSON_Delete(root);
+    return err;
+}
+
+/* ---------------- server messages ---------------- */
+
+static void handle_json(const char *json, int len)
+{
+    cJSON *root = cJSON_ParseWithLength(json, len);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "unparseable message: %.*s", len, json);
+        return;
+    }
+
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
+    if (!cJSON_IsString(type)) {
+        cJSON_Delete(root);
+        return;
+    }
+    const char *t = type->valuestring;
+
+    if (strcmp(t, "Welcome") == 0) {
+        const cJSON *rid = cJSON_GetObjectItemCaseSensitive(root, "request_id");
+        /* Worth logging: this id is what Deepgram support asks for. */
+        ESP_LOGI(TAG, "Welcome, request_id=%s",
+                 cJSON_IsString(rid) ? rid->valuestring : "?");
+
+    } else if (strcmp(t, "SettingsApplied") == 0) {
+        ESP_LOGI(TAG, "SettingsApplied -- session is live");
+        set_state(DG_AGENT_READY);
+
+    } else if (strcmp(t, "ConversationText") == 0) {
+        const cJSON *role = cJSON_GetObjectItemCaseSensitive(root, "role");
+        const cJSON *content = cJSON_GetObjectItemCaseSensitive(root, "content");
+        if (cJSON_IsString(role) && cJSON_IsString(content)) {
+            ESP_LOGI(TAG, "%s: %s", role->valuestring, content->valuestring);
+            if (s_cb.on_conversation_text) {
+                s_cb.on_conversation_text(role->valuestring, content->valuestring, s_cb.ctx);
+            }
+        }
+
+    } else if (strcmp(t, "UserStartedSpeaking") == 0) {
+        ESP_LOGI(TAG, "user started speaking");
+        if (s_cb.on_user_started_speaking) {
+            s_cb.on_user_started_speaking(s_cb.ctx);
+        }
+
+    } else if (strcmp(t, "AgentThinking") == 0) {
+        ESP_LOGD(TAG, "agent thinking");
+
+    } else if (strcmp(t, "AgentAudioDone") == 0) {
+        ESP_LOGI(TAG, "agent finished speaking");
+        if (s_cb.on_agent_audio_done) {
+            s_cb.on_agent_audio_done(s_cb.ctx);
+        }
+
+    } else if (strcmp(t, "Error") == 0) {
+        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(root, "description");
+        const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+        ESP_LOGE(TAG, "server error [%s]: %s",
+                 cJSON_IsString(code) ? code->valuestring : "?",
+                 cJSON_IsString(desc) ? desc->valuestring : "?");
+        set_state(DG_AGENT_ERROR);
+
+    } else {
+        ESP_LOGD(TAG, "unhandled message type %s", t);
+    }
+
+    cJSON_Delete(root);
+}
+
+/*
+ * Rebuilds a JSON message that the client split across events.
+ *
+ * esp_websocket_client hands over at most buffer_size bytes at a time and
+ * reports where the slice sits inside the frame, so a 3 kB ConversationText
+ * arrives as two events with the same op_code. Parsing each slice on its own
+ * would throw away every message longer than the buffer.
+ */
+static void accumulate_json(const esp_websocket_event_data_t *ev)
+{
+    /* A TEXT opcode at offset 0 is the first slice of a new message; a CONT
+     * opcode continues the previous one and must not reset the buffer even
+     * though its own payload_offset starts back at 0. */
+    if (ev->op_code == WS_OPCODE_TEXT && ev->payload_offset == 0) {
+        s_json_len = 0;
+    }
+
+    if (s_json_len + ev->data_len > JSON_REASSEMBLY_MAX) {
+        ESP_LOGW(TAG, "message exceeds %d byte reassembly buffer, dropping",
+                 JSON_REASSEMBLY_MAX);
+        s_json_len = 0;
+        return;
+    }
+
+    memcpy(s_json + s_json_len, ev->data_ptr, ev->data_len);
+    s_json_len += ev->data_len;
+
+    /* Complete only when this is the last slice of the last frame: payload_len
+     * covers one frame, fin covers the fragment chain. */
+    if (ev->fin && ev->payload_offset + ev->data_len >= ev->payload_len) {
+        handle_json(s_json, s_json_len);
+        s_json_len = 0;
+    }
+}
+
+static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    const esp_websocket_event_data_t *ev = data;
+
+    switch (id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "socket open");
+        set_state(DG_AGENT_CONNECTED);
+        /* Settings first, before anything else, or the server ignores us. */
+        send_settings();
+        break;
+
+    case WEBSOCKET_EVENT_DATA:
+        if (ev->op_code == WS_OPCODE_BINARY) {
+            if (s_cb.on_audio && ev->data_len > 0) {
+                s_cb.on_audio((const uint8_t *)ev->data_ptr, ev->data_len, s_cb.ctx);
+            }
+        } else if (ev->op_code == WS_OPCODE_TEXT || ev->op_code == WS_OPCODE_CONT) {
+            if (ev->data_len > 0) {
+                accumulate_json(ev);
+            }
+        }
+        break;
+
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGE(TAG, "transport error: tls=%d handshake_status=%d errno=%d",
+                 ev->error_handle.esp_tls_last_esp_err,
+                 ev->error_handle.esp_ws_handshake_status_code,
+                 ev->error_handle.esp_transport_sock_errno);
+        set_state(DG_AGENT_ERROR);
+        break;
+
+    case WEBSOCKET_EVENT_DISCONNECTED:
+    case WEBSOCKET_EVENT_CLOSED:
+        ESP_LOGW(TAG, "socket closed (status %d)", ev->close_status_code);
+        s_json_len = 0;
+        set_state(DG_AGENT_DISCONNECTED);
+        break;
+
+    default:
+        break;
+    }
+}
+
+/*
+ * Deepgram drops an Agent socket that has been quiet for ~10 s. Once a
+ * microphone is streaming, the audio itself keeps it open and this becomes
+ * redundant; until then it is the only thing holding the session up.
+ *
+ * This lives in its own task rather than an esp_timer callback because sending
+ * a frame takes the client's transmit lock and can block.
+ */
+static void keepalive_task(void *arg)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "KeepAlive");
+    char *text = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(KEEPALIVE_PERIOD_MS));
+        if (s_ready && esp_websocket_client_is_connected(s_client)) {
+            esp_websocket_client_send_text(s_client, text, strlen(text), SEND_TIMEOUT);
+        }
+    }
+}
+
+/* ---------------- public API ---------------- */
+
+esp_err_t dg_agent_start(const dg_agent_callbacks_t *callbacks)
+{
+    if (strlen(CONFIG_DEEPGRAM_API_KEY) == 0) {
+        ESP_LOGE(TAG, "CONFIG_DEEPGRAM_API_KEY is empty -- run `idf.py menuconfig`");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_client != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (callbacks != NULL) {
+        s_cb = *callbacks;
+    }
+
+    s_json = malloc(JSON_REASSEMBLY_MAX);
+    if (s_json == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    const esp_websocket_client_config_t cfg = {
+        .uri = DG_AGENT_URI,
+        /* The Agent endpoint authenticates on the upgrade request only. */
+        .headers = "Authorization: Token " CONFIG_DEEPGRAM_API_KEY "\r\n",
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = WS_RX_BUFFER,
+        /* JSON handling plus a user callback per frame needs more than the
+         * 4 kB default. */
+        .task_stack = 6144,
+        .reconnect_timeout_ms = 5000,
+        .network_timeout_ms = 10000,
+        .disable_auto_reconnect = false,
+    };
+
+    s_client = esp_websocket_client_init(&cfg);
+    if (s_client == NULL) {
+        free(s_json);
+        s_json = NULL;
+        return ESP_FAIL;
+    }
+
+    ESP_ERROR_CHECK(esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY,
+                                                 on_ws_event, NULL));
+
+    ESP_LOGI(TAG, "connecting to %s", DG_AGENT_URI);
+    esp_err_t err = esp_websocket_client_start(s_client);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (xTaskCreate(keepalive_task, "dg_keepalive", 3072, NULL, 4, &s_keepalive_task) != pdPASS) {
+        ESP_LOGW(TAG, "keepalive task not created; idle sessions will drop");
+    }
+    return ESP_OK;
+}
+
+esp_err_t dg_agent_stop(void)
+{
+    if (s_client == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_keepalive_task != NULL) {
+        vTaskDelete(s_keepalive_task);
+        s_keepalive_task = NULL;
+    }
+
+    s_ready = false;
+    esp_websocket_client_close(s_client, portMAX_DELAY);
+    esp_websocket_client_destroy(s_client);
+    s_client = NULL;
+
+    free(s_json);
+    s_json = NULL;
+    s_json_len = 0;
+    return ESP_OK;
+}
+
+bool dg_agent_is_ready(void)
+{
+    return s_ready;
+}
+
+esp_err_t dg_agent_send_audio(const void *pcm, size_t len)
+{
+    if (!s_ready || len == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int sent = esp_websocket_client_send_bin(s_client, (const char *)pcm, (int)len, SEND_TIMEOUT);
+    return sent < 0 ? ESP_FAIL : ESP_OK;
+}
+
+esp_err_t dg_agent_inject_user_message(const char *text)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddStringToObject(root, "type", "InjectUserMessage");
+    cJSON_AddStringToObject(root, "content", text);
+
+    esp_err_t err = send_json(root, "InjectUserMessage");
+    cJSON_Delete(root);
+    return err;
+}

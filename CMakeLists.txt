@@ -1,0 +1,17 @@
+idf_component_register(
+    SRCS
+        main.c
+        wifi_sta.c
+        dg_agent.c
+        audio_io.c
+    INCLUDE_DIRS .
+    REQUIRES
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
+        mbedtls
+        json
+        esp_codec_dev
+        waveshare__esp32_s3_touch_amoled_1_75c
+)

@@ -1,0 +1,70 @@
+menu "Deepgram Agent Device"
+
+    config WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            SSID of the 2.4 GHz network to join. The ESP32-S3 has no 5 GHz radio.
+
+    config WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+        help
+            WPA2 passphrase. Leave empty for an open network.
+
+    config WIFI_MAX_RETRY
+        int "Wi-Fi connect attempts before giving up"
+        default 8
+        range 1 100
+
+    config DEEPGRAM_API_KEY
+        string "Deepgram API key"
+        default ""
+        help
+            Sent as "Authorization: Token <key>" on the WebSocket upgrade request.
+            Create one at https://console.deepgram.com.
+
+    config DEEPGRAM_AGENT_PROMPT
+        string "Agent system prompt"
+        default "You are a friendly assistant living inside a small ESP32 device. Keep every answer to one or two short sentences."
+
+    config DEEPGRAM_AGENT_GREETING
+        string "Agent greeting"
+        default "Hi! I am running on an ESP32. Say something and I will answer."
+        help
+            Spoken by the agent as soon as the session starts. Because the greeting
+            needs no microphone input, hearing audio frames arrive is the quickest
+            proof that the whole pipeline is connected.
+
+    config AUDIO_OUT_VOLUME
+        int "Speaker volume (0-100)"
+        default 80
+        range 0 100
+
+    config MIC_IN_GAIN
+        int "Microphone ADC gain (dB)"
+        default 24
+        range 0 48
+        help
+            spec_analyzer_radial uses 24 dB on this board. Raise it if mic peaks
+            stay near zero while you are speaking.
+
+    config MIC_LEVEL_LOG
+        bool "Log microphone peak level every 3 s"
+        default y
+        help
+            Logs per-channel peaks rather than a combined level: the downmix
+            averages L and R, so if the board wires only one ES7210 input, a
+            combined meter would just look quiet instead of showing which
+            channel is live.
+
+    config MIC_GATE_WHILE_AGENT_SPEAKS
+        bool "Drop microphone audio while the agent is speaking"
+        default y
+        help
+            Speaker and mic are centimetres apart with no echo cancellation, so
+            without this the agent hears its own voice and answers itself. The
+            cost is that barge-in stops working -- you cannot interrupt the
+            agent. Turn this off once real echo cancellation is in place.
+
+endmenu
