@@ -1,0 +1,14 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+
+# Managed components fetched by the IDF Component Manager
+# (dependencies.lock is committed so builds are reproducible)
+managed_components/
+
+# macOS
+.DS_Store
+
+# Internal bug report -- kept local, not published
+agent-edge-host-header-404.md

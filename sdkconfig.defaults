@@ -1,0 +1,73 @@
+# Waveshare ESP32-S3-Touch-AMOLED-1.75C -- Deepgram Agent API client
+#
+# Board hardware (flash geometry, octal PSRAM, console pins/baud) is kept
+# identical to the sibling spec_analyzer_radial project so the same
+# `idf.py -b 2000000 monitor` habit works across both.
+#
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- flash / PSRAM / clocks -------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=4096
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_FREERTOS_HZ=1000
+
+# --- console ---------------------------------------------------------------
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=2000000
+
+# --- TLS -------------------------------------------------------------------
+# The agent endpoint is wss://, so the connection needs a root store. The
+# bundled Mozilla CA set covers api/agent.deepgram.com without shipping a PEM.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# TLS record buffers live in PSRAM; the handshake alone wants ~16 kB inbound.
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# --- Wi-Fi -----------------------------------------------------------------
+# Agent audio arrives as a steady stream of ~4 kB binary frames; the extra RX
+# buffers keep the stack from dropping them under a burst.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=48
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=48
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+
+# --- LVGL / display --------------------------------------------------------
+# CLIB malloc is not about the 434 kB canvas (those pixels are heap_caps_malloc'd
+# directly). It is about LVGL's builtin allocator, which with the default
+# CONFIG_LV_MEM_SIZE_KILOBYTES=64 emits a 64 kB `work_mem_int` array in INTERNAL
+# .bss. That array is linker-discarded today only because nothing references the
+# allocator; adding display code would make it real, and internal RAM is the one
+# thing this project cannot spare.
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_OBJ_STYLE_CACHE=y
+CONFIG_LV_DEF_REFR_PERIOD=15
+CONFIG_LV_FONT_MONTSERRAT_24=y
+# Deliberately NOT raising CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT above 1: LVGL creates
+# its draw threads with a plain xTaskCreate, so they get no core affinity and
+# would float onto the Wi-Fi core with an 8 kB internal stack each. Staying at 1
+# also keeps CONFIG_LV_OS_NONE valid -- the adapter uses its own recursive mutex
+# and does not need LV_OS_FREERTOS; only DRAW_UNIT_CNT > 1 does.
+
+# --- app -------------------------------------------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y

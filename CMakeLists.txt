@@ -1,21 +1,7 @@
-idf_component_register(
-    SRCS
-        main.c
-        wifi_sta.c
-        dg_agent.c
-        audio_io.c
-        spectrum_ui.c
-    INCLUDE_DIRS .
-    REQUIRES
-        esp_wifi
-        esp_event
-        esp_netif
-        nvs_flash
-        mbedtls
-        json
-        esp_codec_dev
-        waveshare__esp32_s3_touch_amoled_1_75c
-        lvgl__lvgl
-        espressif__esp_lvgl_adapter
-        espressif__esp-dsp
-)
+# The following lines of boilerplate have to be in your project's
+# CMakeLists in this exact order for cmake to work correctly
+cmake_minimum_required(VERSION 3.16)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+project(deepgram_agent)
