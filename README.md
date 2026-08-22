@@ -184,6 +184,109 @@ and must run *after* `dg_agent_stop()` has brought the WebSocket task to a halt.
 If a restarted session ever comes back as loud static, that is the first thing to
 check.
 
+## Changing the voice by asking
+
+The agent can change its own voice. Say "switch to a British woman" and it picks
+one, applies it, and remembers it across reboots. "Go back to your default voice"
+undoes it.
+
+This is the first runtime-configurable setting on a device where everything else
+is compile-time, and it is built on three pieces:
+
+- **A client-side function call.** `agent.think.functions` in the `Settings`
+  message declares `set_voice` and `reset_voice`. Client-side is signalled by the
+  *absence* of an `endpoint` field — with one, Deepgram would call a web service
+  instead of asking the device.
+- **A session reload.** A new `Settings` message is the only thing that actually
+  changes the voice (see below), so the device saves the choice, lets the agent
+  finish saying what it is doing, then reopens the socket.
+- **History replay.** `agent.context.messages` carries the last few turns into
+  the new session as `{"type":"History","role":...,"content":...}` entries, so
+  the conversation continues across the reload instead of starting over.
+- **NVS.** Namespace `dgagent`, key `tts_voice`. This is the first application
+  use of NVS in the project; `nvs_flash_init()` was already there for Wi-Fi
+  calibration.
+
+### `UpdateSpeak` does not work — measured, not assumed
+
+The documented way to do this is `UpdateSpeak`, which changes the voice in place
+with no reconnect. **On this account it returns `SpeakUpdated` and then changes
+nothing.** That was established by elimination, and it is worth writing down so
+nobody re-implements it:
+
+- Reproduced with a **bare `UpdateSpeak` sent nowhere near a function call**, so
+  it is not a function-calling problem.
+- Reproduced with **both** a Flux v2 provider (`flux-cliff-en`) and an Aura v1
+  provider (`aura-2-zeus-en`), so it is not Flux-specific.
+- The JSON matches Deepgram's own documented example character for character.
+- No `Error` and no `Warning` is emitted — the server acknowledges and ignores.
+- Meanwhile the *same* model id in a `Settings` message works, which is what the
+  fallback relies on.
+
+If that is ever fixed upstream, reinstating it means sending `UpdateSpeak` and
+skipping the reload — the catalog, persistence and function plumbing stay as-is.
+
+### So the voice is applied by reopening the session
+
+1. The function call arrives; the voice is validated and written to NVS.
+2. `FunctionCallResponse` tells the agent to say it is changing voice — that
+   sentence is spoken in the **old** voice, which is the audible cue.
+3. On `AgentAudioDone`, `on_reload_required` fires and `session_ctl` tears the
+   session down and starts a new one, roughly a **1 second gap**.
+4. The new `Settings` carries the new voice plus the replayed history, and
+   **omits the greeting** so it resumes rather than re-introducing itself.
+
+Deferring to `AgentAudioDone` is what stops the socket disappearing mid-sentence.
+
+### The history buffer
+
+The last **6 turns**, each truncated to **160 characters**
+([dg_agent.c](main/dg_agent.c)). Small on purpose: every entry is re-sent on
+every connect, `Settings` is already ~1.8 kB with the voice catalog in it, and
+this project has spent real effort keeping the uplink healthy. Measured: 1763 B
+without history, 2144 B with five turns.
+
+It is cleared only when the user **deliberately** ends a conversation (a screen
+tap). A long-press restart, a reload, and an automatic reconnect all keep it —
+which incidentally fixes the most visible symptom of a dropped socket, where the
+agent used to re-greet and forget everything.
+
+### Threading
+
+Sending from inside `handle_json()` — the WebSocket task, mid event dispatch —
+is safe: `client->lock` is recursive and that task already owns it, which is why
+`send_settings()` has always sent from `WEBSOCKET_EVENT_CONNECTED`. What must
+never happen there is a stop/close/destroy; the client refuses those by comparing
+task handles. That is why the reload goes out as an `on_reload_required`
+callback that only posts to `session_ctl`.
+
+`session_ctl_request_reload()` deliberately **skips the debounce** the touch
+gestures use: it comes from the agent acting on the user's words, not from a
+finger that might have brushed the bezel, so dropping it would strand the device
+on the old setting.
+
+### `CONFIG_DEEPGRAM_LOG_WIRE_JSON`
+
+Off by default. Turn it on to print every JSON body sent to Deepgram — the
+fastest way to confirm that what you think you are sending is what actually goes
+on the wire. It was how the `UpdateSpeak` behaviour above got pinned down. The
+API key is not in the body; it rides in an HTTP header.
+
+### The catalog
+
+All 36 Flux voices live in [main/voices.c](main/voices.c), each with a `featured`
+flag. Only the 13 featured ones are offered to the model as an enum — the schema
+and its descriptions ride in every `Settings` message, so the full list would be
+a couple of kilobytes per reconnect and a harder choice for the LLM. Settings
+grows from 587 to 1761 bytes as it is. The other 23 (where the Irish, Australian,
+Indian, Singaporean and Filipino accents live) stay selectable as the
+`CONFIG_DEEPGRAM_FLUX_VOICE` factory default, and widening the offer later is a
+one-flag change.
+
+`CONFIG_DEEPGRAM_FLUX_VOICE` is now the **factory default** — used on first boot
+and after an NVS erase. `ESP_ERR_NVS_NOT_FOUND` on read is the ordinary
+first-boot case, not an error.
+
 ## Speech stack: Flux or Nova-3 + Aura
 
 `menuconfig` -> "Speech stack" picks between:

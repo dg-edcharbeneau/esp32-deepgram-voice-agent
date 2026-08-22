@@ -33,6 +33,7 @@
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "spectrum_ui.h"
+#include "voices.h"
 #include "wifi_sta.h"
 
 static const char *TAG = "main";
@@ -94,6 +95,13 @@ static void mic_to_agent(const uint8_t *pcm, size_t len)
     dg_agent_send_audio(pcm, len);
 }
 
+/* Runs on the WebSocket task, which cannot tear down its own client -- so this
+ * only posts, exactly like the touch gestures do. */
+static void on_reload_required(void *ctx)
+{
+    session_ctl_request_reload();
+}
+
 static void on_agent_audio_done(void *ctx)
 {
     ESP_LOGI(TAG, "turn complete, %" PRIu32 " audio bytes received", s_audio_bytes);
@@ -119,6 +127,7 @@ static const dg_agent_callbacks_t s_callbacks = {
     .on_audio = on_audio,
     .on_agent_audio_done = on_agent_audio_done,
     .on_user_started_speaking = on_user_started_speaking,
+    .on_reload_required = on_reload_required,
 };
 
 void app_main(void)
@@ -131,6 +140,9 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    /* After nvs_flash_init(), before the first Settings message is built. */
+    voices_init();
 
     /* Before the session, so the greeting has somewhere to go the moment it
      * arrives. */

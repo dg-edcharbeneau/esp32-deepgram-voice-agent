@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,6 +11,7 @@
 #include "esp_websocket_client.h"
 
 #include "dg_agent.h"
+#include "voices.h"
 
 static const char *TAG = "dg_agent";
 
@@ -56,6 +58,68 @@ static volatile bool s_suppress_state;
 static char *s_json;
 static int s_json_len;
 
+/*
+ * The last few turns, replayed into the next session's Settings so that
+ * reopening the socket resumes the conversation rather than restarting it.
+ *
+ * Deliberately small. Every entry is re-sent on every connect, Settings is
+ * already ~1.8 kB with the voice catalogue in it, and this device has spent
+ * real effort keeping the uplink healthy -- so this is the last few exchanges
+ * for continuity, not a transcript.
+ */
+#define HISTORY_TURNS   6
+#define HISTORY_CONTENT 160
+
+typedef struct {
+    char role[10];                  /* "user" / "assistant" */
+    char content[HISTORY_CONTENT];
+} history_turn_t;
+
+static history_turn_t s_history[HISTORY_TURNS];
+static int s_history_count;         /* saturates at HISTORY_TURNS */
+static int s_history_next;          /* ring cursor */
+
+/* Set when a setting change needs a new session; acted on once the agent has
+ * finished saying so, then cleared. */
+static bool s_reload_pending;
+
+void dg_agent_clear_history(void)
+{
+    s_history_count = 0;
+    s_history_next = 0;
+}
+
+static void history_add(const char *role, const char *content)
+{
+    history_turn_t *t = &s_history[s_history_next];
+    strlcpy(t->role, role, sizeof(t->role));
+    strlcpy(t->content, content, sizeof(t->content));
+    s_history_next = (s_history_next + 1) % HISTORY_TURNS;
+    if (s_history_count < HISTORY_TURNS) {
+        s_history_count++;
+    }
+}
+
+/* Oldest first, which is the order the server expects. */
+static void history_to_json(cJSON *agent)
+{
+    if (s_history_count == 0) {
+        return;
+    }
+    cJSON *messages = cJSON_AddArrayToObject(
+        cJSON_AddObjectToObject(agent, "context"), "messages");
+
+    int start = (s_history_count == HISTORY_TURNS) ? s_history_next : 0;
+    for (int i = 0; i < s_history_count; i++) {
+        const history_turn_t *t = &s_history[(start + i) % HISTORY_TURNS];
+        cJSON *m = cJSON_CreateObject();
+        cJSON_AddStringToObject(m, "type", "History");
+        cJSON_AddStringToObject(m, "role", t->role);
+        cJSON_AddStringToObject(m, "content", t->content);
+        cJSON_AddItemToArray(messages, m);
+    }
+}
+
 static void set_state(dg_agent_state_t state)
 {
     s_ready = (state == DG_AGENT_READY);
@@ -77,6 +141,9 @@ static esp_err_t send_json(cJSON *root, const char *what)
     if (text == NULL) {
         return ESP_ERR_NO_MEM;
     }
+#if CONFIG_DEEPGRAM_LOG_WIRE_JSON
+    ESP_LOGI(TAG, "-> %s", text);
+#endif
 
     int sent = esp_websocket_client_send_text(s_client, text, strlen(text), SEND_TIMEOUT);
     esp_err_t err = (sent < 0) ? ESP_FAIL : ESP_OK;
@@ -88,6 +155,119 @@ static esp_err_t send_json(cJSON *root, const char *what)
 
     cJSON_free(text);
     return err;
+}
+
+/*
+ * Applies a voice and tells the agent it worked.
+ *
+ * ORDERING MATTERS. UpdateSpeak goes first, because the FunctionCallResponse is
+ * what prompts the agent's next turn and the next turn is exactly when Flux
+ * starts using the new voice. Send them the other way round and the
+ * confirmation is spoken in the old voice, one turn late.
+ *
+ * Both are plain text frames, so sending them from here -- the WebSocket task,
+ * inside event dispatch -- is safe: client->lock is recursive and this task
+ * already owns it. send_settings() has always done the same thing from
+ * WEBSOCKET_EVENT_CONNECTED. What must never happen here is a stop/close, which
+ * the client refuses by comparing task handles.
+ */
+static void send_function_response(const char *id, const char *name, const char *content)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return;
+    }
+    cJSON_AddStringToObject(root, "type", "FunctionCallResponse");
+    cJSON_AddStringToObject(root, "id", id);
+    cJSON_AddStringToObject(root, "name", name);
+    cJSON_AddStringToObject(root, "content", content);
+    send_json(root, "FunctionCallResponse");
+    cJSON_Delete(root);
+}
+
+
+/*
+ * WHY THIS REOPENS THE SESSION
+ *
+ * UpdateSpeak is the documented way to change the voice in place. On this
+ * account it answers SpeakUpdated and then changes nothing -- reproduced with a
+ * bare UpdateSpeak sent nowhere near a function call, with both a Flux v2 and
+ * an Aura v1 provider, against JSON matching the documented example exactly. A
+ * fresh Settings message does work, so that is what this does.
+ *
+ * The cost is a new session, which is why dg_agent keeps a short history and
+ * replays it -- see history_to_json().
+ */
+static void handle_function_call(const cJSON *root)
+{
+    const cJSON *functions = cJSON_GetObjectItemCaseSensitive(root, "functions");
+    if (!cJSON_IsArray(functions)) {
+        return;
+    }
+
+    const cJSON *fn;
+    cJSON_ArrayForEach(fn, functions) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(fn, "id");
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(fn, "name");
+        const cJSON *client_side = cJSON_GetObjectItemCaseSensitive(fn, "client_side");
+        if (!cJSON_IsString(id) || !cJSON_IsString(name)) {
+            continue;
+        }
+        /* false means Deepgram already ran it against an endpoint of ours. */
+        if (cJSON_IsBool(client_side) && !cJSON_IsTrue(client_side)) {
+            continue;
+        }
+
+        char content[128];
+
+        if (strcmp(name->valuestring, "reset_voice") == 0) {
+            const voice_t *v = voices_default();
+            voices_reset();
+            s_reload_pending = true;
+            snprintf(content, sizeof(content),
+                     "Switching back to %s. Tell the user you are changing voice now.",
+                     v->name);
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
+        if (strcmp(name->valuestring, "set_voice") != 0) {
+            send_function_response(id->valuestring, name->valuestring, "Unknown function.");
+            continue;
+        }
+
+        /* `arguments` is a JSON-encoded *string*, not a nested object, so it
+         * needs a second parse. */
+        const cJSON *args_str = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
+        const voice_t *v = NULL;
+        if (cJSON_IsString(args_str)) {
+            cJSON *args = cJSON_Parse(args_str->valuestring);
+            if (args != NULL) {
+                const cJSON *want = cJSON_GetObjectItemCaseSensitive(args, "voice");
+                if (cJSON_IsString(want)) {
+                    v = voices_find(want->valuestring);
+                }
+                cJSON_Delete(args);
+            }
+        }
+
+        if (v == NULL) {
+            /* Say so rather than staying silent: the agent turns this into an
+             * explanation, and nothing is applied or saved. */
+            send_function_response(id->valuestring, name->valuestring,
+                                   "That voice is not available on this device.");
+            continue;
+        }
+
+        ESP_LOGI(TAG, "voice change requested: %s", v->model);
+        /* Persisted now rather than on an acknowledgement, because the new
+         * session reads it while building its Settings. */
+        voices_set(v);
+        s_reload_pending = true;
+        snprintf(content, sizeof(content),
+                 "Switching to %s. Tell the user you are changing voice now.", v->name);
+        send_function_response(id->valuestring, name->valuestring, content);
+    }
 }
 
 /*
@@ -157,6 +337,48 @@ static esp_err_t send_settings(void)
     cJSON_AddStringToObject(think_provider, "model", "gpt-4o-mini");
     cJSON_AddStringToObject(think, "prompt", CONFIG_DEEPGRAM_AGENT_PROMPT);
 
+#if CONFIG_SPEECH_STACK_FLUX
+    /*
+     * Client-side functions, which is signalled by the *absence* of an
+     * "endpoint" -- with one, Deepgram would call a web service instead of
+     * asking us. The catalog goes in the description because JSON Schema has
+     * nowhere to hang a per-enum-value note, and without it the model is
+     * choosing from bare first names.
+     */
+    cJSON *functions = cJSON_AddArrayToObject(think, "functions");
+
+    char catalog[768];
+    voices_describe(catalog, sizeof(catalog));
+    char description[900];
+    snprintf(description, sizeof(description),
+             "Change the voice you speak in. Use when the user asks you to sound "
+             "different, or asks for a particular accent or gender. Voices: %s.",
+             catalog);
+
+    cJSON *set_voice = cJSON_CreateObject();
+    cJSON_AddStringToObject(set_voice, "name", "set_voice");
+    cJSON_AddStringToObject(set_voice, "description", description);
+    cJSON *params = cJSON_AddObjectToObject(set_voice, "parameters");
+    cJSON_AddStringToObject(params, "type", "object");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *voice_prop = cJSON_AddObjectToObject(props, "voice");
+    cJSON_AddStringToObject(voice_prop, "type", "string");
+    voices_add_enum(voice_prop, "enum");
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("voice"));
+    cJSON_AddItemToArray(functions, set_voice);
+
+    cJSON *reset_voice = cJSON_CreateObject();
+    cJSON_AddStringToObject(reset_voice, "name", "reset_voice");
+    cJSON_AddStringToObject(reset_voice, "description",
+                            "Go back to the device's default voice. Use when the user asks "
+                            "you to reset your voice or return to how you normally sound.");
+    cJSON *reset_params = cJSON_AddObjectToObject(reset_voice, "parameters");
+    cJSON_AddStringToObject(reset_params, "type", "object");
+    cJSON_AddObjectToObject(reset_params, "properties");
+    cJSON_AddItemToArray(functions, reset_voice);
+#endif
+
     cJSON *speak_provider = cJSON_AddObjectToObject(
         cJSON_AddObjectToObject(agent, "speak"), "provider");
     cJSON_AddStringToObject(speak_provider, "type", "deepgram");
@@ -165,12 +387,19 @@ static esp_err_t send_settings(void)
      * entirely would also get Flux with flux-kit-en, but being explicit keeps
      * the voice configurable. */
     cJSON_AddStringToObject(speak_provider, "version", "v2");
-    cJSON_AddStringToObject(speak_provider, "model", CONFIG_DEEPGRAM_FLUX_VOICE);
+    cJSON_AddStringToObject(speak_provider, "model", voices_current_model());
 #else
     cJSON_AddStringToObject(speak_provider, "model", "aura-2-thalia-en");
 #endif
-
-    if (strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
+    /*
+     * Replayed context, and the greeting only when there is none. Resuming a
+     * conversation should not open with "Hi! I am running on an ESP32" -- and
+     * this is also what stops an auto-reconnect after a network blip from
+     * re-greeting, which used to be the most visible symptom of a dropped
+     * socket.
+     */
+    history_to_json(agent);
+    if (s_history_count == 0 && strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
         cJSON_AddStringToObject(agent, "greeting", CONFIG_DEEPGRAM_AGENT_GREETING);
     }
 
@@ -214,6 +443,7 @@ static void handle_json(const char *json, int len)
         const cJSON *content = cJSON_GetObjectItemCaseSensitive(root, "content");
         if (cJSON_IsString(role) && cJSON_IsString(content)) {
             ESP_LOGI(TAG, "%s: %s", role->valuestring, content->valuestring);
+            history_add(role->valuestring, content->valuestring);
             if (s_cb.on_conversation_text) {
                 s_cb.on_conversation_text(role->valuestring, content->valuestring, s_cb.ctx);
             }
@@ -233,6 +463,19 @@ static void handle_json(const char *json, int len)
         if (s_cb.on_agent_audio_done) {
             s_cb.on_agent_audio_done(s_cb.ctx);
         }
+        if (s_reload_pending) {
+            /* Deferred to here so the agent gets to say what it is doing before
+             * the socket goes away -- that sentence is spoken in the old voice,
+             * and everything after the reconnect is in the new one. */
+            s_reload_pending = false;
+            ESP_LOGI(TAG, "reopening session to apply new settings");
+            if (s_cb.on_reload_required) {
+                s_cb.on_reload_required(s_cb.ctx);
+            }
+        }
+
+    } else if (strcmp(t, "FunctionCallRequest") == 0) {
+        handle_function_call(root);
 
     } else if (strcmp(t, "Error") == 0) {
         const cJSON *desc = cJSON_GetObjectItemCaseSensitive(root, "description");
@@ -242,8 +485,27 @@ static void handle_json(const char *json, int len)
                  cJSON_IsString(desc) ? desc->valuestring : "?");
         set_state(DG_AGENT_ERROR);
 
+    } else if (strcmp(t, "LatencyReport") == 0 || strcmp(t, "History") == 0 ||
+               strcmp(t, "AgentStartedSpeaking") == 0) {
+        /* Known and deliberately ignored. Named explicitly so the catch-all
+         * below stays a signal rather than a flood -- LatencyReport alone
+         * arrives several times a second while the agent speaks. */
+
+    } else if (strcmp(t, "Warning") == 0) {
+        /* The server's soft-failure channel -- e.g. a model it could not honour
+         * and silently substituted. Previously this fell into the LOGD branch
+         * below, which CONFIG_LOG_MAXIMUM_LEVEL_INFO compiles out entirely, so
+         * it was invisible. */
+        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(root, "description");
+        const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+        ESP_LOGW(TAG, "server warning [%s]: %s",
+                 cJSON_IsString(code) ? code->valuestring : "?",
+                 cJSON_IsString(desc) ? desc->valuestring : "?");
+
     } else {
-        ESP_LOGD(TAG, "unhandled message type %s", t);
+        /* INFO, not DEBUG: anything the server says that we do not model is
+         * exactly what we want to see when behaviour does not match the docs. */
+        ESP_LOGI(TAG, "unhandled message type %s", t);
     }
 
     cJSON_Delete(root);

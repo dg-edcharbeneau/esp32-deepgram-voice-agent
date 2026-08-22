@@ -58,10 +58,14 @@ menu "Deepgram Agent Device"
         depends on SPEECH_STACK_FLUX
         default "flux-kit-en"
         help
-            One of the flux-<voice>-en models -- flux-kit-en, flux-hannah-en,
-            flux-haley-en, flux-cole-en and about thirty more. flux-kit-en is
-            what the Agent API picks when agent.speak is omitted entirely, so it
-            is the sensible default.
+            The FACTORY DEFAULT voice. It is used on first boot and after an NVS
+            erase; once the user changes the voice by asking the agent, the saved
+            choice wins on every later boot and this value only comes back via
+            the agent's reset_voice function.
+
+            Any name in the catalog in main/voices.c works, not just the thirteen
+            offered to the model -- that is where the Irish, Australian, Indian,
+            Singaporean and Filipino accents live.
 
     config DEEPGRAM_FLUX_EOT_THRESHOLD
         string "Flux end-of-turn confidence threshold"
@@ -82,6 +86,15 @@ menu "Deepgram Agent Device"
         help
             How long silence may run before a turn is force-ended. 0 omits the
             field and uses the server default.
+
+    config DEEPGRAM_LOG_WIRE_JSON
+        bool "Log every JSON message sent to Deepgram"
+        default n
+        help
+            Prints the full Settings / UpdateSpeak / FunctionCallResponse bodies.
+            Verbose, and Settings contains no secret (the API key rides in an HTTP
+            header, not the body), but it is the fastest way to check that what
+            you think you are sending is what actually goes on the wire.
 
     config DEEPGRAM_AGENT_PROMPT
         string "Agent system prompt"

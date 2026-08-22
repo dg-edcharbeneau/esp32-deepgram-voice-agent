@@ -68,6 +68,17 @@ typedef struct {
      */
     void (*on_user_started_speaking)(void *ctx);
 
+    /*
+     * The session must be reopened to pick up a setting change.
+     *
+     * UpdateSpeak is the documented way to change the voice in place, but it
+     * returns SpeakUpdated and then does nothing, so the only mechanism that
+     * actually works is a new Settings message -- which means a new session.
+     * Runs on the WebSocket task, which cannot stop the client itself, so the
+     * handler must hand the work to another task.
+     */
+    void (*on_reload_required)(void *ctx);
+
     void *ctx;
 } dg_agent_callbacks_t;
 
@@ -129,3 +140,13 @@ esp_err_t dg_agent_send_audio(const void *pcm, size_t len);
 
 /* Talks to the agent without a microphone -- useful for bring-up. */
 esp_err_t dg_agent_inject_user_message(const char *text);
+
+/*
+ * Forget the conversation so far.
+ *
+ * dg_agent keeps the last few turns and replays them into the next session's
+ * Settings, so reopening the socket -- to change a setting, or after the
+ * network drops -- resumes the conversation instead of starting over. Call this
+ * when the user deliberately ends a conversation, and only then.
+ */
+void dg_agent_clear_history(void);

@@ -38,6 +38,7 @@ typedef enum {
     REQ_START = 1,
     REQ_TOGGLE,
     REQ_RESTART,
+    REQ_RELOAD,   /* same work as RESTART, but keeps the conversation */
 } request_t;
 
 static TaskHandle_t s_task;
@@ -133,6 +134,9 @@ static void session_ctl_task(void *arg)
             break;
         case REQ_TOGGLE:
             if (s_running) {
+                /* Ending a conversation on purpose means ending it -- the next
+                 * start should not resume it. A restart or a reload keeps it. */
+                dg_agent_clear_history();
                 do_stop();
             } else {
                 do_start();
@@ -141,6 +145,13 @@ static void session_ctl_task(void *arg)
         case REQ_RESTART:
             /* Unconditional: the point of the gesture is to recover a session
              * that is up but wedged, so it must work from either state. */
+            do_stop();
+            do_start();
+            break;
+        case REQ_RELOAD:
+            /* Identical mechanically. Distinct so the intent is legible in the
+             * log, and so it can skip the debounce on the way in. */
+            ESP_LOGI(TAG, "reloading session to apply a setting change");
             do_stop();
             do_start();
             break;
@@ -195,6 +206,13 @@ esp_err_t session_ctl_start(const dg_agent_callbacks_t *callbacks)
  * eSetValueWithOverwrite, so presses during a transition collapse into one
  * pending request rather than queueing a runaway sequence of toggles.
  */
+static void request_now(request_t req)
+{
+    if (s_task != NULL) {
+        xTaskNotify(s_task, (uint32_t)req, eSetValueWithOverwrite);
+    }
+}
+
 static void request(request_t req)
 {
     if (s_task == NULL) {
@@ -215,6 +233,7 @@ static void request(request_t req)
     xTaskNotify(s_task, (uint32_t)req, eSetValueWithOverwrite);
 }
 
+void session_ctl_request_reload(void)  { request_now(REQ_RELOAD); }
 void session_ctl_request_start(void)   { request(REQ_START); }
 void session_ctl_request_toggle(void)  { request(REQ_TOGGLE); }
 void session_ctl_request_restart(void) { request(REQ_RESTART); }
