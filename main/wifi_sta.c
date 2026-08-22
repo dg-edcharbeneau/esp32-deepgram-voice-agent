@@ -16,16 +16,33 @@ static const char *TAG = "wifi";
 
 static EventGroupHandle_t s_events;
 static int s_retries;
+static bool s_stack_ready;
+
+/*
+ * Whether we are meant to be associating right now.
+ *
+ * The driver raises STA_START and STA_DISCONNECTED in AP and APSTA mode too, so
+ * without this flag the provisioning portal would be constantly interrupted by
+ * a reconnect attempt aimed at the network that just failed.
+ */
+static bool s_connecting;
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        if (s_connecting) {
+            esp_wifi_connect();
+        }
         return;
     }
 
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *ev = data;
+        if (!s_connecting) {
+            /* Expected while provisioning, and while shutting the station down
+             * to hand the radio over. Nothing to retry. */
+            return;
+        }
         if (s_retries < CONFIG_WIFI_MAX_RETRY) {
             s_retries++;
             ESP_LOGW(TAG, "disconnected (reason %d), retry %d/%d",
@@ -48,11 +65,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 }
 
-esp_err_t wifi_sta_start(void)
+esp_err_t wifi_stack_init(void)
 {
-    if (strlen(CONFIG_WIFI_SSID) == 0) {
-        ESP_LOGE(TAG, "CONFIG_WIFI_SSID is empty -- run `idf.py menuconfig`");
-        return ESP_ERR_INVALID_STATE;
+    if (s_stack_ready) {
+        return ESP_OK;
     }
 
     s_events = xEventGroupCreate();
@@ -72,16 +88,33 @@ esp_err_t wifi_sta_start(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event, NULL, NULL));
 
+    s_stack_ready = true;
+    return ESP_OK;
+}
+
+esp_err_t wifi_sta_start(const char *ssid, const char *pass)
+{
+    if (ssid == NULL || ssid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_ERROR_CHECK(wifi_stack_init());
+
+    const bool open = (pass == NULL || pass[0] == '\0');
+
     wifi_config_t sta_cfg = {
         .sta = {
-            .threshold.authmode = strlen(CONFIG_WIFI_PASSWORD) > 0
-                                      ? WIFI_AUTH_WPA2_PSK
-                                      : WIFI_AUTH_OPEN,
+            .threshold.authmode = open ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK,
         },
     };
     /* strncpy, not assignment: the config fields are fixed-size uint8_t arrays. */
-    strncpy((char *)sta_cfg.sta.ssid, CONFIG_WIFI_SSID, sizeof(sta_cfg.sta.ssid) - 1);
-    strncpy((char *)sta_cfg.sta.password, CONFIG_WIFI_PASSWORD, sizeof(sta_cfg.sta.password) - 1);
+    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
+    if (!open) {
+        strncpy((char *)sta_cfg.sta.password, pass, sizeof(sta_cfg.sta.password) - 1);
+    }
+
+    xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
+    s_retries = 0;
+    s_connecting = true;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
@@ -89,7 +122,7 @@ esp_err_t wifi_sta_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "connecting to \"%s\"", CONFIG_WIFI_SSID);
+    ESP_LOGI(TAG, "connecting to \"%s\"", ssid);
     return ESP_OK;
 }
 
@@ -107,4 +140,18 @@ esp_err_t wifi_sta_wait_connected(int timeout_ms)
         return ESP_FAIL;
     }
     return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t wifi_sta_stop(void)
+{
+    /* Before esp_wifi_stop(), so the disconnect it provokes is not retried. */
+    s_connecting = false;
+    s_retries = 0;
+
+    esp_err_t err = esp_wifi_stop();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
+    }
+    xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
+    return err;
 }

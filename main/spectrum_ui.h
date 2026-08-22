@@ -61,3 +61,17 @@ void spectrum_ui_feed_mic(const int16_t *mono, size_t samples);
  * only when both directions are quiet; when it is not, `text` is shown as-is.
  */
 void spectrum_ui_set_status(const char *text, bool session_live);
+
+/*
+ * Overlay a QR code in the middle of the ring, or clear it.
+ *
+ * Used by provisioning to put the setup network on screen as something a phone
+ * camera can act on, instead of a name to be retyped.
+ *
+ * Same contract as spectrum_ui_set_status(): safe from any task, only the
+ * pointer is kept, so `payload` must have static lifetime. The widget itself is
+ * created and destroyed by the frame timer on the LVGL task -- callers must
+ * never touch lv_* themselves.
+ */
+void spectrum_ui_show_qr(const char *payload);
+void spectrum_ui_hide_qr(void);

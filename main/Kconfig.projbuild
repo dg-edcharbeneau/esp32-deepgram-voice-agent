@@ -1,16 +1,28 @@
 menu "Deepgram Agent Device"
 
     config WIFI_SSID
-        string "Wi-Fi SSID"
+        string "Wi-Fi SSID (first-boot seed)"
         default ""
         help
             SSID of the 2.4 GHz network to join. The ESP32-S3 has no 5 GHz radio.
 
+            A SEED, NOT A SETTING. It is used only when nothing has been saved
+            yet. Once the device has been provisioned -- through the setup
+            portal, or from an earlier boot that used this seed -- the saved
+            network wins and editing this appears to do nothing at all.
+
+            Leave it empty to go straight to the setup portal on first boot,
+            which is the right choice for any device that leaves the bench.
+
+            To get back here: hold BOOT for 3 seconds, or erase NVS.
+
     config WIFI_PASSWORD
-        string "Wi-Fi password"
+        string "Wi-Fi password (first-boot seed)"
         default ""
         help
-            WPA2 passphrase. Leave empty for an open network.
+            WPA2 passphrase for WIFI_SSID. Leave empty for an open network.
+
+            Same precedence rule as WIFI_SSID: a saved password wins over this.
 
     config WIFI_MAX_RETRY
         int "Wi-Fi connect attempts before giving up"

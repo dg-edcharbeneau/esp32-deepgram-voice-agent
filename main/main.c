@@ -16,11 +16,17 @@
  * Note that capture is gated while the agent speaks; see audio_io.c for why
  * (no echo cancellation on this board) and what it costs.
  *
- * Configure Wi-Fi credentials and the Deepgram API key with `idf.py menuconfig`
- * under "Deepgram Agent Device". They land in sdkconfig, which is gitignored.
+ * Wi-Fi credentials are chosen at runtime: with nothing saved, or when the saved
+ * network cannot be reached, the device raises a captive portal (wifi_prov.c)
+ * and waits to be told which network to join. The menuconfig values are only a
+ * first-boot seed -- see wifi_creds.h for the precedence rule.
+ *
+ * The Deepgram API key is still `idf.py menuconfig` under "Deepgram Agent
+ * Device". It lands in sdkconfig, which is gitignored.
  */
 
 #include <inttypes.h>
+#include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,10 +36,13 @@
 #include "nvs_flash.h"
 
 #include "audio_io.h"
+#include "boot_button.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "spectrum_ui.h"
 #include "voices.h"
+#include "wifi_creds.h"
+#include "wifi_prov.h"
 #include "wifi_sta.h"
 
 static const char *TAG = "main";
@@ -130,6 +139,39 @@ static const dg_agent_callbacks_t s_callbacks = {
     .on_reload_required = on_reload_required,
 };
 
+/*
+ * Hands the device over to the setup portal. Never returns -- wifi_prov_run()
+ * ends in a reboot either way, which is what keeps the AP-to-STA transition
+ * from having to be unpicked on a live device.
+ */
+static void enter_provisioning(void) __attribute__((noreturn));
+static void enter_provisioning(void)
+{
+    /* The ring has nothing to visualise with no session, and a calm screen
+     * showing the network name is the instruction. */
+    spectrum_ui_set_stopped(true);
+    spectrum_ui_set_status(wifi_prov_ap_name(), false);
+
+    if (wifi_prov_start() != ESP_OK) {
+        ESP_LOGE(TAG, "could not start the setup portal");
+        spectrum_ui_set_status("setup failed", false);
+        wifi_prov_run();
+    }
+
+    /*
+     * The AP as something a camera can act on. A phone that scans this joins
+     * the network directly, which skips the one step of this whole flow that
+     * involves reading characters off a 466 px round panel and retyping them.
+     *
+     * Static storage because spectrum_ui keeps the pointer, not the bytes.
+     */
+    static char qr[64];
+    snprintf(qr, sizeof(qr), "WIFI:T:nopass;S:%s;;", wifi_prov_ap_name());
+    spectrum_ui_show_qr(qr);
+
+    wifi_prov_run();
+}
+
 void app_main(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -141,6 +183,12 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
+    /*
+     * First, and before anything that can block: the escape hatch out of a bad
+     * network has to work on a device that is failing to finish booting.
+     */
+    ESP_ERROR_CHECK(boot_button_start());
+
     /* After nvs_flash_init(), before the first Settings message is built. */
     voices_init();
 
@@ -148,11 +196,21 @@ void app_main(void)
      * arrives. */
     ESP_ERROR_CHECK(audio_io_init(DG_AUDIO_SAMPLE_RATE));
 
-    /* Non-blocking, and bringing the panel up costs ~1.2 s in the CO5300 reset
-     * sequence -- so start associating first and overlap the two. */
-    ESP_ERROR_CHECK(wifi_sta_start());
+    ESP_ERROR_CHECK(wifi_stack_init());
 
-    spectrum_ui_set_status("connecting", false);
+    /*
+     * Non-blocking, and bringing the panel up costs ~1.2 s in the CO5300 reset
+     * sequence -- so start associating first and overlap the two.
+     */
+    char ssid[WIFI_CREDS_SSID_LEN];
+    char pass[WIFI_CREDS_PASS_LEN];
+    const bool have_creds = wifi_creds_load(ssid, pass);
+    if (have_creds) {
+        ESP_ERROR_CHECK(wifi_sta_start(ssid, pass));
+        spectrum_ui_set_status("connecting", false);
+    } else {
+        spectrum_ui_set_status("setup", false);
+    }
     if (spectrum_ui_start() == ESP_OK) {
         audio_io_set_playback_tap(spectrum_ui_feed_agent);
         audio_io_set_capture_tap(spectrum_ui_feed_mic);
@@ -160,6 +218,12 @@ void app_main(void)
     } else {
         /* A dark screen is not a reason to give up the voice loop. */
         ESP_LOGW(TAG, "spectrum display unavailable, continuing headless");
+    }
+
+    /* After the panel, so the portal's instructions are actually readable. */
+    if (!have_creds) {
+        ESP_LOGI(TAG, "no network configured, starting setup portal");
+        enter_provisioning();
     }
 
     /*
@@ -175,18 +239,21 @@ void app_main(void)
     err = wifi_sta_wait_connected(WIFI_CONNECT_TIMEOUT_MS);
     if (err != ESP_OK) {
         /*
-         * Not fatal any more. Returning here would leave a device with a live
-         * screen and no way to retry; the status loop and the touch handler stay
-         * up instead, so a long press can start a session once the network is
-         * back.
+         * The saved network is unreachable -- moved, renamed, or its password
+         * changed. Offer the portal rather than sitting on a "no network"
+         * screen the user cannot act on.
+         *
+         * The credentials are deliberately NOT erased here: a router that is
+         * merely rebooting must not cost the user their password. The portal
+         * overwrites them on save, and times out back into another attempt if
+         * nobody arrives.
          */
-        ESP_LOGE(TAG, "no network (%s) -- check SSID/password in menuconfig",
-                 esp_err_to_name(err));
-        spectrum_ui_set_stopped(true);
-        spectrum_ui_set_status("no network", false);
-    } else {
-        session_ctl_request_start();
+        ESP_LOGE(TAG, "could not join \"%s\" (%s), starting setup portal",
+                 ssid, esp_err_to_name(err));
+        wifi_sta_stop();
+        enter_provisioning();
     }
+    session_ctl_request_start();
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));

@@ -2,6 +2,9 @@ idf_component_register(
     SRCS
         main.c
         wifi_sta.c
+        wifi_creds.c
+        wifi_prov.c
+        boot_button.c
         dg_agent.c
         audio_io.c
         spectrum_ui.c
@@ -13,6 +16,8 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
+        esp_http_server
+        lwip
         mbedtls
         json
         esp_codec_dev
@@ -20,4 +25,5 @@ idf_component_register(
         lvgl__lvgl
         espressif__esp_lvgl_adapter
         espressif__esp-dsp
+        espressif__button
 )

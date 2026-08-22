@@ -125,13 +125,28 @@ agent has no memory of the previous conversation and re-speaks its greeting.
 While stopped the bars sit flat, the idle breathing stops, and the centre reads
 `stopped`.
 
-The board's second physical button would have been the obvious control, but its
-GPIO is not stated anywhere in the BSP (`BSP_CAPS_BUTTONS 0`), its Kconfig, or its
-README — the only evidence it exists at all is a string in the factory firmware.
-Rather than commit to a guessed pin, this uses the CST9217 touch panel, which the
-BSP already supports. [main/session_ctl.c](main/session_ctl.c) takes plain
-`toggle()` / `restart()` requests, so wiring a GPIO button alongside the gestures
-is a few lines once the pin is known.
+The board's two physical buttons are **RESET**, wired to `EN`/`CHIP_PU` and
+therefore a hardware reset that firmware never sees, and **BOOT** on **GPIO 0**.
+The BSP is no help here — `BSP_CAPS_BUTTONS 0`, and neither its Kconfig nor its
+README mentions a pin — so the pin was recovered from the factory firmware
+instead. The flash dump in the sibling project is a xiaozhi-esp32 build whose
+board class is `WaveshareEsp32s3TouchAMOLED1inch75`, and upstream's
+`main/boards/waveshare/esp32-s3-touch-amoled-1.75/config.h` declares exactly one
+button, `BOOT_BUTTON_GPIO GPIO_NUM_0`. That header's 1.75**C** branch is the one
+that matches this board: its `LCD_RST 1` / `TOUCH_RST 2` / `MCLK 16` are our
+`BSP_LCD_RST` / `BSP_LCD_TOUCH_RST` / `BSP_I2S_MCLK` exactly.
+
+BOOT is now wired up in [main/boot_button.c](main/boot_button.c) — click to
+start/stop, hold three seconds to forget the saved network — which works because
+[main/session_ctl.c](main/session_ctl.c) takes plain `toggle()` / `restart()`
+requests from any task. The screen keeps the gestures below unchanged; a
+"hold even longer" gesture was never an option, because `LONG_PRESSED` fires at
+~400 ms and would trip restart on the way past.
+
+**GPIO 0 is a strapping pin.** Held low *through* a reset it puts the ROM into
+USB download mode and the app never starts, so BOOT-held-while-pressing-RESET is
+not a Wi-Fi reset — the forget gesture is a press *after* boot. Polling the pin,
+which is what `iot_button` does, avoids the trap by construction.
 
 **The gestures must be `LV_EVENT_SHORT_CLICKED` and `LV_EVENT_LONG_PRESSED`.**
 `LV_EVENT_CLICKED` is sent on release *regardless of long press*, so pairing it
@@ -467,12 +482,17 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 
 ## Configure and build
 
-Credentials live in Kconfig, not in source, and `sdkconfig` is gitignored.
+The API key lives in Kconfig, not in source, and `sdkconfig` is gitignored.
+
+**Wi-Fi is chosen at runtime** — leave the SSID and password empty and the device
+raises a setup portal on first boot. The Kconfig values are only a first-boot
+seed, and a saved network beats them. See **[WIFI-SETUP.md](WIFI-SETUP.md)** for
+all four ways credentials get in, and for what to do when it will not connect.
 
 ```bash
 . ~/Documents/source-iot/esp/esp-idf-5.5.5/export.sh
 idf.py set-target esp32s3
-idf.py menuconfig      # -> "Deepgram Agent Device": SSID, password, API key
+idf.py menuconfig      # -> "Deepgram Agent Device": API key (SSID/password optional)
 idf.py build
 idf.py -p /dev/cu.usbmodem* flash
 idf.py -p /dev/cu.usbmodem* -b 2000000 monitor
@@ -487,11 +507,15 @@ same monitor command works for both projects.
 |---|---|
 | [main/main.c](main/main.c) | boot order, session callbacks, status loop |
 | [main/wifi_sta.c](main/wifi_sta.c) | station bring-up, blocks on `IP_EVENT_STA_GOT_IP` |
+| [main/wifi_creds.c](main/wifi_creds.c) | credentials in NVS, and why a saved network beats Kconfig |
+| [main/wifi_prov.c](main/wifi_prov.c) | setup portal: SoftAP, the page, captive-portal DNS |
+| [main/boot_button.c](main/boot_button.c) | BOOT/GPIO 0: click toggles, 3 s hold forgets the network |
 | [main/dg_agent.c](main/dg_agent.c) | Agent API client: `Settings`, event decoding, KeepAlive |
 | [main/audio_io.c](main/audio_io.c) | both codecs: ES7210 capture, ES8311 playback, mono↔stereo, gating |
 | [main/spectrum_ui.c](main/spectrum_ui.c) | radial FFT display: panel bring-up, sample handoff, ring render |
 | [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
-| [main/Kconfig.projbuild](main/Kconfig.projbuild) | SSID / password / API key / prompt / greeting |
+| [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / prompt / greeting / audio, and the Wi-Fi seed |
+| [WIFI-SETUP.md](WIFI-SETUP.md) | every way to get credentials onto the device, and why it will not connect |
 | [sdkconfig.defaults](sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
 | [components/tcp_transport/](components/tcp_transport/) | one-line override of IDF's WS handshake — see below |
 

@@ -79,3 +79,7 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 # --- app -------------------------------------------------------------------
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+
+# Setup QR code on the provisioning screen (main/wifi_prov.c). Off by default in
+# LVGL; the encoder is a few kB and only instantiated while the portal is up.
+CONFIG_LV_USE_QRCODE=y

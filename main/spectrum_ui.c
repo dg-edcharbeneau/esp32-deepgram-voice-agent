@@ -98,6 +98,14 @@ static const char *TAG = "spectrum_ui";
  * and small enough that Wi-Fi can still find contiguous internal RAM later. */
 #define DRAW_ROWS 32
 
+/*
+ * Setup QR geometry. 200 px leaves the code comfortably inside the 466 px
+ * circular mask with its quiet zone intact, and lifting it 30 px above centre
+ * makes room for the network name underneath.
+ */
+#define QR_SIZE   200
+#define QR_Y_LIFT 30
+
 /* ---------------- sample handoff: audio tasks -> LVGL task ---------------- */
 
 typedef enum {
@@ -128,6 +136,10 @@ static viz_source_t s_source;
 /* Session state, for the middle of the ring. Set from the WebSocket task; the
  * pointer is stored, never the characters, so this is a single word write. */
 static const char *s_status = "starting";
+
+/* Set from any task, applied by the frame timer -- see update_qr(). */
+static const char *volatile s_qr_payload;
+static lv_obj_t *qr_obj;
 static bool s_session_live;
 
 /* ---------------- LVGL-owned state ---------------- */
@@ -218,6 +230,16 @@ void spectrum_ui_feed_mic(const int16_t *mono, size_t samples)
         return;
     }
     feed(mono, samples, SRC_MIC);
+}
+
+void spectrum_ui_show_qr(const char *payload)
+{
+    s_qr_payload = payload;
+}
+
+void spectrum_ui_hide_qr(void)
+{
+    s_qr_payload = NULL;
 }
 
 void spectrum_ui_set_gesture_handler(void (*handler)(spectrum_ui_gesture_t gesture))
@@ -397,6 +419,59 @@ static void update_status_label(bool idle)
     }
 }
 
+/*
+ * Creates or tears down the QR overlay to match what was last requested.
+ *
+ * Pointer compare, like update_status_label(): rebuilding the code every frame
+ * would re-encode it and re-invalidate a 200 px square sixty times a second.
+ *
+ * The status label moves down while the code is up rather than being hidden --
+ * the AP name underneath is the fallback for a camera that will not act on a
+ * WIFI: URI, and it is also what someone reads when picking the network by hand.
+ */
+static void update_qr(void)
+{
+    static const char *shown;
+    const char *want = s_qr_payload;
+    if (want == shown) {
+        return;
+    }
+    shown = want;
+
+    if (want == NULL) {
+        if (qr_obj != NULL) {
+            lv_obj_delete(qr_obj);
+            qr_obj = NULL;
+        }
+        lv_obj_align(status_label, LV_ALIGN_CENTER, 0, 0);
+        return;
+    }
+
+    if (qr_obj == NULL) {
+        qr_obj = lv_qrcode_create(lv_screen_active());
+        if (qr_obj == NULL) {
+            return;
+        }
+        lv_qrcode_set_size(qr_obj, QR_SIZE);
+        /* Dark-on-light regardless of the ring behind it: a scanner needs the
+         * quiet zone and the contrast, not the house style. */
+        lv_qrcode_set_dark_color(qr_obj, lv_color_black());
+        lv_qrcode_set_light_color(qr_obj, lv_color_white());
+        lv_obj_align(qr_obj, LV_ALIGN_CENTER, 0, -QR_Y_LIFT);
+    }
+
+    if (lv_qrcode_update(qr_obj, want, strlen(want)) != LV_RESULT_OK) {
+        ESP_LOGW(TAG, "could not encode the setup QR");
+        lv_obj_delete(qr_obj);
+        qr_obj = NULL;
+        lv_obj_align(status_label, LV_ALIGN_CENTER, 0, 0);
+        return;
+    }
+
+    /* Below the code, still inside the circular mask. */
+    lv_obj_align(status_label, LV_ALIGN_CENTER, 0, QR_SIZE / 2 - QR_Y_LIFT + 30);
+}
+
 static void frame_timer_cb(lv_timer_t *timer)
 {
     LV_UNUSED(timer);
@@ -431,6 +506,7 @@ static void frame_timer_cb(lv_timer_t *timer)
     }
 
     update_status_label(idle);
+    update_qr();
     render_ring(idle, s_source);
 }
 
