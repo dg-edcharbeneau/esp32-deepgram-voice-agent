@@ -93,6 +93,21 @@ void audio_io_capture_set_enabled(bool enabled);
  */
 void audio_io_reset(void);
 
+/*
+ * Speaker level, 0-100, clamped to AUDIO_VOLUME_MIN..MAX.
+ *
+ * Unlike the voice, this never involves Deepgram -- it is one ES8311 register
+ * write, so it takes effect on the very next sample. Safe to call from any task
+ * including while playback is in flight: the write goes over I2C while audio
+ * goes over I2S, and this codec supplies a hardware volume so esp_codec_dev
+ * never touches the PCM buffer on this path.
+ *
+ * adjust is a single call rather than get-then-set so the clamp and the write
+ * stay together; that is where a lock would go if a second caller ever appears.
+ */
+int audio_io_get_volume(void);
+int audio_io_adjust_volume(int delta);   /* returns the resulting level */
+
 /* True while agent audio is playing or has only just stopped. */
 bool audio_io_playback_active(void);
 

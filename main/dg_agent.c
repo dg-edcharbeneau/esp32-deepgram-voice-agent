@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 
+#include "audio_io.h"
 #include "dg_agent.h"
 #include "voices.h"
 
@@ -198,6 +199,19 @@ static void send_function_response(const char *id, const char *name, const char 
  * The cost is a new session, which is why dg_agent keeps a short history and
  * replays it -- see history_to_json().
  */
+/*
+ * `arguments` arrives as a JSON-encoded *string*, not a nested object, so it
+ * needs a second parse. Caller owns the result and must cJSON_Delete it.
+ */
+static cJSON *function_args(const cJSON *fn)
+{
+    const cJSON *args_str = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
+    if (!cJSON_IsString(args_str)) {
+        return NULL;
+    }
+    return cJSON_Parse(args_str->valuestring);
+}
+
 static void handle_function_call(const cJSON *root)
 {
     const cJSON *functions = cJSON_GetObjectItemCaseSensitive(root, "functions");
@@ -231,24 +245,50 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+        if (strcmp(name->valuestring, "adjust_volume") == 0) {
+            int delta = 0;
+            cJSON *vargs = function_args(fn);
+            if (vargs != NULL) {
+                const cJSON *d = cJSON_GetObjectItemCaseSensitive(vargs, "delta");
+                if (cJSON_IsNumber(d)) {
+                    delta = d->valueint;
+                }
+                cJSON_Delete(vargs);
+            }
+
+            int before = audio_io_get_volume();
+            int now = audio_io_adjust_volume(delta);
+            /*
+             * No reload: volume is a codec register, not a Settings field, so
+             * it is already in effect -- the agent's confirmation is itself
+             * spoken at the new level. Phrased as done, not as about to happen.
+             */
+            if (now == before && delta > 0) {
+                snprintf(content, sizeof(content),
+                         "Already at maximum volume, %d. Say so and do not try again.", now);
+            } else if (now == before && delta < 0) {
+                snprintf(content, sizeof(content),
+                         "Already at minimum volume, %d. Say so and do not try again.", now);
+            } else {
+                snprintf(content, sizeof(content), "Volume is now %d out of 100.", now);
+            }
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
         if (strcmp(name->valuestring, "set_voice") != 0) {
             send_function_response(id->valuestring, name->valuestring, "Unknown function.");
             continue;
         }
 
-        /* `arguments` is a JSON-encoded *string*, not a nested object, so it
-         * needs a second parse. */
-        const cJSON *args_str = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
         const voice_t *v = NULL;
-        if (cJSON_IsString(args_str)) {
-            cJSON *args = cJSON_Parse(args_str->valuestring);
-            if (args != NULL) {
-                const cJSON *want = cJSON_GetObjectItemCaseSensitive(args, "voice");
-                if (cJSON_IsString(want)) {
-                    v = voices_find(want->valuestring);
-                }
-                cJSON_Delete(args);
+        cJSON *args = function_args(fn);
+        if (args != NULL) {
+            const cJSON *want = cJSON_GetObjectItemCaseSensitive(args, "voice");
+            if (cJSON_IsString(want)) {
+                v = voices_find(want->valuestring);
             }
+            cJSON_Delete(args);
         }
 
         if (v == NULL) {
@@ -337,16 +377,39 @@ static esp_err_t send_settings(void)
     cJSON_AddStringToObject(think_provider, "model", "gpt-4o-mini");
     cJSON_AddStringToObject(think, "prompt", CONFIG_DEEPGRAM_AGENT_PROMPT);
 
-#if CONFIG_SPEECH_STACK_FLUX
     /*
      * Client-side functions, which is signalled by the *absence* of an
      * "endpoint" -- with one, Deepgram would call a web service instead of
-     * asking us. The catalog goes in the description because JSON Schema has
-     * nowhere to hang a per-enum-value note, and without it the model is
-     * choosing from bare first names.
+     * asking us.
+     *
+     * The array itself is not Flux-gated: volume is a local codec setting and
+     * works on either speech stack. Only the voice functions are, because that
+     * catalog is entirely flux-* models.
      */
     cJSON *functions = cJSON_AddArrayToObject(think, "functions");
 
+    cJSON *adjust_volume = cJSON_CreateObject();
+    cJSON_AddStringToObject(adjust_volume, "name", "adjust_volume");
+    cJSON_AddStringToObject(adjust_volume, "description",
+                            "Make yourself louder or quieter, relative to how loud you are "
+                            "now. Negative is quieter, positive is louder. The scale runs "
+                            "20 to 100, so once you are told you are at a limit, stop trying. "
+                            "A small change is about 10, a big one about 30.");
+    cJSON *vparams = cJSON_AddObjectToObject(adjust_volume, "parameters");
+    cJSON_AddStringToObject(vparams, "type", "object");
+    cJSON *vprops = cJSON_AddObjectToObject(vparams, "properties");
+    cJSON *delta_prop = cJSON_AddObjectToObject(vprops, "delta");
+    cJSON_AddStringToObject(delta_prop, "type", "integer");
+    cJSON_AddNumberToObject(delta_prop, "minimum", -100);
+    cJSON_AddNumberToObject(delta_prop, "maximum", 100);
+    cJSON *vrequired = cJSON_AddArrayToObject(vparams, "required");
+    cJSON_AddItemToArray(vrequired, cJSON_CreateString("delta"));
+    cJSON_AddItemToArray(functions, adjust_volume);
+
+#if CONFIG_SPEECH_STACK_FLUX
+    /* The catalog goes in the description because JSON Schema has nowhere to
+     * hang a per-enum-value note, and without it the model is choosing from
+     * bare first names. */
     char catalog[768];
     voices_describe(catalog, sizeof(catalog));
     char description[900];

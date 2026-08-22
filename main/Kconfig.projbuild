@@ -113,11 +113,40 @@ menu "Deepgram Agent Device"
         default 100
         range 0 100
         help
+            The FACTORY DEFAULT level, used on first boot and after an NVS erase.
+            Once the user asks the agent to change the volume, the saved level
+            wins on every later boot. The runtime range is clamped to 20-100 --
+            0 is silence rather than quiet, and an agent that has muted itself
+            cannot be asked to unmute.
+
             Beware what "100" means: esp_codec_dev's default volume curve maps
             0-100 onto -50 dB to 0 dB, so 100 is unity gain, NOT the loudest the
             hardware goes. The ES8311's DAC volume register reaches +32 dB. If
             100 is still too quiet, that headroom is what
             AUDIO_OUT_EXTRA_GAIN_DB opens up.
+
+    config AUDIO_OUT_RANGE_DB
+        int "Usable volume range (dB below maximum)"
+        default 20
+        range 6 50
+        help
+            How far below maximum the volume scale reaches. Volume 0 sits this
+            many dB under volume 100, and the scale is linear in dB between them
+            -- which is the perceptually even axis, so equal steps sound like
+            equal changes.
+
+            This exists because esp_codec_dev's stock curve spans 50 dB, and on
+            this board most of that is inaudible. Measured on the speaker:
+
+                effective  -36 dB  -16 dB  -11 dB   -6 dB   -1 dB  +4 dB
+                stock vol      20      60      70      80      90    100
+                            <-- essentially silent -->  low  medium  max
+
+            Sixty of the hundred steps did nothing. 20 dB of range puts the
+            whole 20-100 travel inside the part you can actually hear.
+
+            Widen it if you want a quieter minimum, narrow it if the bottom of
+            the range is still too quiet to be useful.
 
     config AUDIO_OUT_EXTRA_GAIN_DB
         int "Extra speaker gain above unity (dB)"

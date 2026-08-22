@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 
 #include "bsp/esp-bsp.h"
 
@@ -62,6 +63,30 @@ static volatile uint32_t s_dropped;
 static volatile uint32_t s_captured;
 static volatile int64_t s_last_play_us;
 static volatile bool s_flush_pending;
+static int s_volume;
+static bool s_volume_from_nvs;
+
+/*
+ * Volume limits.
+ *
+ * The floor is 20, not 0, and that is deliberate: esp_codec_dev special-cases
+ * volume 0 to -96 dB, which is silence rather than quiet -- and an agent that
+ * has muted itself cannot be asked to unmute. 20 is about -40 dB, already
+ * barely audible. Muting, if it is ever wanted, needs a way back that is not
+ * the voice.
+ *
+ * The ceiling is the top of the volume curve. Going above it means
+ * re-installing the curve, which reallocates inside esp_codec_dev and has no
+ * business happening at runtime -- CONFIG_AUDIO_OUT_EXTRA_GAIN_DB is the
+ * build-time knob for that, and it lifts the whole scale so this range
+ * inherits it.
+ */
+#define VOLUME_MIN 20
+#define VOLUME_MAX 100
+
+/* Shared with the saved voice; see voices.c. */
+#define NVS_NAMESPACE  "dgagent"
+#define NVS_KEY_VOLUME "out_volume"
 static volatile bool s_capture_enabled = true;
 static int s_rate;
 
@@ -252,6 +277,87 @@ static void capture_task(void *arg)
 
 /* ---------------- setup ---------------- */
 
+/* ---------------- volume ---------------- */
+
+static int volume_clamp(int level)
+{
+    if (level < VOLUME_MIN) return VOLUME_MIN;
+    if (level > VOLUME_MAX) return VOLUME_MAX;
+    return level;
+}
+
+/*
+ * The saved level, or the Kconfig factory default when there is none.
+ *
+ * Two distinct misses to tolerate, because the namespace is shared with the
+ * saved voice: nvs_open fails while nothing at all has been written, and
+ * nvs_get_u8 returns NOT_FOUND once the voice exists but the volume does not.
+ * Both are ordinary first-run states, not errors.
+ */
+static int volume_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return volume_clamp(CONFIG_AUDIO_OUT_VOLUME);
+    }
+
+    uint8_t saved = 0;
+    esp_err_t err = nvs_get_u8(h, NVS_KEY_VOLUME, &saved);
+    nvs_close(h);
+
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "reading saved volume failed: %s", esp_err_to_name(err));
+        }
+        return volume_clamp(CONFIG_AUDIO_OUT_VOLUME);
+    }
+    s_volume_from_nvs = true;
+    return volume_clamp((int)saved);
+}
+
+static void volume_save(int level)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_VOLUME, (uint8_t)level);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        /* Same policy as the saved voice: the session keeps the new level
+         * either way, only the next boot loses it. */
+        ESP_LOGW(TAG, "could not persist volume: %s", esp_err_to_name(err));
+    }
+}
+
+int audio_io_get_volume(void)
+{
+    return s_volume;
+}
+
+int audio_io_adjust_volume(int delta)
+{
+    int level = volume_clamp(s_volume + delta);
+    if (level == s_volume) {
+        return s_volume;   /* already at the stop; no register write, no flash */
+    }
+
+    int err = esp_codec_dev_set_out_vol(s_spk, level);
+    if (err != ESP_CODEC_DEV_OK) {
+        /* Nothing was stored on the codec side either, so do not persist. */
+        ESP_LOGW(TAG, "volume change rejected: %d", err);
+        return s_volume;
+    }
+
+    s_volume = level;
+    volume_save(level);
+    ESP_LOGI(TAG, "volume %d", level);
+    return level;
+}
+
 esp_err_t audio_io_init(int sample_rate)
 {
     /*
@@ -288,15 +394,26 @@ esp_err_t audio_io_init(int sample_rate)
         .bits_per_sample = CODEC_BITS,
     };
 
-#if CONFIG_AUDIO_OUT_EXTRA_GAIN_DB > 0
     /*
-     * The stock curve tops out at unity, leaving most of the ES8311's +32 dB
-     * DAC range unused. Re-map the top of the scale before setting the volume.
-     * Only the top point moves: the bottom stays at -50 dB so the taper below
-     * full volume is unchanged.
+     * Replace the stock volume curve, always -- not just when adding gain.
+     *
+     * esp_codec_dev maps 0-100 onto -50..0 dB, and on this speaker everything
+     * below roughly -15 dB is inaudible, so sixty of the hundred steps did
+     * nothing at all: 20-60 were silent, and the whole usable range was
+     * squeezed into 70-100. Measured, not assumed.
+     *
+     * The replacement spans AUDIO_OUT_RANGE_DB below the top instead, so the
+     * full travel lands inside the audible part. The range is expressed
+     * relative to the top rather than as an absolute floor, so raising
+     * AUDIO_OUT_EXTRA_GAIN_DB shifts the whole scale up and keeps the same
+     * amount of travel.
+     *
+     * Note volume 0 is special-cased to -96 dB inside esp_codec_dev regardless
+     * of this curve, which is one reason the runtime floor is VOLUME_MIN.
      */
     esp_codec_dev_vol_map_t vol_map[2] = {
-        { .vol = 0,   .db_value = -50.0f },
+        { .vol = 0,   .db_value = (float)(CONFIG_AUDIO_OUT_EXTRA_GAIN_DB -
+                                          CONFIG_AUDIO_OUT_RANGE_DB) },
         { .vol = 100, .db_value = (float)CONFIG_AUDIO_OUT_EXTRA_GAIN_DB },
     };
     esp_codec_dev_vol_curve_t curve = { .vol_map = vol_map, .count = 2 };
@@ -304,7 +421,6 @@ esp_err_t audio_io_init(int sample_rate)
     if (vol_err != ESP_CODEC_DEV_OK) {
         ESP_LOGW(TAG, "volume curve rejected: %d", vol_err);
     }
-#endif
 
     /*
      * Both of these must follow the codec _init() calls above, not precede
@@ -312,7 +428,10 @@ esp_err_t audio_io_init(int sample_rate)
      * returns without storing anything if it is not. es8311_codec_new() opens
      * it, so by here it is.
      */
-    esp_codec_dev_set_out_vol(s_spk, CONFIG_AUDIO_OUT_VOLUME);
+    /* Resolved here rather than in a separate init step, because the codec has
+     * to exist before a level can be applied at all. */
+    s_volume = volume_load();
+    esp_codec_dev_set_out_vol(s_spk, s_volume);
     esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
 
     int err = esp_codec_dev_open(s_spk, &fs);
@@ -338,9 +457,15 @@ esp_err_t audio_io_init(int sample_rate)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "codecs open: %d Hz, %d-bit, %d ch | volume %d (+%d dB), mic gain %d dB",
-             sample_rate, CODEC_BITS, CODEC_CHANNELS,
-             CONFIG_AUDIO_OUT_VOLUME, CONFIG_AUDIO_OUT_EXTRA_GAIN_DB, CONFIG_MIC_IN_GAIN);
+    /* The dB figure is what we asked the curve for; the ES8311 then adds ~3.6 dB
+     * of hw_gain compensation on top, so what you hear is a little above it. */
+    int floor_db = CONFIG_AUDIO_OUT_EXTRA_GAIN_DB - CONFIG_AUDIO_OUT_RANGE_DB;
+    int asked_db = floor_db + s_volume * CONFIG_AUDIO_OUT_RANGE_DB / 100;
+    ESP_LOGI(TAG, "codecs open: %d Hz, %d-bit, %d ch | volume %d%s = %d dB "
+                  "(range %d dB, gain +%d dB), mic gain %d dB",
+             sample_rate, CODEC_BITS, CODEC_CHANNELS, s_volume,
+             s_volume_from_nvs ? " (saved)" : " (default)", asked_db,
+             CONFIG_AUDIO_OUT_RANGE_DB, CONFIG_AUDIO_OUT_EXTRA_GAIN_DB, CONFIG_MIC_IN_GAIN);
     return ESP_OK;
 }
 
