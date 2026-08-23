@@ -78,6 +78,9 @@ static volatile int64_t s_activity_us;
  * land in the window, short enough not to smear the transition. */
 #define TELEMETRY_SWITCH_MS 200
 
+/* While waiting for the speaker to drain before the display test. */
+#define TEST_ENTRY_POLL_MS 100
+
 static void note_activity(void)
 {
     s_activity_us = esp_timer_get_time();
@@ -173,7 +176,19 @@ static void on_reload_required(void *ctx)
     session_ctl_request_reload();
 }
 
-static void on_display_test_required(void *ctx)
+/*
+ * Set when the agent has asked for the display test, cleared once the speaker has
+ * actually finished the sentence announcing it. See enter_display_test().
+ */
+static bool s_test_entry_pending;
+static int64_t s_test_entry_deadline_us;
+
+/* How long to wait for the speaker to drain before starting anyway. Long enough
+ * for a sentence the agent has already finished sending, short enough that a
+ * playback path stuck busy cannot swallow the feature. */
+#define TEST_ENTRY_WAIT_US (8 * 1000000)
+
+static void enter_display_test(void)
 {
     /*
      * ORDER MATTERS. session_ctl's stop path calls
@@ -185,6 +200,23 @@ static void on_display_test_required(void *ctx)
     session_ctl_request_stop();
     audio_io_capture_set_monitor(true);
     ui_start_display_test();
+}
+
+static void on_display_test_required(void *ctx)
+{
+    /*
+     * AgentAudioDone is NOT the speaker finishing. It means the agent has
+     * finished SENDING, and between that and the last sample leaving the codec
+     * sits the playback ring -- 384 kB, about six seconds of mono. Entering here
+     * stops the session, which drops the queue, and the announcement is cut off
+     * mid-word. Measured on the device, not theorised.
+     *
+     * So this only arms the entry; the main loop below waits for
+     * audio_io_playback_active() to go false, which is tied to what the speaker
+     * is actually doing rather than to what the agent last claimed.
+     */
+    s_test_entry_pending = true;
+    s_test_entry_deadline_us = esp_timer_get_time() + TEST_ENTRY_WAIT_US;
 }
 
 static void on_agent_audio_done(void *ctx)
@@ -384,6 +416,25 @@ void app_main(void)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(wait_ms));
         wait_ms = CONFIG_UI_TELEMETRY_MS;
+
+        /*
+         * Hand over once the speaker is actually done, so the announcement is
+         * not cut off. Polled here rather than in a task of its own, at a
+         * tighter cadence than the telemetry window so the wait is not audible
+         * as a gap -- the same trick the post-face-switch reading uses.
+         */
+        if (s_test_entry_pending) {
+            bool drained = !audio_io_playback_active();
+            bool timed_out = esp_timer_get_time() > s_test_entry_deadline_us;
+            if (drained || timed_out) {
+                s_test_entry_pending = false;
+                ESP_LOGI(TAG, "EVT test entering (%s)",
+                         drained ? "speaker drained" : "wait timed out");
+                enter_display_test();
+            } else {
+                wait_ms = TEST_ENTRY_POLL_MS;
+            }
+        }
 
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
