@@ -313,6 +313,7 @@ static void handle_function_call(const cJSON *root)
                          "The screen is now showing the %s. Say so briefly.",
                          faces_name((size_t)index));
             }
+            cJSON_Delete(fargs);
             send_function_response(id->valuestring, name->valuestring, content);
             continue;
         }
@@ -350,7 +351,6 @@ static void handle_function_call(const cJSON *root)
                          "The orb is now %s. Say so briefly.",
                          orb_colors_name((size_t)index));
             }
-            /* Unlike set_face above, which leaks these -- see the next commit. */
             cJSON_Delete(cargs);
             send_function_response(id->valuestring, name->valuestring, content);
             continue;
