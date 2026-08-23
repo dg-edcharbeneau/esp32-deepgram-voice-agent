@@ -288,6 +288,68 @@ menu "Deepgram Agent Device"
         help
             Index into the face table in ui.c. Set by the choice above.
 
+    choice UI_DEFAULT_ORB_COLOR_CHOICE
+        prompt "Default orb colour"
+        default UI_DEFAULT_ORB_COLOR_WHITE
+        help
+            What colour the orb's dots boot as. Any of these can be asked for at
+            runtime ("change the colour to teal"), so this only picks the default.
+
+            Named colours rather than a raw hex on purpose: every colour the
+            device can boot in is then also one the agent can be asked to return
+            to. A hex here could ship a board whose default has no name, and
+            "put it back to normal" would have nothing to reach for.
+
+            Affects the orb only. The spectrum colours its bands by frequency and
+            by which half of the conversation is live, so it ignores this.
+
+        config UI_DEFAULT_ORB_COLOR_WHITE
+            bool "White -- the monochrome shell, and the rasteriser's identity"
+        config UI_DEFAULT_ORB_COLOR_VIRA
+            bool "Vira -- soft peach-coral"
+        config UI_DEFAULT_ORB_COLOR_TOMATO
+            bool "Tomato -- warm red"
+        config UI_DEFAULT_ORB_COLOR_ORANGE
+            bool "Orange"
+        config UI_DEFAULT_ORB_COLOR_YELLOW
+            bool "Yellow"
+        config UI_DEFAULT_ORB_COLOR_LIME
+            bool "Lime -- sharp yellow-green"
+        config UI_DEFAULT_ORB_COLOR_GREEN
+            bool "Green"
+        config UI_DEFAULT_ORB_COLOR_TEAL
+            bool "Teal -- vivid aqua"
+        config UI_DEFAULT_ORB_COLOR_CYAN
+            bool "Cyan"
+        config UI_DEFAULT_ORB_COLOR_BLUE
+            bool "Blue"
+        config UI_DEFAULT_ORB_COLOR_INDIGO
+            bool "Indigo -- blue-violet"
+        config UI_DEFAULT_ORB_COLOR_PURPLE
+            bool "Purple"
+        config UI_DEFAULT_ORB_COLOR_PINK
+            bool "Pink"
+    endchoice
+
+    config UI_DEFAULT_ORB_COLOR
+        int
+        default 0 if UI_DEFAULT_ORB_COLOR_WHITE
+        default 1 if UI_DEFAULT_ORB_COLOR_VIRA
+        default 2 if UI_DEFAULT_ORB_COLOR_TOMATO
+        default 3 if UI_DEFAULT_ORB_COLOR_ORANGE
+        default 4 if UI_DEFAULT_ORB_COLOR_YELLOW
+        default 5 if UI_DEFAULT_ORB_COLOR_LIME
+        default 6 if UI_DEFAULT_ORB_COLOR_GREEN
+        default 7 if UI_DEFAULT_ORB_COLOR_TEAL
+        default 8 if UI_DEFAULT_ORB_COLOR_CYAN
+        default 9 if UI_DEFAULT_ORB_COLOR_BLUE
+        default 10 if UI_DEFAULT_ORB_COLOR_INDIGO
+        default 11 if UI_DEFAULT_ORB_COLOR_PURPLE
+        default 12 if UI_DEFAULT_ORB_COLOR_PINK
+        help
+            Index into the colour table in orb_colors.c. Set by the choice above,
+            and ORDER IS THE CONTRACT -- these have to match that table.
+
     config ORB_AMP_GAIN_MIC
         int "Display level gain, microphone path (percent)"
         default 600

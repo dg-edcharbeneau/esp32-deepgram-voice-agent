@@ -7,12 +7,14 @@
 #include "freertos/task.h"
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "faces.h"
+#include "orb_colors.h"
 #include "ui.h"
 #include "voices.h"
 
@@ -312,6 +314,45 @@ static void handle_function_call(const cJSON *root)
                          "The screen is now showing the %s. Say so briefly.",
                          faces_name((size_t)index));
             }
+            cJSON_Delete(fargs);
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
+        if (strcmp(name->valuestring, "set_color") == 0) {
+            int index = -1;
+            const char *wanted = NULL;
+            cJSON *cargs = function_args(fn);
+            if (cargs != NULL) {
+                const cJSON *c = cJSON_GetObjectItemCaseSensitive(cargs, "color");
+                if (cJSON_IsString(c)) {
+                    wanted = c->valuestring;
+                    index = orb_colors_find(wanted);
+                }
+            }
+
+            if (index < 0) {
+                ESP_LOGW(TAG, "EVT setcolor req=\"%s\" -> unknown",
+                         (wanted != NULL) ? wanted : "");
+                snprintf(content, sizeof(content),
+                         "The orb has no '%s' colour. Ask which one they want.",
+                         (wanted != NULL) ? wanted : "");
+            } else {
+                /* No reload, like set_face and unlike set_voice: a local display
+                 * setting, in effect by the time this is spoken. */
+                ui_set_orb_color(index);
+                /* The requested string as well as the resolved colour: whether
+                 * the model routes an indirect phrasing here is the thing worth
+                 * testing, and that is only visible in what it actually sent. */
+                ESP_LOGI(TAG, "EVT setcolor req=\"%s\" -> %s", wanted,
+                         orb_colors_name((size_t)index));
+                /* "The orb is", not "the screen is": the colour applies whichever
+                 * face is up, so this stays true while the spectrum is showing. */
+                snprintf(content, sizeof(content),
+                         "The orb is now %s. Say so briefly.",
+                         orb_colors_name((size_t)index));
+            }
+            cJSON_Delete(cargs);
             send_function_response(id->valuestring, name->valuestring, content);
             continue;
         }
@@ -473,6 +514,63 @@ static esp_err_t send_settings(void)
     cJSON *frequired = cJSON_AddArrayToObject(fparams, "required");
     cJSON_AddItemToArray(frequired, cJSON_CreateString("face"));
     cJSON_AddItemToArray(functions, set_face);
+
+    /*
+     * Colour, same shape and the same reasoning as the face above: local to the
+     * device, so not Flux-gated, and the catalog goes in the description because
+     * JSON Schema has nowhere to hang a per-enum-value note.
+     *
+     * The description names the orb explicitly. The spectrum draws its own
+     * palette and ignores the setting, and saying so is what stops the model
+     * offering a colour change as the answer to "the bars look wrong".
+     */
+    /*
+     * PSRAM, and ONE buffer rather than a catalog-plus-description pair.
+     *
+     * NOT A STYLE CHOICE -- MEASURED. This task has task_stack = 6144, and the
+     * two existing pairs above already put 2,880 B of it on the stack (1,212 for
+     * faces, 1,668 for voices under Flux). Adding a third pair of 1,280 tripped
+     * the stack canary on the first session and put the device in a boot loop,
+     * before cJSON's own recursion is even counted.
+     *
+     * So the prefix is written first and the catalog appended into the tail of
+     * the same allocation, which costs no stack at all. cJSON copies the string,
+     * so it is freed immediately. If a fourth function ever wants a described
+     * catalog, do this rather than the pattern above it.
+     */
+    /* 543 B in use at fourteen colours (201 prefix + 341 catalog + NUL). Rounded
+     * up because it is PSRAM and free, so a couple more colours cannot quietly
+     * run into orb_colors_describe()'s truncation path. */
+    enum { COLOR_DESC_LEN = 1024 };
+    char *color_desc = heap_caps_malloc(COLOR_DESC_LEN, MALLOC_CAP_SPIRAM);
+    /* Losing the catalog is survivable -- the enum still constrains the model to
+     * valid names, it just has less to reason about. Losing the function is not. */
+    const char *color_desc_str = "Change the colour of the orb on the device's screen.";
+    if (color_desc != NULL) {
+        int n = snprintf(color_desc, COLOR_DESC_LEN,
+                         "Change the colour of the orb on the device's screen. Use "
+                         "when the user asks for a different colour, or to go back "
+                         "to normal. Only the orb is affected; the spectrum face "
+                         "keeps its own colours. Colours: ");
+        if (n > 0 && (size_t)n < COLOR_DESC_LEN) {
+            orb_colors_describe(color_desc + n, COLOR_DESC_LEN - (size_t)n);
+            color_desc_str = color_desc;
+        }
+    }
+
+    cJSON *set_color = cJSON_CreateObject();
+    cJSON_AddStringToObject(set_color, "name", "set_color");
+    cJSON_AddStringToObject(set_color, "description", color_desc_str);
+    free(color_desc); /* cJSON copied it; free(NULL) is fine */
+    cJSON *cparams = cJSON_AddObjectToObject(set_color, "parameters");
+    cJSON_AddStringToObject(cparams, "type", "object");
+    cJSON *cprops = cJSON_AddObjectToObject(cparams, "properties");
+    cJSON *color_prop = cJSON_AddObjectToObject(cprops, "color");
+    cJSON_AddStringToObject(color_prop, "type", "string");
+    orb_colors_add_enum(color_prop, "enum");
+    cJSON *crequired = cJSON_AddArrayToObject(cparams, "required");
+    cJSON_AddItemToArray(crequired, cJSON_CreateString("color"));
+    cJSON_AddItemToArray(functions, set_color);
 
 #if CONFIG_SPEECH_STACK_FLUX
     /* The catalog goes in the description because JSON Schema has nowhere to

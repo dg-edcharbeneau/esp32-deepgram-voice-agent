@@ -79,6 +79,10 @@ MIT. It has a vocabulary rather than a level meter:
 Amplitude scales how **deep** a gesture goes, never how fast. Driving rate from
 level is frequency modulation, and reads as vibration rather than as a voice.
 
+The dots are white by default and can be recoloured by asking — see "Changing
+the orb's colour by asking" below. `CONFIG_UI_DEFAULT_ORB_COLOR` picks what it
+boots as.
+
 The geometry is verified numerically rather than by eye. `host/run.sh` runs the
 upstream TypeScript under node's native type stripping and diffs the C
 dot-for-dot: 14 frames, 456/456 dots, worst deviation 0.0043 px. That harness
@@ -382,6 +386,38 @@ exactly. `ui_set_face()` stores an index that the frame timer applies **before**
 anything draws, so the incoming face owns a whole frame instead of painting over
 half of the outgoing one's output.
 
+## Changing the orb's colour by asking
+
+"Make it purple" works, and so does "put it back to normal". `set_color` takes a
+name from a thirteen-entry catalog in
+[main/orb_colors.c](main/orb_colors.c) — the accent colours of the Vira palette —
+and is the sibling of `set_face` in every mechanical respect: no `Settings` field,
+no session reload, applied by the frame timer, and not persisted across a reboot.
+
+**The orb only.** The spectrum colours its bands by frequency and by which half of
+the conversation is live, so a single tint would destroy information rather than
+restyle it. The function description says so, which is what stops the model
+offering a colour change when someone complains about the bars.
+
+Colour is one multiply per channel on the ink the geometry already resolved, at
+the single point in [main/orb_raster.c](main/orb_raster.c) where that ink became
+three RGB565 channels. Two consequences worth knowing:
+
+- **White is an exact identity**, not an approximation of the original. Verified by
+  sweeping 1,000,001 ink values against the expression it replaced — zero
+  mismatches — so the default costs nothing and colour is entirely opt-in. It is
+  done in float for this reason: the tempting `(lum * ch) >> 8` is a level low at
+  small ink, which moves the *default* appearance.
+- **The shell still reads as a surface.** The ink spans a real brightness ramp
+  (87..249 across the parity dump's 6,384 dots), and a multiplicative tint keeps
+  that as luminance instead of flattening the shell to one flat colour.
+
+Names are the palette's, with one deliberate departure: its three greens and two
+teals are named by relative intensity, which reads fine off a swatch and badly out
+loud — "lime" against "acid lime" is a coin toss spoken aloud. So its `acid lime`
+is `lime` here, its `lime` is `green`, its `bright teal` is `teal`, and its muted
+`#80cbc4` teal is dropped.
+
 ## Stopping when nobody is talking
 
 The device uplinks 16 kHz mono for as long as a session is open — roughly
@@ -640,9 +676,10 @@ same monitor command works for both projects.
 | [main/ui_face.h](main/ui_face.h) | the face vtable and per-frame render context |
 | [main/face_orb.c](main/face_orb.c) | orb face: behaviour selection and the 280 ms crossfade |
 | [main/orb_geometry.c](main/orb_geometry.c) | the shell's maths. No LVGL, no ESP-IDF — compiles on the host so `host/run.sh` can diff it against upstream |
-| [main/orb_raster.c](main/orb_raster.c) | dots to RGB565: coverage-normalised blend, dirty-rect clear, zero per-frame allocation |
+| [main/orb_raster.c](main/orb_raster.c) | dots to RGB565: coverage-normalised blend, per-channel colour tint, dirty-rect clear, zero per-frame allocation |
 | [main/face_spectrum.c](main/face_spectrum.c) | spectrum face: FFT, sample handoff, ring render. Initialises lazily |
 | [main/faces.c](main/faces.c) | the face catalog, LVGL-free so `dg_agent` can build the `set_face` schema |
+| [main/orb_colors.c](main/orb_colors.c) | the orb colour catalog, same split, for the `set_color` schema |
 | [host/](host/) | geometry parity harness — runs the upstream TypeScript and diffs the C dot-for-dot |
 | [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
 | [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / prompt / greeting / audio, and the Wi-Fi seed |

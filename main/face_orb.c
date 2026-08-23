@@ -172,7 +172,10 @@ static void render(const ui_render_ctx_t *ctx)
     };
     orb_build(s_frame, t, s_from, s_to, mix, amp, &bands);
     int64_t t_rast = esp_timer_get_time();
-    orb_raster_draw(s_frame);
+    /* Colour is the user's, resolved by ui.c. Nothing to latch or reset: it is a
+     * pure draw parameter, so a change lands on the next frame by itself -- which
+     * is also why activate() has nothing to say about it. */
+    orb_raster_draw(s_frame, ctx->tint_rgb);
     int64_t t_end = esp_timer_get_time();
 
     static int64_t geom_sum, rast_sum;

@@ -126,12 +126,15 @@ static void clear_box(const int16_t *b)
 /*
  * One dot, src-over, into RGB565.
  *
- * `g` is the 8-bit grey the ink resolves to and `alpha` the ring's opacity;
+ * The ink resolves to an 8-bit luminance and `alpha` is the ring's opacity;
  * per-pixel coverage multiplies the latter. Blending is done with a 0..256
  * inverse so the inner loop shifts instead of dividing -- the resulting
  * half-level bias is well under one 5-bit RGB565 step.
+ *
+ * `tr`/`tg`/`tb` are the colour's channels as 0..1 scales, hoisted out of the
+ * frame by the caller because they are constant across every dot in it.
  */
-static void blit_dot(const orb_dot_t *d, int16_t *box)
+static void blit_dot(const orb_dot_t *d, int16_t *box, float tr, float tg, float tb)
 {
     float r = d->r;
     int32_t x0 = (int32_t)floorf(d->x - r - 1.0f);
@@ -208,8 +211,23 @@ static void blit_dot(const orb_dot_t *d, int16_t *box)
     if (w < 0.0f) w = 0.0f;
     else if (w > 1.0f) w = 1.0f;
     /* Dark ground, so ink is mirrored: near dots read bright. */
-    uint32_t g = (uint32_t)((1.0f - w) * 255.0f + 0.5f);
-    uint32_t sr = g >> 3, sg = g >> 2, sb = g >> 3;
+    float lum = (1.0f - w) * 255.0f;
+
+    /*
+     * Colour is a per-channel scale on that luminance, which is what keeps the
+     * shell readable: the geometry's ink spans a real brightness ramp (measured
+     * 87..249 over the parity dump's 6,384 dots), and scaling preserves it as
+     * luminance instead of flattening the shell into one flat colour.
+     *
+     * FLOAT ON PURPOSE. The integer form (lum * ch) >> 8 is a level low at small
+     * lum -- lum 8 with a full channel gives 7, which floors to a different
+     * RGB565 step -- so white would stop being an exact identity and the default
+     * appearance would shift. At tr = 1.0 this is bit-for-bit the expression it
+     * replaced. Three multiplies per dot, in a file that calls sqrtf per pixel.
+     */
+    uint32_t sr = (uint32_t)(lum * tr + 0.5f) >> 3;
+    uint32_t sg = (uint32_t)(lum * tg + 0.5f) >> 2;
+    uint32_t sb = (uint32_t)(lum * tb + 0.5f) >> 3;
 
     for (int32_t y = 0; y < bh; y++) {
         uint16_t *row = &s_pixels[(y0 + y) * s_stride_px + x0];
@@ -244,11 +262,16 @@ static void blit_dot(const orb_dot_t *d, int16_t *box)
     box[3] = (int16_t)y1;
 }
 
-void orb_raster_draw(const orb_frame_t *frame)
+void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
 {
     if (s_pixels == NULL) {
         return;
     }
+
+    /* Once per frame, not once per dot: the colour cannot change mid-frame. */
+    float tr = (float)((rgb >> 16) & 0xFF) / 255.0f;
+    float tg = (float)((rgb >> 8) & 0xFF) / 255.0f;
+    float tb = (float)(rgb & 0xFF) / 255.0f;
 
     /* Union of what changes, so LVGL flushes a box rather than the whole panel.
      * Seeded from last frame's marks because those have to be cleared. */
@@ -271,7 +294,7 @@ void orb_raster_draw(const orb_frame_t *frame)
         n = ORB_MAX_DOTS;
     }
     for (size_t i = 0; i < n; i++) {
-        blit_dot(&frame->dots[i], s_prev[i]);
+        blit_dot(&frame->dots[i], s_prev[i], tr, tg, tb);
         const int16_t *b = s_prev[i];
         if (b[2] < b[0]) {
             continue;
