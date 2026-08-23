@@ -81,7 +81,6 @@ static int s_dot_count;
 #define WAVE_RINGS 15
 #define WAVE_RING_COUNT (WAVE_RINGS + 1)
 #define WAVE_LON_DENSITY 40
-#define WAVE_MAX_DOTS 384
 
 static orb_ring_t s_wave_rings[WAVE_RING_COUNT];
 static int s_wave_dot_count;
@@ -98,6 +97,19 @@ static float *s_wave_sin_lon;
  * 0.0 boundary. Deriving these per frame in float moved 26 of 384 dots.
  */
 static double *s_wave_unit; /* ux,uy,uz interleaved: 3 doubles a dot */
+
+/*
+ * RIBBON'S TABLES. Nothing lattice-shaped about this mode: a Fibonacci-sphere
+ * ghost shell for depth, and a band of `lanes` parallel tracks each of `segs`
+ * segments, precessing as a plane and undulating along its length.
+ */
+#define RIBBON_GHOSTS 150
+#define RIBBON_SEGS 88
+#define RIBBON_LANES 5
+
+static float *s_ghost_dx, *s_ghost_dy, *s_ghost_dz;
+static float *s_seg_a, *s_seg_cos, *s_seg_sin;
+static float *s_lane_off, *s_lane_edge;
 
 /*
  * The per-dot lattice tables, heap allocated as ONE block.
@@ -515,21 +527,32 @@ bool orb_init(float size)
          * is the resource this file has always been careful with. Pooled, the
          * block clears the threshold and lands in PSRAM.
          */
-        s_lattice = malloc((3 * ORB_MAX_DOTS + 2 * WAVE_MAX_DOTS) * sizeof(float));
+        s_lattice = malloc((3 * ORB_VOICE_DOTS + 2 * ORB_WAVE_DOTS
+                            + 3 * RIBBON_GHOSTS + 3 * RIBBON_SEGS
+                            + 2 * RIBBON_LANES) * sizeof(float));
         if (s_lattice == NULL) {
             return false;
         }
         /* Doubles, so a separate block -- 9.2 kB, which clears
          * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL on its own and lands in PSRAM. */
-        s_wave_unit = malloc(3 * WAVE_MAX_DOTS * sizeof(double));
+        s_wave_unit = malloc(3 * ORB_WAVE_DOTS * sizeof(double));
         if (s_wave_unit == NULL) {
             return false;
         }
-        s_cos_lon = &s_lattice[0];
-        s_sin_lon = &s_lattice[ORB_MAX_DOTS];
-        s_scatter = &s_lattice[2 * ORB_MAX_DOTS];
-        s_wave_cos_lon = &s_lattice[3 * ORB_MAX_DOTS];
-        s_wave_sin_lon = &s_lattice[3 * ORB_MAX_DOTS + WAVE_MAX_DOTS];
+        size_t off = 0;
+        s_cos_lon = &s_lattice[off]; off += ORB_VOICE_DOTS;
+        s_sin_lon = &s_lattice[off]; off += ORB_VOICE_DOTS;
+        s_scatter = &s_lattice[off]; off += ORB_VOICE_DOTS;
+        s_wave_cos_lon = &s_lattice[off]; off += ORB_WAVE_DOTS;
+        s_wave_sin_lon = &s_lattice[off]; off += ORB_WAVE_DOTS;
+        s_ghost_dx = &s_lattice[off]; off += RIBBON_GHOSTS;
+        s_ghost_dy = &s_lattice[off]; off += RIBBON_GHOSTS;
+        s_ghost_dz = &s_lattice[off]; off += RIBBON_GHOSTS;
+        s_seg_a = &s_lattice[off]; off += RIBBON_SEGS;
+        s_seg_cos = &s_lattice[off]; off += RIBBON_SEGS;
+        s_seg_sin = &s_lattice[off]; off += RIBBON_SEGS;
+        s_lane_off = &s_lattice[off]; off += RIBBON_LANES;
+        s_lane_edge = &s_lattice[off]; off += RIBBON_LANES;
     }
 
     s_cx = size / 2.0f;
@@ -602,6 +625,29 @@ bool orb_init(float size)
     s_wave_dot_count = wn;
 
     rubik_make_moves();
+
+    /* ribbon's precompute. fibDir's golden angle, verbatim. */
+    const double golden = M_PI * (3.0 - sqrt(5.0));
+    for (int i = 0; i < RIBBON_GHOSTS; i++) {
+        double gy = 1.0 - (2.0 * ((double)i + 0.5)) / (double)RIBBON_GHOSTS;
+        double rad = sqrt(1.0 - gy * gy);
+        double ga = (double)i * golden;
+        s_ghost_dx[i] = (float)(rad * cos(ga));
+        s_ghost_dy[i] = (float)gy;
+        s_ghost_dz[i] = (float)(rad * sin(ga));
+    }
+    for (int k = 0; k < RIBBON_SEGS; k++) {
+        double a = ((double)k / (double)RIBBON_SEGS) * 2.0 * M_PI;
+        s_seg_a[k] = (float)a;
+        s_seg_cos[k] = (float)cos(a);
+        s_seg_sin[k] = (float)sin(a);
+    }
+    for (int w = 0; w < RIBBON_LANES; w++) {
+        double mid = ((double)RIBBON_LANES - 1.0) / 2.0;
+        s_lane_off[w] = (float)(((double)w - mid) * 0.075);
+        double half = (mid > 1.0) ? mid : 1.0;
+        s_lane_edge[w] = (float)(fabs((double)w - mid) / half);
+    }
     return true;
 }
 
@@ -897,6 +943,119 @@ void orb_build_rubik(orb_frame_t *out, float t)
             }
             d->white = RUBIK_INK_FAR - RUBIK_INK_SPAN * depth - (in_active ? 0.14f : 0.0f);
             d->a = 1.0f;
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+}
+
+/* ---------------- ribbon (ribbon.ts buildRibbon) ---------------- */
+
+/*
+ * The playground's `composing` orb: a band that precesses through the sphere,
+ * undulating along its length, over a haze of ghost dots.
+ *
+ * The largest mode at 590 dots, and the only one so far that varies alpha per
+ * dot -- the ghosts sit at 0.1..0.32 so they read as depth rather than as marks.
+ * Its rBase is 1.1, not the 0.6 wave and rubik share: the band is a line the eye
+ * follows, so its dots are fatter.
+ */
+#define RIBBON_R_BASE 1.1f
+#define RIBBON_GHOST_INK 0.78f
+
+void orb_build_ribbon(orb_frame_t *out, float t)
+{
+    const float R = s_cx * 0.78f;
+
+    /* scale = 1, so scaled vectors go in and z comes back scaled. */
+    const float yaw = t * 0.1f;
+    const float tilt = 0.3f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    size_t count = 0;
+
+    /* The ghost shell first, matching the reference's emission order. */
+    const float ghost_r = 0.8f * s_rs;
+    for (int i = 0; i < RIBBON_GHOSTS; i++) {
+        float ux = s_ghost_dx[i], uy = s_ghost_dy[i], uz = s_ghost_dz[i];
+
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        float dz = uy * st + z1 * ct;
+
+        /* The unit vector is scaled by R before projection, so z/R is dz. */
+        float depth = (dz + 1.0f) / 2.0f;
+        if (depth < 0.0f) depth = 0.0f;
+        else if (depth > 1.0f) depth = 1.0f;
+
+        orb_dot_t *d = &out->dots[count++];
+        d->x = s_cx + x1 * R;
+        d->y = s_cy - y1 * R;
+        d->z = dz * R;
+        d->r = ghost_r;
+        if (d->r < R_MIN) {
+            d->r = R_MIN;
+        }
+        d->white = RIBBON_GHOST_INK;
+        d->a = 0.1f + 0.22f * depth;
+    }
+
+    /*
+     * The band's plane, as two orthogonal in-plane vectors and their normal.
+     * Recomputed per frame because it precesses; the reference builds it the same
+     * way, and the cross product is what the lane offset is applied along.
+     */
+    float ya = t * 0.24f;
+    float ta = 0.55f + 0.3f * sinf(t * 0.18f);
+    float bux = cosf(ya), buy = 0.0f, buz = sinf(ya);
+    float bvx = -buz * sinf(ta), bvy = cosf(ta), bvz = bux * sinf(ta);
+    float bnx = buy * bvz - buz * bvy;
+    float bny = buz * bvx - bux * bvz;
+    float bnz = bux * bvy - buy * bvx;
+
+    for (int w = 0; w < RIBBON_LANES; w++) {
+        float lane_off = s_lane_off[w];
+        float edge = s_lane_edge[w];
+        for (int k = 0; k < RIBBON_SEGS; k++) {
+            float a = s_seg_a[k];
+            float ca = s_seg_cos[k];
+            float sa = s_seg_sin[k];
+
+            /* Two travelling waves along the band, phased per lane so the whole
+             * ribbon flexes rather than every lane moving as one. */
+            float wob = 0.16f * sinf(a * 3.0f - t * 1.7f + (float)w * 0.22f) +
+                        0.07f * sinf(a * 5.0f + t * 1.1f);
+            float off = lane_off + wob;
+
+            float x = bux * ca + bvx * sa + bnx * off;
+            float y = buy * ca + bvy * sa + bny * off;
+            float z = buz * ca + bvz * sa + bnz * off;
+            float l = sqrtf(x * x + y * y + z * z);
+            /* Back onto the unit sphere: the band rides the surface. */
+            x /= l; y /= l; z /= l;
+
+            float x1 = x * cyw + z * sy;
+            float z1 = -x * sy + z * cyw;
+            float y1 = y * ct - z1 * st;
+            float dz = y * st + z1 * ct;
+
+            float depth = (dz + 1.0f) / 2.0f;
+            if (depth < 0.0f) depth = 0.0f;
+            else if (depth > 1.0f) depth = 1.0f;
+
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1 * R;
+            d->y = s_cy - y1 * R;
+            d->z = dz * R;
+            d->r = (RIBBON_R_BASE + R_DEPTH * depth) * (1.0f - 0.25f * edge) * s_rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = 0.52f - 0.44f * depth + 0.18f * edge;
+            d->a = 0.4f + 0.6f * depth;
         }
     }
 

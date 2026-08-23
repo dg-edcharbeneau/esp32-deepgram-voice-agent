@@ -6,6 +6,7 @@
 // performs, because the expo port does it inside its Skia recorder.
 import { precomputeVoice, buildVoice } from './ref/voice.ts';
 import { precomputeWave, buildWave, precomputeRubik, buildRubik } from './ref/lattice.ts';
+import { precomputeRibbon, buildRibbon } from './ref/ribbon.ts';
 
 const SIZE = Number(process.env.ORB_SIZE ?? 466);
 const R_MIN = 0.3;
@@ -105,6 +106,38 @@ const RUBIK_CASES = [
   ['rubik_d', 12.4],
 ];
 
+const bs_ = precomputeRibbon(opts);
+const bbuf = {
+  xs: new Float32Array(bs_.dotCount), ys: new Float32Array(bs_.dotCount),
+  zs: new Float32Array(bs_.dotCount), rs: new Float32Array(bs_.dotCount),
+  ws: new Float32Array(bs_.dotCount), as: new Float32Array(bs_.dotCount),
+  count: 0,
+};
+
+function ribbonFrame(t) {
+  bbuf.count = 0;
+  buildRibbon(bbuf, SIZE, t, opts, bs_, {
+    amp: 0, from: 0, to: 0, mix: 1,
+    rMul: 1, yaw: 0, pitch: 0, roll: 0, orient: undefined,
+  });
+  const out = [];
+  for (let i = 0; i < bbuf.count; i++) {
+    if (bbuf.as[i] < ALPHA_CULL) continue;
+    out.push({
+      x: bbuf.xs[i], y: bbuf.ys[i], z: bbuf.zs[i],
+      r: Math.max(R_MIN, bbuf.rs[i]), w: bbuf.ws[i], a: bbuf.as[i],
+    });
+  }
+  out.sort((a, b) => a.z - b.z);
+  return out;
+}
+
+const RIBBON_CASES = [
+  ['ribbon_a', 1.7],
+  ['ribbon_b', 4.6],
+  ['ribbon_c', 11.9],
+];
+
 const WAVE_CASES = [
   ['wave_a', 1.7],
   ['wave_b', 3.3],
@@ -146,6 +179,14 @@ for (const [label, t] of WAVE_CASES) {
 
 for (const [label, t] of RUBIK_CASES) {
   for (const d of rubikFrame(t)) {
+    process.stdout.write(
+      `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
+      `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);
+  }
+}
+
+for (const [label, t] of RIBBON_CASES) {
+  for (const d of ribbonFrame(t)) {
     process.stdout.write(
       `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
       `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);

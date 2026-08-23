@@ -37,9 +37,22 @@ typedef enum {
     ORB_BEHAVIOUR_COUNT = 8,
 } orb_behaviour_t;
 
-/* 18 rings of cosine-tapered longitude counts. Not a 17x42 grid -- see
- * orb_init(). */
-#define ORB_MAX_DOTS 456
+/*
+ * Per-mode dot counts, and the capacity that has to cover all of them.
+ *
+ * A MAX RATHER THAN A LITERAL on purpose. This sizes orb_frame_t, the
+ * rasteriser's dirty list and the lattice tables, and orb_raster_draw() silently
+ * TRUNCATES anything past it -- so a cap that drifts below a mode's real count
+ * drops dots and reads as missing rows in the harness rather than as an error.
+ * Reduce a mode's tuning if a frame is too dear; never reduce the cap.
+ */
+#define ORB_VOICE_DOTS 456  /* 18 rings of cosine-tapered longitude counts */
+#define ORB_WAVE_DOTS 384   /* rings 15 / lonDensity 40; rubik shares it */
+#define ORB_RIBBON_DOTS 590 /* ghostN 150 + lanes 5 * segs 88 */
+
+#define ORB_MAX2(a, b) ((a) > (b) ? (a) : (b))
+#define ORB_MAX_DOTS \
+    ORB_MAX2(ORB_VOICE_DOTS, ORB_MAX2(ORB_WAVE_DOTS, ORB_RIBBON_DOTS))
 
 typedef struct {
     float x, y;  /* screen pixels */
@@ -86,6 +99,16 @@ void orb_build_wave(orb_frame_t *out, float t);
  * including the shell radius and the ink constants, is its own.
  */
 void orb_build_rubik(orb_frame_t *out, float t);
+
+/*
+ * Build one frame of `ribbon` -- the playground's `composing` orb, ported from
+ * ribbon.ts buildRibbon.
+ *
+ * The largest mode at 590 dots: a 150-dot Fibonacci ghost shell plus a five-lane
+ * band of 88 segments that precesses and undulates. Unlike wave and rubik it
+ * varies alpha per dot, so its ghosts read as a haze behind the band.
+ */
+void orb_build_ribbon(orb_frame_t *out, float t);
 
 /*
  * Evaluate one frame.
