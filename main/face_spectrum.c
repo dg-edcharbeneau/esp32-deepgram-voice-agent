@@ -100,6 +100,14 @@ static const char *TAG = "face_spectrum";
  * segments puts a step discontinuity through the FFT and splatters the whole
  * spectrum. Hence the retry rather than a bare volatile.
  *
+ * MOVING THE BANKS TO PSRAM WIDENED THAT RACE, deliberately and measurably.
+ * take_window() copies 1024 samples out of a bank, and a PSRAM-backed read is
+ * slower than an internal one, so there is more time for the writer to lap the
+ * reader mid-copy. The retry loop already handles it: three tears and the caller
+ * holds the previous frame, which costs one stale spectrum and never corrupts
+ * one. If "window torn three times" starts appearing in a log, this is why --
+ * and it is its own commit so it can be reverted alone.
+ *
  * IN PSRAM, ALLOCATED IN init(). As internal .bss these buffers cost 6 kB from
  * boot whether or not anyone ever selects this face -- both faces are linked in
  * unconditionally, so a face's statics are resident even when it is not, and
@@ -109,7 +117,7 @@ static const char *TAG = "face_spectrum";
  */
 static int16_t *s_window;        /* owned by the audio tasks */
 static size_t s_hop_fill;        /* samples into the new half */
-static int16_t s_bank[2][FFT_N];
+static int16_t (*s_bank)[FFT_N];
 static uint32_t s_publishes;     /* release-stored by writer, acquire-loaded by reader */
 
 /* ---------------- LVGL-owned state ---------------- */
@@ -370,8 +378,12 @@ static esp_err_t init(lv_obj_t *canvas)
      */
     s_window = heap_caps_aligned_calloc(16, FFT_N, sizeof(int16_t), MALLOC_CAP_SPIRAM);
 
+    /* The banks need no zeroing: take_window() returns false until the first
+     * publish, and a publish writes a whole bank. */
+    s_bank = heap_caps_aligned_alloc(16, 2 * FFT_N * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+
     if (s_audio == NULL || s_wind == NULL || s_fft == NULL || s_spectrum == NULL ||
-        s_window == NULL) {
+        s_window == NULL || s_bank == NULL) {
         ESP_LOGE(TAG, "no PSRAM for FFT buffers");
         return ESP_ERR_NO_MEM;
     }
