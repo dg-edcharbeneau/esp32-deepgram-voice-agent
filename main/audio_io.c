@@ -12,38 +12,13 @@
 
 #include "bsp/esp-bsp.h"
 
-#include "audio_aec.h"
-#include "audio_codecs.h"
 #include "audio_io.h"
 
 static const char *TAG = "audio_io";
 
 /* The codecs are opened with this many channels; see the header. */
 #define CODEC_CHANNELS 2
-/*
- * Sample width on the wire to both codecs.
- *
- * 32 under CONFIG_AEC_REF_PROBE, and it is not about audio quality. The ES7210
- * emits a 4x16-bit TDM frame -- 64 bits -- and the S3's I2S RX cannot be put in
- * TDM mode independently, because RX and TX share BCLK/WS in full duplex and
- * must be configured identically. Reading the same 64 bits as 2 channels x
- * 32 bits gets the whole frame through standard I2S, with one 32-bit word
- * carrying two 16-bit channels.
- *
- * es7210_set_fs() is written for exactly this: in TDM mode with channel <= 2 and
- * channel_mask == 0 it halves the requested width, so asking for 32 programs
- * 16-bit slots.
- *
- * Do NOT ask for 16 expecting 8-bit slots. `bits >>= 1` gives 8 and
- * es7210_set_bits() has no case 8 -- it falls through to default and writes
- * 16-bit anyway, so the ADC would clock out 64 bits against 32 from the S3 and
- * MIC3/MIC4 would never be shifted out at all.
- */
-#if CONFIG_AEC_REF_PROBE
-#define CODEC_BITS     32
-#else
 #define CODEC_BITS     16
-#endif
 
 /*
  * Mono frames per capture read. 1280 at 16 kHz is 80 ms, the chunk size Flux
@@ -82,11 +57,6 @@ static StreamBufferHandle_t s_ring;
 static audio_io_capture_sink_t s_sink;
 static audio_io_tap_t s_play_tap;
 static audio_io_tap_t s_cap_tap;
-#if CONFIG_AEC_ENABLE
-/* False if the AFE could not be created; the capture path then behaves exactly
- * as it does in a build without AEC. */
-static bool s_aec_running;
-#endif
 
 static volatile uint32_t s_played;
 static volatile uint32_t s_dropped;
@@ -140,19 +110,10 @@ static bool s_in_carry_valid;
 
 static void playback_task(void *arg)
 {
-    /*
-     * Mono in, stereo out: the codec is open with two channels, so every sample
-     * has to be written twice. Under the probe the codec is also open at 32 bits,
-     * so each written sample is four bytes and the output buffer doubles again.
-     */
-#if CONFIG_AEC_REF_PROBE
-    const size_t out_bytes_per_sample = 2 * sizeof(int32_t);
-#else
-    const size_t out_bytes_per_sample = 2 * sizeof(int16_t);
-#endif
+    /* Mono in, stereo out: the codec is open with two channels, so every
+     * sample has to be written twice. */
     int16_t *mono = heap_caps_malloc(CHUNK_MONO, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    void *stereo = heap_caps_malloc((CHUNK_MONO / sizeof(int16_t)) * out_bytes_per_sample,
-                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    int16_t *stereo = heap_caps_malloc(CHUNK_MONO * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (mono == NULL || stereo == NULL) {
         ESP_LOGE(TAG, "no internal RAM for playback buffers");
         vTaskDelete(NULL);
@@ -213,28 +174,12 @@ static void playback_task(void *arg)
             s_play_tap(mono, samples);
         }
 
-#if CONFIG_AEC_REF_PROBE
-        /*
-         * Left-justified into the 32-bit slot: the ES8311 takes the top 16 bits,
-         * so << 16 is the identity transform on the audio and only the container
-         * changed. Shifting the other way would attenuate by 96 dB.
-         */
-        int32_t *out32 = (int32_t *)stereo;
         for (size_t i = 0; i < samples; i++) {
-            int32_t v = (int32_t)mono[i] << 16;
-            out32[2 * i] = v;
-            out32[2 * i + 1] = v;
+            stereo[2 * i] = mono[i];
+            stereo[2 * i + 1] = mono[i];
         }
-#else
-        int16_t *out16 = (int16_t *)stereo;
-        for (size_t i = 0; i < samples; i++) {
-            out16[2 * i] = mono[i];
-            out16[2 * i + 1] = mono[i];
-        }
-#endif
 
-        int err = esp_codec_dev_write(s_spk, stereo,
-                                      (int)(samples * out_bytes_per_sample));
+        int err = esp_codec_dev_write(s_spk, stereo, (int)(samples * 2 * sizeof(int16_t)));
         if (err != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "esp_codec_dev_write failed: %d", err);
         }
@@ -244,100 +189,9 @@ static void playback_task(void *arg)
 
 /* ---------------- capture ---------------- */
 
-#if CONFIG_AEC_ENABLE
-/*
- * Cancelled audio, on the AFE's fetch task. This is what goes upstream now: the
- * raw microphones still contain the agent's voice, and the whole point of the
- * canceller is that this does not.
- *
- * The two gates that used to live in capture_task move here, because they are
- * about what the SESSION should receive, not about how the audio is produced --
- * and the canceller must keep being fed regardless of either.
- */
-static void aec_output(const int16_t *mono, size_t samples)
-{
-    /*
-     * SUPPRESSION MEASUREMENT -- the pass/fail for whether cancellation works.
-     *
-     * Configuration being right is not the same as echo being cancelled. The
-     * baseline from the reference probe, with no AEC at all:
-     *
-     *   mic lanes, agent speaking ... peaks 537-12353
-     *   mic lanes, room quiet ...... peaks 30-334
-     *
-     * So with cancellation working and nobody talking, the peak HERE during
-     * playback should fall toward the quiet-room floor instead of sitting at the
-     * echo level. Roughly an order of magnitude of suppression is a pass. If it
-     * does not, the filter is not converging: suspect the reference lane mapping
-     * (AFE_INPUT_FORMAT) first and aec_filter_length second.
-     *
-     * Logged before the gates below, because it is a property of the canceller
-     * rather than of what the session happens to be doing.
-     */
-#if CONFIG_MIC_LEVEL_LOG
-    int16_t peak = 0;
-    for (size_t i = 0; i < samples; i++) {
-        int16_t a = (mono[i] < 0) ? (int16_t)-mono[i] : mono[i];
-        if (a > peak) {
-            peak = a;
-        }
-    }
-    static int64_t next_log_us;
-    static int16_t peak_play, peak_quiet;
-    bool playing = audio_io_playback_active();
-    if (playing) {
-        if (peak > peak_play) peak_play = peak;
-    } else if (peak > peak_quiet) {
-        peak_quiet = peak;
-    }
-    int64_t now = esp_timer_get_time();
-    if (now >= next_log_us) {
-        next_log_us = now + 3000000;
-        ESP_LOGI(TAG, "AECOUT peak play=%d quiet=%d (echo baseline was 537-12353,"
-                      " quiet floor 30-334)", peak_play, peak_quiet);
-        peak_play = peak_quiet = 0;
-    }
-#endif
-
-    /* Session gate: a stopped device neither streams nor visualizes the room. */
-    if (!s_capture_enabled) {
-        return;
-    }
-
-    if (s_cap_tap != NULL) {
-        s_cap_tap(mono, samples);
-    }
-
-#if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
-    /*
-     * Belt and braces, and deliberately kept available: with cancellation working
-     * this gate is redundant, but leaving it switchable means AEC can be brought
-     * up and observed without risking the agent answering itself. Turning this
-     * gate off is the single change that enables barge-in.
-     */
-    if (audio_io_playback_active()) {
-        return;
-    }
-#endif
-
-    if (s_sink != NULL) {
-        s_sink((const uint8_t *)mono, samples * sizeof(int16_t));
-        s_captured += samples * sizeof(int16_t);
-    }
-}
-#endif /* CONFIG_AEC_ENABLE */
-
 static void capture_task(void *arg)
 {
-    /*
-     * Under the probe a frame is four 16-bit TDM slots -- 8 bytes -- read as two
-     * 32-bit I2S words. Without it, two 16-bit channels, 4 bytes.
-     */
-#if CONFIG_AEC_REF_PROBE
-    const size_t stereo_bytes = CAPTURE_FRAMES * 4 * sizeof(int16_t);
-#else
     const size_t stereo_bytes = CAPTURE_FRAMES * CODEC_CHANNELS * sizeof(int16_t);
-#endif
     const size_t mono_bytes = CAPTURE_FRAMES * sizeof(int16_t);
 
     int16_t *stereo = heap_caps_malloc(stereo_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -357,32 +211,6 @@ static void capture_task(void *arg)
             continue;
         }
 
-#if CONFIG_AEC_REF_PROBE
-        /*
-         * Four lanes. Slot ORDER in TDM is not documented by the driver, so this
-         * deliberately does not assume which lane is which: it measures all four
-         * and lets the run identify them. Two independent signatures pin it down
-         * -- exactly one lane should track playback amplitude (the reference,
-         * expected at index 2), and exactly one should sit at the noise floor
-         * under all conditions, because the netlist AC-couples MIC4 to AGND.
-         * Finding the dead lane is what distinguishes "the reference works" from
-         * "the slots are offset".
-         */
-        int16_t peak[4] = { 0, 0, 0, 0 };
-        for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
-            const int16_t *f = &stereo[4 * i];
-            for (int c = 0; c < 4; c++) {
-                int16_t a = (f[c] < 0) ? (int16_t)-f[c] : f[c];
-                if (a > peak[c]) {
-                    peak[c] = a;
-                }
-            }
-            /* Deepgram keeps being fed from the same two microphone lanes, so the
-             * conversation is unaffected while probing. Lanes 1 and 3 are the
-             * MEMS mics; lane 0 is the echo reference and lane 2 is grounded. */
-            mono[i] = (int16_t)(((int32_t)f[1] + (int32_t)f[3]) / 2);
-        }
-#else
         int16_t peak_l = 0, peak_r = 0;
         for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
             int16_t l = stereo[2 * i];
@@ -395,7 +223,6 @@ static void capture_task(void *arg)
             if (al > peak_l) peak_l = al;
             if (ar > peak_r) peak_r = ar;
         }
-#endif
 
 #if CONFIG_MIC_LEVEL_LOG
         /*
@@ -407,42 +234,9 @@ static void capture_task(void *arg)
         int64_t now = esp_timer_get_time();
         if (now >= next_level_log) {
             next_level_log = now + 3000000;
-#if CONFIG_AEC_REF_PROBE
-            /*
-             * Reading this: with the agent speaking and nobody talking, exactly
-             * one lane should rise -- that is the echo reference. Exactly one
-             * should stay at the floor in every condition -- that is the
-             * grounded MIC4, and it is what fixes the slot order. Speak with the
-             * speaker idle and lanes 0/1 should rise while the reference stays
-             * down, which rules out crosstalk being mistaken for a reference.
-             */
-            ESP_LOGI(TAG, "AECPROBE lanes=%d,%d,%d,%d play=%d",
-                     peak[0], peak[1], peak[2], peak[3],
-                     audio_io_playback_active() ? 1 : 0);
-#else
             ESP_LOGI(TAG, "mic peak L=%d R=%d%s", peak_l, peak_r,
                      audio_io_playback_active() ? " (gated: agent speaking)" : "");
-#endif
         }
-#endif
-
-#if CONFIG_AEC_ENABLE
-        /*
-         * Hand the whole four-channel frame to the canceller and stop here.
-         *
-         * ALWAYS, including while the agent is speaking -- that is precisely when
-         * there is an echo to learn, so gating the feed would starve the adaptive
-         * filter of the only signal it can converge on.
-         *
-         * Nothing else happens in this task now: the sink and the tap are driven
-         * by aec_output() below, off the AFE's own fetch, because the cancelled
-         * audio is what should go upstream rather than the raw microphones.
-         */
-        if (s_aec_running) {
-            audio_aec_feed(stereo, CAPTURE_FRAMES);
-            continue;
-        }
-        /* Fell back: drop through to the raw path below, gate included. */
 #endif
 
 #if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
@@ -453,13 +247,18 @@ static void capture_task(void *arg)
          * Dropping capture while it speaks is the crude fix; it also disables
          * barge-in, which is the trade.
          *
-         * The real answer is NOT server-side. Deepgram's "Audio Preprocessing &
-         * Barge-In" guide has no AEC setting and explicitly pushes it to the
-         * device. It has to run here, and the board does provide what is needed:
-         * an echo reference wired from the ES8311's outputs into ES7210 MIC3,
-         * sample-aligned because it is captured by the same ADC in the same
-         * frame. Measured and confirmed -- see CONFIG_AEC_REF_PROBE and
-         * audio_codecs.h. Cancellation itself would be esp-sr's AFE.
+         * The real answer is NOT server-side, whatever an earlier version of this
+         * comment claimed. Deepgram's "Audio Preprocessing & Barge-In" guide has
+         * no AEC setting and explicitly pushes cancellation to the device.
+         *
+         * And the device could, in principle: this board wires an echo reference
+         * from the ES8311's output into ES7210 MIC3, sample-aligned because the
+         * same ADC captures it in the same frame. That was proven in commit
+         * 9479446 and measured -- see the echo section of the README. What does
+         * not fit is the canceller: esp-sr's AFE wants ~70 kB of internal RAM
+         * against the ~78 kB free once the display is up, so enabling it stopped
+         * the session completing a TLS handshake at all (a4fa137). Reaching
+         * barge-in needs a much smaller algorithm, not this gate removed.
          */
         if (audio_io_playback_active()) {
             continue;
@@ -598,18 +397,6 @@ esp_err_t audio_io_init(int sample_rate)
      * esp_codec_dev_open() below sets the clock, overriding the BSP's 22050 Hz
      * default. This is the order spec_analyzer_radial's bsp_extra uses.
      */
-#if CONFIG_AEC_REF_PROBE
-    /*
-     * Build the codecs ourselves so the ES7210 gets all four inputs, which is
-     * the only way MIC3 -- the echo reference -- is ever powered or clocked.
-     * See audio_codecs.h. The BSP's own path hardcodes mic_selected to 0.
-     */
-    esp_err_t codec_err = audio_codecs_init_tdm(&s_spk, &s_mic);
-    if (codec_err != ESP_OK) {
-        ESP_LOGE(TAG, "TDM codec init failed: %s", esp_err_to_name(codec_err));
-        return ESP_FAIL;
-    }
-#else
     s_spk = bsp_audio_codec_speaker_init();
     if (s_spk == NULL) {
         ESP_LOGE(TAG, "speaker (ES8311) init failed");
@@ -621,8 +408,6 @@ esp_err_t audio_io_init(int sample_rate)
         ESP_LOGE(TAG, "microphone (ES7210) init failed");
         return ESP_FAIL;
     }
-
-#endif
 
     s_rate = sample_rate;
 
@@ -715,45 +500,9 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink)
     }
     s_sink = sink;
 
-#if CONFIG_AEC_ENABLE
-    /*
-     * Before the capture task, so the AFE exists by the time the first frame is
-     * fed to it. A failure here is fatal rather than degraded: with AEC compiled
-     * in, capture_task feeds the AFE and nothing else, so a missing AFE means no
-     * audio reaches the session at all.
-     */
-    esp_err_t aec_err = audio_aec_start(aec_output, CAPTURE_FRAMES);
-    if (aec_err != ESP_OK) {
-        /*
-         * NOT fatal, and this matters: main.c wraps this call in
-         * ESP_ERROR_CHECK, so returning an error here aborts the boot and the
-         * device reboot-loops -- which is both useless and hard to recover from,
-         * since esptool struggles to catch a chip that keeps resetting.
-         *
-         * Echo cancellation is an enhancement. Losing it costs barge-in, which
-         * is exactly what the device did without it. So fall back to the raw
-         * microphone path and say so loudly.
-         */
-        ESP_LOGE(TAG, "AEC unavailable (%s) -- falling back to the raw mic path; "
-                      "keep CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS on",
-                 esp_err_to_name(aec_err));
-        s_aec_running = false;
-    } else {
-        s_aec_running = true;
-    }
-#endif
-
-    /*
-     * Priority above playback: a missed read is lost audio, a late write is only
-     * a small gap the ring buffer absorbs.
-     *
-     * 4 kB is enough again. It was raised to 8 kB when this task also fed the
-     * AFE -- which runs its filtering on the CALLER's stack and overflowed 4 kB
-     * immediately -- but that work now lives on the AEC's own task on core 0. All
-     * this task does is read the codec and hand the block over.
-     */
-    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7,
-                                NULL, 1) != pdPASS) {
+    /* Priority above playback: a missed read is lost audio, a late write is
+     * only a small gap the ring buffer absorbs. */
+    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7, NULL, 1) != pdPASS) {
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "capture started: %d frame chunks (%d ms)",

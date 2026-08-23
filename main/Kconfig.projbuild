@@ -200,7 +200,15 @@ menu "Deepgram Agent Device"
             Speaker and mic are centimetres apart with no echo cancellation, so
             without this the agent hears its own voice and answers itself. The
             cost is that barge-in stops working -- you cannot interrupt the
-            agent. Turn this off once real echo cancellation is in place.
+            agent.
+
+            Do not turn this off expecting barge-in. Deepgram supplies the
+            detection, not the cancellation, so with the gate off it fires on the
+            agent's own voice and the agent interrupts itself -- worse than no
+            barge-in, because it corrupts the conversation rather than limiting
+            it. The board does have a real echo reference on ES7210 MIC3 (commit
+            9479446), but esp-sr's canceller needs ~70 kB of internal RAM and does
+            not fit alongside the display (a4fa137). See the README's echo section.
 
     config SESSION_IDLE_TIMEOUT_S
         int "Stop the session after this many idle seconds (0 = never)"
@@ -223,65 +231,6 @@ menu "Deepgram Agent Device"
             which would tie session lifetime to whether the display came up.
 
             0 disables the timeout and restores the old always-on behaviour.
-
-    config AEC_ENABLE
-        bool "Cancel the speaker's echo from the microphone (esp-sr AFE)"
-        default n
-        select AEC_REF_PROBE
-        help
-            Runs esp-sr's AFE with AEC over the board's echo reference channel,
-            so the microphone can stay live while the agent speaks -- which is
-            what makes barge-in possible.
-
-            Requires the reference channel, so it selects AEC_REF_PROBE: the
-            ES7210 goes into 4-channel TDM and the audio path widens to 32 bits.
-            See audio_codecs.h for why that is the only route to MIC3.
-
-            Deepgram does the barge-in DETECTION and already signals it with
-            UserStartedSpeaking, and dg_agent already flushes playback in
-            response. It does NOT do echo cancellation. The two are coupled: with
-            the mic gate on, the detection can never fire mid-reply because the
-            mic is deaf; with the gate off and no cancellation, the detection
-            fires on the agent's own voice and the agent interrupts itself.
-
-            So turning this on is what lets CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS be
-            turned off. Leave the gate on until this is proven working, or the
-            agent will start answering itself.
-
-            Costs an AFE task, its ring buffers, and the most arithmetic-heavy
-            workload in the firmware. Pinned to core 0, away from the audio and
-            LVGL tasks on core 1.
-
-    config AEC_REF_PROBE
-        bool "Probe the echo-reference channel (ES7210 4-channel TDM)"
-        default n
-        help
-            BENCH TOOL, and the prerequisite for any echo cancellation work.
-
-            Waveshare advertises "hardware echo cancellation" and calls the
-            ES7210 an "Echo Cancellation Algorithm Chip". Both are wrong -- the
-            datasheet titles it a four-channel ADC and there is no echo canceller
-            anywhere on this board. What the schematic DOES show is an echo
-            REFERENCE channel: the ES8311's outputs fed back through an RC
-            network into ES7210 MIC3, every component populated. That is the hard
-            part to retrofit, because the reference is captured by the same ADC on
-            the same clock in the same frame as the microphones, so it is
-            sample-aligned by construction.
-
-            Nothing enables it. The BSP builds the ES7210 with mic_selected at 0,
-            so the driver defaults to MIC1|MIC2 and MIC3 is never powered. And
-            SDOUT2 -- the non-TDM route to MIC3 -- is cut on this board (R48 is
-            NC), so a 4-channel TDM frame is the only way it reaches the chip.
-
-            Turning this on selects all four inputs, which puts the ES7210 into
-            TDM, and moves the audio path to 32 bits so one I2S word carries two
-            16-bit TDM slots. It costs internal RAM for the wider buffers and it
-            logs four channel peaks instead of two. The conversation keeps working
-            throughout -- Deepgram is still fed from the same microphone lane.
-
-            The cancellation algorithm itself is NOT included; that would be
-            esp-sr's AFE, and it is only worth adding once this run proves the
-            reference lane is real and its alignment is stable.
 
     config AUDIO_CAPTURE_ALWAYS
         bool "Keep visualizing the microphone while the session is stopped"

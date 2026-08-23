@@ -888,8 +888,10 @@ Nothing enables it by default: the BSP builds the ES7210 with `mic_selected` at
 the non-TDM route to MIC3 — is cut on this board (R48 is NC), so **4-channel TDM
 is the only way it reaches the S3.**
 
-`CONFIG_AEC_REF_PROBE` proves it. With all four inputs selected and the frame
-read as 2 ch x 32-bit standard I2S, measured peaks per lane:
+Commit `9479446` proves it — the code is not in the tree any more, but
+`git show 9479446` brings back the 4-channel TDM bring-up that produced these
+numbers. With all four inputs selected and the frame read as 2 ch x 32-bit
+standard I2S, measured peaks per lane:
 
 | lane | idle | playback | what it is |
 |---|---|---|---|
@@ -902,10 +904,30 @@ Lane 2 being permanently dead is the control that identifies the ordering rather
 than guessing it — and the slot order is *not* MIC1/2/3/4, because a 32-bit word
 arrives MSB-first and stores little-endian so each pair swaps in memory.
 
-Cancellation itself is still to do: `espressif/esp-sr`'s AFE with
-`input_format = "MMRN"`, `aec_init = true`. It wants 16-bit/16 kHz, which is
-already this project's format. Then this gate comes off and the
-`audio_io_flush()` barge-in path already wired up starts earning its keep.
+**Cancellation is where it stops, and it stops on RAM.** `espressif/esp-sr`'s
+AFE does the job on paper — `input_format = "MMNR"`, `aec_init = true`, 16-bit
+16 kHz, already this project's format — and it initialises without complaint.
+What it needs is about **70 kB of internal RAM**, against the ~78 kB free once
+the display is up. Enabling it did not degrade the session; it stopped the
+session from happening at all, because mbedTLS could no longer get a buffer for
+the TLS handshake:
+
+```
+esp_transport_write() returned 0
+```
+
+The whole experiment is in `a4fa137` with the measurements. Internal RAM is
+the binding constraint on this board — see [Threading and
+memory](#threading-and-memory) — and a 70 kB canceller
+does not fit next to a 466x466 display and a TLS socket. So the gate stays on,
+and the AEC scaffolding was removed rather than left in the tree implying a
+capability the device does not have.
+
+If barge-in is revisited, the cheap route is a **double-talk detector** rather
+than full cancellation: learn the room's coupling ratio while only the agent
+speaks, then flag any mic level above that ratio as a second voice. It needs no
+adaptive filter and no 70 kB — only the reference lane, which is what `9479446`
+recovers.
 
 ### The BSP init-order trap
 

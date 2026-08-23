@@ -14,8 +14,6 @@ idf_component_register(
         face_orb.c
         session_ctl.c
         voices.c
-        audio_codecs.c
-        audio_aec.c
         faces.c
     INCLUDE_DIRS .
     REQUIRES
