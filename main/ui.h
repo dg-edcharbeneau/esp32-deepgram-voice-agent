@@ -46,11 +46,25 @@ typedef enum {
  * ui.c infers the conversational states for itself from the audio path, which is
  * tied to what the speaker and microphone are actually doing. The connection
  * phases are the ones it cannot see and has to be told.
+ *
+ * Nothing indexes an array by these or puts them on the wire, so the order is
+ * free to change; it mirrors orb_behaviour_t's so the two read the same way.
  */
 typedef enum {
     UI_BEHAVIOUR_IDLE = 0,
     UI_BEHAVIOUR_INITIALIZING,
     UI_BEHAVIOUR_LISTENING,
+
+    /*
+     * resolve_behaviour() NEVER RETURNS THIS, and that is not an oversight.
+     * AgentThinking has not arrived in any logged session, so there is nothing to
+     * infer it from. It exists so the display test can render the shell's
+     * thinking pose -- a faithful, parity-verified port that would otherwise be
+     * code nobody has ever seen run -- and so that the day the message does show
+     * up, wiring it is one line in resolve_behaviour() and nothing else.
+     */
+    UI_BEHAVIOUR_THINKING,
+
     UI_BEHAVIOUR_SPEAKING,
     UI_BEHAVIOUR_CONNECTING,
     UI_BEHAVIOUR_BUFFERING,

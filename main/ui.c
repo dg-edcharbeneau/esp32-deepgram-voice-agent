@@ -837,6 +837,7 @@ static const char *behaviour_name(ui_behaviour_t b)
     case UI_BEHAVIOUR_IDLE:         return "IDLE";
     case UI_BEHAVIOUR_INITIALIZING: return "INITIALIZING";
     case UI_BEHAVIOUR_LISTENING:    return "LISTENING";
+    case UI_BEHAVIOUR_THINKING:     return "THINKING";
     case UI_BEHAVIOUR_SPEAKING:     return "SPEAKING";
     case UI_BEHAVIOUR_CONNECTING:   return "CONNECTING";
     case UI_BEHAVIOUR_BUFFERING:    return "BUFFERING";
