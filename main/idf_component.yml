@@ -10,5 +10,12 @@ dependencies:
   lvgl/lvgl:
     version: "9.5.0"
     public: true
-  # FFT for the spectrum display; the version spec_analyzer_radial proved.
-  espressif/esp-dsp: "^1.8.2"
+  # FFT for the spectrum display. PINNED to 1.8.0, not the ^1.8.2 that
+  # spec_analyzer_radial proved, because esp-sr depends on exactly 1.8.0 and the
+  # two constraints are otherwise unsatisfiable. Only face_spectrum.c uses it, and
+  # only through dsps_fft2r_*/dsps_wind_hann_f32/dsps_mul_f32 -- long-stable APIs.
+  espressif/esp-dsp: "1.8.0"
+  # AEC only. The board wires the ES8311's output back into ES7210 MIC3 as an
+  # echo reference (see audio_codecs.h), and esp-sr's AFE is what actually
+  # cancels with it. No wake word, so no models -- see CONFIG_AEC_ENABLE.
+  espressif/esp-sr: "^2.0.0"

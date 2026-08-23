@@ -224,6 +224,34 @@ menu "Deepgram Agent Device"
 
             0 disables the timeout and restores the old always-on behaviour.
 
+    config AEC_ENABLE
+        bool "Cancel the speaker's echo from the microphone (esp-sr AFE)"
+        default n
+        select AEC_REF_PROBE
+        help
+            Runs esp-sr's AFE with AEC over the board's echo reference channel,
+            so the microphone can stay live while the agent speaks -- which is
+            what makes barge-in possible.
+
+            Requires the reference channel, so it selects AEC_REF_PROBE: the
+            ES7210 goes into 4-channel TDM and the audio path widens to 32 bits.
+            See audio_codecs.h for why that is the only route to MIC3.
+
+            Deepgram does the barge-in DETECTION and already signals it with
+            UserStartedSpeaking, and dg_agent already flushes playback in
+            response. It does NOT do echo cancellation. The two are coupled: with
+            the mic gate on, the detection can never fire mid-reply because the
+            mic is deaf; with the gate off and no cancellation, the detection
+            fires on the agent's own voice and the agent interrupts itself.
+
+            So turning this on is what lets CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS be
+            turned off. Leave the gate on until this is proven working, or the
+            agent will start answering itself.
+
+            Costs an AFE task, its ring buffers, and the most arithmetic-heavy
+            workload in the firmware. Pinned to core 0, away from the audio and
+            LVGL tasks on core 1.
+
     config AEC_REF_PROBE
         bool "Probe the echo-reference channel (ES7210 4-channel TDM)"
         default n

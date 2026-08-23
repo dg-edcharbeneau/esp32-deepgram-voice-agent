@@ -12,6 +12,7 @@
 
 #include "bsp/esp-bsp.h"
 
+#include "audio_aec.h"
 #include "audio_codecs.h"
 #include "audio_io.h"
 
@@ -81,6 +82,14 @@ static StreamBufferHandle_t s_ring;
 static audio_io_capture_sink_t s_sink;
 static audio_io_tap_t s_play_tap;
 static audio_io_tap_t s_cap_tap;
+#if CONFIG_AEC_ENABLE
+/* False if the AFE could not be created; the capture path then behaves exactly
+ * as it does in a build without AEC. */
+static bool s_aec_running;
+#define CAPTURE_STACK 8192
+#else
+#define CAPTURE_STACK 4096
+#endif
 
 static volatile uint32_t s_played;
 static volatile uint32_t s_dropped;
@@ -238,6 +247,46 @@ static void playback_task(void *arg)
 
 /* ---------------- capture ---------------- */
 
+#if CONFIG_AEC_ENABLE
+/*
+ * Cancelled audio, on the AFE's fetch task. This is what goes upstream now: the
+ * raw microphones still contain the agent's voice, and the whole point of the
+ * canceller is that this does not.
+ *
+ * The two gates that used to live in capture_task move here, because they are
+ * about what the SESSION should receive, not about how the audio is produced --
+ * and the canceller must keep being fed regardless of either.
+ */
+static void aec_output(const int16_t *mono, size_t samples)
+{
+    /* Session gate: a stopped device neither streams nor visualizes the room. */
+    if (!s_capture_enabled) {
+        return;
+    }
+
+    if (s_cap_tap != NULL) {
+        s_cap_tap(mono, samples);
+    }
+
+#if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
+    /*
+     * Belt and braces, and deliberately kept available: with cancellation working
+     * this gate is redundant, but leaving it switchable means AEC can be brought
+     * up and observed without risking the agent answering itself. Turning this
+     * gate off is the single change that enables barge-in.
+     */
+    if (audio_io_playback_active()) {
+        return;
+    }
+#endif
+
+    if (s_sink != NULL) {
+        s_sink((const uint8_t *)mono, samples * sizeof(int16_t));
+        s_captured += samples * sizeof(int16_t);
+    }
+}
+#endif /* CONFIG_AEC_ENABLE */
+
 static void capture_task(void *arg)
 {
     /*
@@ -289,8 +338,9 @@ static void capture_task(void *arg)
                 }
             }
             /* Deepgram keeps being fed from the same two microphone lanes, so the
-             * conversation is unaffected while probing. */
-            mono[i] = (int16_t)(((int32_t)f[0] + (int32_t)f[1]) / 2);
+             * conversation is unaffected while probing. Lanes 1 and 3 are the
+             * MEMS mics; lane 0 is the echo reference and lane 2 is grounded. */
+            mono[i] = (int16_t)(((int32_t)f[1] + (int32_t)f[3]) / 2);
         }
 #else
         int16_t peak_l = 0, peak_r = 0;
@@ -334,6 +384,25 @@ static void capture_task(void *arg)
                      audio_io_playback_active() ? " (gated: agent speaking)" : "");
 #endif
         }
+#endif
+
+#if CONFIG_AEC_ENABLE
+        /*
+         * Hand the whole four-channel frame to the canceller and stop here.
+         *
+         * ALWAYS, including while the agent is speaking -- that is precisely when
+         * there is an echo to learn, so gating the feed would starve the adaptive
+         * filter of the only signal it can converge on.
+         *
+         * Nothing else happens in this task now: the sink and the tap are driven
+         * by aec_output() below, off the AFE's own fetch, because the cancelled
+         * audio is what should go upstream rather than the raw microphones.
+         */
+        if (s_aec_running) {
+            audio_aec_feed(stereo, CAPTURE_FRAMES);
+            continue;
+        }
+        /* Fell back: drop through to the raw path below, gate included. */
 #endif
 
 #if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
@@ -606,13 +675,50 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink)
     }
     s_sink = sink;
 
-    /* Priority above playback: a missed read is lost audio, a late write is
-     * only a small gap the ring buffer absorbs. */
-    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7, NULL, 1) != pdPASS) {
+#if CONFIG_AEC_ENABLE
+    /*
+     * Before the capture task, so the AFE exists by the time the first frame is
+     * fed to it. A failure here is fatal rather than degraded: with AEC compiled
+     * in, capture_task feeds the AFE and nothing else, so a missing AFE means no
+     * audio reaches the session at all.
+     */
+    esp_err_t aec_err = audio_aec_start(aec_output);
+    if (aec_err != ESP_OK) {
+        /*
+         * NOT fatal, and this matters: main.c wraps this call in
+         * ESP_ERROR_CHECK, so returning an error here aborts the boot and the
+         * device reboot-loops -- which is both useless and hard to recover from,
+         * since esptool struggles to catch a chip that keeps resetting.
+         *
+         * Echo cancellation is an enhancement. Losing it costs barge-in, which
+         * is exactly what the device did without it. So fall back to the raw
+         * microphone path and say so loudly.
+         */
+        ESP_LOGE(TAG, "AEC unavailable (%s) -- falling back to the raw mic path; "
+                      "keep CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS on",
+                 esp_err_to_name(aec_err));
+        s_aec_running = false;
+    } else {
+        s_aec_running = true;
+    }
+#endif
+
+    /*
+     * Priority above playback: a missed read is lost audio, a late write is only
+     * a small gap the ring buffer absorbs.
+     *
+     * 8 kB with AEC, 4 kB without. The AFE's feed() runs its filtering on the
+     * CALLER's stack, so 4 kB overflowed immediately and the device reboot-looped
+     * with "A stack overflow in task audio_cap has been detected" -- roughly a
+     * second after the AFE reported success, which made it look like an AFE
+     * problem rather than a stack one.
+     */
+    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", CAPTURE_STACK, NULL, 7,
+                                NULL, 1) != pdPASS) {
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "capture started: %d frame chunks (%d ms)",
-             CAPTURE_FRAMES, CAPTURE_FRAMES * 1000 / s_rate);
+    ESP_LOGI(TAG, "capture started: %d frame chunks (%d ms), %d B stack",
+             CAPTURE_FRAMES, CAPTURE_FRAMES * 1000 / s_rate, CAPTURE_STACK);
     return ESP_OK;
 }
 
