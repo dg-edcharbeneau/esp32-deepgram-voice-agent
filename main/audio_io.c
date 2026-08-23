@@ -259,9 +259,22 @@ static void capture_task(void *arg)
          * device neither streams nor visualizes the room -- a ring still
          * dancing to background noise reads as broken, not as stopped.
          */
+#if !CONFIG_AUDIO_CAPTURE_ALWAYS
         if (!s_capture_enabled) {
             continue;
         }
+#else
+        /* Bench build: the gate is removed so the microphone can be calibrated
+         * with the session stopped and nothing able to talk back. The sink is
+         * still gated below, so nothing is streamed upstream. */
+        if (!s_capture_enabled && s_sink != NULL) {
+            /* Feed the tap only; fall through with the sink suppressed. */
+            if (s_cap_tap != NULL) {
+                s_cap_tap(mono, CAPTURE_FRAMES);
+            }
+            continue;
+        }
+#endif
 
         /* After the gates above, so the tap sees what actually goes upstream. */
         if (s_cap_tap != NULL) {

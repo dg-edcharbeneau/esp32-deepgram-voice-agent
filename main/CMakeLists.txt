@@ -7,9 +7,14 @@ idf_component_register(
         boot_button.c
         dg_agent.c
         audio_io.c
-        spectrum_ui.c
+        ui.c
+        face_spectrum.c
+        orb_geometry.c
+        orb_raster.c
+        face_orb.c
         session_ctl.c
         voices.c
+        faces.c
     INCLUDE_DIRS .
     REQUIRES
         esp_wifi

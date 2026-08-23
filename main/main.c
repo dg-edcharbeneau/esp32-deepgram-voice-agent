@@ -31,6 +31,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
+#include "multi_heap.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -39,7 +41,7 @@
 #include "boot_button.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
-#include "spectrum_ui.h"
+#include "ui.h"
 #include "voices.h"
 #include "wifi_creds.h"
 #include "wifi_prov.h"
@@ -53,6 +55,33 @@ static const char *TAG = "main";
  * torn read of a counter only misreports one line of logging. */
 static volatile uint32_t s_audio_bytes;
 static volatile uint32_t s_turns;
+
+/*
+ * IDLE TIMEOUT
+ *
+ * The device uplinks 16 kHz mono for as long as a session is open -- about
+ * 32 kB/s -- and reconnects by itself if the socket drops. A board left powered
+ * on a desk therefore streams, and bills, indefinitely. This stops the session
+ * once nothing has happened for a while; a tap or the BOOT button starts it again.
+ *
+ * The cost is reconnect latency on the next word: CONNECTING measured 1.1-6.0 s
+ * plus 0.5 s of BUFFERING, so a short timeout trades responsiveness for spend.
+ *
+ * Activity is taken from signals that exist whether or not the display came up --
+ * Deepgram's own end-of-turn and start-of-speech messages, plus what the speaker
+ * is doing. Deliberately NOT the local VAD in ui.c: tying session lifetime to the
+ * display would mean a headless boot never times out, or never stays up.
+ */
+static volatile int64_t s_activity_us;
+
+/* Follow-up interval after a face switch -- long enough for a frame or two to
+ * land in the window, short enough not to smear the transition. */
+#define TELEMETRY_SWITCH_MS 200
+
+static void note_activity(void)
+{
+    s_activity_us = esp_timer_get_time();
+}
 
 static const char *state_name(dg_agent_state_t state)
 {
@@ -76,12 +105,42 @@ static void on_state(dg_agent_state_t state, void *ctx)
     }
     /* Runs on the WebSocket task, so this must not touch LVGL -- it stores the
      * literal and the frame timer picks it up. */
-    spectrum_ui_set_status(state_name(state), state == DG_AGENT_READY);
+    ui_set_status(state_name(state), state == DG_AGENT_READY);
+
+    /*
+     * The connection ladder. A session walks CONNECTING -> BUFFERING ->
+     * INITIALIZING in sequence and each rung is drawn visibly fuller and
+     * brighter than the last, so someone watching sees progress without reading
+     * the label -- which is the whole reason the display distinguishes them
+     * rather than showing one "connecting" state throughout.
+     */
+    switch (state) {
+    case DG_AGENT_CONNECTED:
+        /* Socket open and Settings sent; waiting for SettingsApplied. */
+        ui_set_failed(false);
+        ui_set_behaviour(UI_BEHAVIOUR_BUFFERING);
+        break;
+    case DG_AGENT_READY:
+        ui_set_failed(false);
+        ui_set_behaviour(UI_BEHAVIOUR_INITIALIZING);
+        break;
+    case DG_AGENT_ERROR:
+        /* Frozen, not merely dim: this one has stopped trying. */
+        ui_set_failed(true);
+        ui_set_behaviour(UI_BEHAVIOUR_DISCONNECTED);
+        break;
+    case DG_AGENT_DISCONNECTED:
+        /* Between attempts. session_ctl reports a deliberate stop separately, so
+         * arriving here means the socket went away on its own. */
+        ui_set_behaviour(UI_BEHAVIOUR_CONNECTING);
+        break;
+    }
 }
 
 static void on_conversation_text(const char *role, const char *content, void *ctx)
 {
     s_turns++;
+    note_activity();
 }
 
 static void on_audio(const uint8_t *data, size_t len, void *ctx)
@@ -93,6 +152,9 @@ static void on_audio(const uint8_t *data, size_t len, void *ctx)
 
 static void on_user_started_speaking(void *ctx)
 {
+    /* Deepgram's own speech detection, which is better evidence than the local
+     * level and arrives even when the display is not running. */
+    note_activity();
     /* Stop mid-sentence rather than talk over the user. */
     audio_io_flush();
 }
@@ -113,17 +175,20 @@ static void on_reload_required(void *ctx)
 
 static void on_agent_audio_done(void *ctx)
 {
+    note_activity();
     ESP_LOGI(TAG, "turn complete, %" PRIu32 " audio bytes received", s_audio_bytes);
 }
 
 /* Runs on the LVGL task with the LVGL lock held: signal only, never block. */
-static void on_gesture(spectrum_ui_gesture_t gesture)
+static void on_gesture(ui_gesture_t gesture)
 {
     switch (gesture) {
-    case SPECTRUM_UI_TAP:
+    case UI_TAP:
+        ESP_LOGI(TAG, "EVT tap");
         session_ctl_request_toggle();
         break;
-    case SPECTRUM_UI_HOLD:
+    case UI_HOLD:
+        ESP_LOGI(TAG, "EVT hold");
         session_ctl_request_restart();
         break;
     }
@@ -149,12 +214,12 @@ static void enter_provisioning(void)
 {
     /* The ring has nothing to visualise with no session, and a calm screen
      * showing the network name is the instruction. */
-    spectrum_ui_set_stopped(true);
-    spectrum_ui_set_status(wifi_prov_ap_name(), false);
+    ui_set_stopped(true);
+    ui_set_status(wifi_prov_ap_name(), false);
 
     if (wifi_prov_start() != ESP_OK) {
         ESP_LOGE(TAG, "could not start the setup portal");
-        spectrum_ui_set_status("setup failed", false);
+        ui_set_status("setup failed", false);
         wifi_prov_run();
     }
 
@@ -163,11 +228,11 @@ static void enter_provisioning(void)
      * the network directly, which skips the one step of this whole flow that
      * involves reading characters off a 466 px round panel and retyping them.
      *
-     * Static storage because spectrum_ui keeps the pointer, not the bytes.
+     * Static storage because ui keeps the pointer, not the bytes.
      */
     static char qr[64];
     snprintf(qr, sizeof(qr), "WIFI:T:nopass;S:%s;;", wifi_prov_ap_name());
-    spectrum_ui_show_qr(qr);
+    ui_show_qr(qr);
 
     wifi_prov_run();
 }
@@ -207,14 +272,14 @@ void app_main(void)
     const bool have_creds = wifi_creds_load(ssid, pass);
     if (have_creds) {
         ESP_ERROR_CHECK(wifi_sta_start(ssid, pass));
-        spectrum_ui_set_status("connecting", false);
+        ui_set_status("connecting", false);
     } else {
-        spectrum_ui_set_status("setup", false);
+        ui_set_status("setup", false);
     }
-    if (spectrum_ui_start() == ESP_OK) {
-        audio_io_set_playback_tap(spectrum_ui_feed_agent);
-        audio_io_set_capture_tap(spectrum_ui_feed_mic);
-        spectrum_ui_set_gesture_handler(on_gesture);
+    if (ui_start() == ESP_OK) {
+        audio_io_set_playback_tap(ui_feed_agent);
+        audio_io_set_capture_tap(ui_feed_mic);
+        ui_set_gesture_handler(on_gesture);
     } else {
         /* A dark screen is not a reason to give up the voice loop. */
         ESP_LOGW(TAG, "spectrum display unavailable, continuing headless");
@@ -255,25 +320,100 @@ void app_main(void)
     }
     session_ctl_request_start();
 
+    /*
+     * ONE telemetry line, one cadence, machine-parseable.
+     *
+     * This used to be a 10 s prose status line, alongside four other logs on four
+     * other cadences -- so no single line ever described the device at one
+     * instant, and answering any question meant interleaving five drifting
+     * streams by timestamp. Everything is here now, once a second, as key=value.
+     *
+     * It runs on THIS task rather than in the UI, deliberately: ESP-IDF console
+     * writes block, and ~200 bytes at 115200 baud is most of a frame. Logging
+     * this from the frame timer would corrupt the very timings it reports.
+     *
+     * Internal RAM stays in the line because it is the scarce resource once the
+     * display is up, and the case that bites is a WebSocket reconnect wanting a
+     * burst of it with the render buffer already allocated. `intmax` matters more
+     * than the total: if it sags towards 40 kB, shrink DRAW_ROWS in ui.c before
+     * tuning anything else.
+     */
+    /*
+     * After a face switch, shorten the next wait instead of the usual interval.
+     * The switch is reported in the window it happened, so the "before" sample is
+     * the previous line -- but the "after" would otherwise be a whole interval
+     * later, with a window's worth of averaging smeared across the transition.
+     * A short follow-up gives a clean post-switch reading.
+     */
+    uint32_t wait_ms = CONFIG_UI_TELEMETRY_MS;
+
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        wait_ms = CONFIG_UI_TELEMETRY_MS;
+
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
+
+        ui_telemetry_t t;
+        ui_get_telemetry(&t);
+
         /*
-         * Internal RAM is the scarce resource once the display is up, and the
-         * case that bites is a WebSocket reconnect: the TLS handshake wants a
-         * burst of it with the render buffer already allocated. Largest-block
-         * matters more than the total -- if it sags towards 40 kB, shrink
-         * DRAW_ROWS in spectrum_ui.c before tuning anything else.
+         * Idle check. Playback counts as activity in its own right: a long answer
+         * can outlast the timeout with no message arriving mid-stream, and cutting
+         * the session while the speaker is mid-sentence would be worse than any
+         * saving. The session must be running for the clock to mean anything.
          */
-        ESP_LOGI(TAG, "%s | turns=%" PRIu32 " mic=%" PRIu32 " B rx=%" PRIu32
-                      " B played=%" PRIu32 " B dropped=%" PRIu32
-                      " B | heap=%" PRIu32 " B internal=%u B (largest %u B)",
+        if (audio_io_playback_active()) {
+            note_activity();
+        }
+        if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
+            s_activity_us != 0) {
+            int64_t quiet_us = esp_timer_get_time() - s_activity_us;
+            if (quiet_us > (int64_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000000) {
+                ESP_LOGI(TAG, "EVT idletimeout after=%.1fs",
+                         (double)quiet_us / 1000000.0);
+                session_ctl_request_stop();
+                /* So the next window does not ask again while the stop is in
+                 * flight -- session_ctl has its own cooldown to respect. */
+                note_activity();
+            }
+        }
+
+        /*
+         * Block COUNTS, not just sizes. A largest-free-block that falls without
+         * total-free falling means the arena is being carved up; a fall in both
+         * with one more allocated block means something simply took 29 kB. The
+         * two failure modes need opposite fixes, and only these numbers tell them
+         * apart.
+         */
+        multi_heap_info_t ih;
+        heap_caps_get_info(&ih, MALLOC_CAP_INTERNAL);
+
+        if (t.face_changed) {
+            wait_ms = TELEMETRY_SWITCH_MS;
+        }
+
+        ESP_LOGI(TAG,
+                 "TLM up=%.1f face=%s%s beh=%s src=%s sess=%s "
+                 "frames=%" PRIu32 " fps=%.1f draw=%.1f/%.1f "
+                 "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
+                 "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
+                 " played=%" PRIu32 " drop=%" PRIu32
+                 " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
+                 " ialloc=%u",
+                 (double)esp_timer_get_time() / 1000000.0,
+                 t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
-                     : dg_agent_is_ready() ? "ready" : "not ready",
+                     : dg_agent_is_ready() ? "ready" : "notready",
+                 t.frames, t.fps, t.draw_avg_ms, t.draw_max_ms,
+                 t.amp_avg, t.amp_max, t.low_avg, t.low_max,
+                 t.mid_avg, t.mid_max, t.high_avg, t.high_max,
+                 t.peak_mic, t.peak_agent,
                  s_turns, captured, s_audio_bytes, played, dropped,
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)ih.total_free_bytes, (unsigned)ih.free_blocks,
+                 (unsigned)ih.allocated_blocks);
     }
 }

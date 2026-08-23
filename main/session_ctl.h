@@ -23,7 +23,7 @@
 
 #include "dg_agent.h"
 
-/* Creates the worker task. Call after audio_io_init() and spectrum_ui_start().
+/* Creates the worker task. Call after audio_io_init() and ui_start().
  * Does not open a session -- call session_ctl_request_start() for that. */
 esp_err_t session_ctl_start(const dg_agent_callbacks_t *callbacks);
 
@@ -31,6 +31,15 @@ esp_err_t session_ctl_start(const dg_agent_callbacks_t *callbacks);
  * task, including LVGL and WebSocket callbacks. */
 void session_ctl_request_start(void);
 void session_ctl_request_toggle(void);
+
+/*
+ * Stop if running; never start. Idempotent.
+ *
+ * Distinct from toggle because the idle timeout needs a request that cannot
+ * accidentally open a session -- the whole point of it is that an unattended
+ * device stops streaming.
+ */
+void session_ctl_request_stop(void);
 void session_ctl_request_restart(void);
 
 /*

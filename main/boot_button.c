@@ -6,7 +6,7 @@
 
 #include "boot_button.h"
 #include "session_ctl.h"
-#include "spectrum_ui.h"
+#include "ui.h"
 #include "wifi_creds.h"
 
 static const char *TAG = "boot_btn";
@@ -39,8 +39,8 @@ static void on_forget_wifi(void *arg, void *usr_data)
     s_forgetting = true;
 
     ESP_LOGW(TAG, "BOOT held %d ms -- forgetting the saved network", FORGET_HOLD_MS);
-    spectrum_ui_set_status("forgetting wi-fi", false);
-    spectrum_ui_set_stopped(true);
+    ui_set_status("forgetting wi-fi", false);
+    ui_set_stopped(true);
 
     wifi_creds_erase();
 
@@ -57,6 +57,7 @@ static void on_click(void *arg, void *usr_data)
 {
     /* session_ctl takes requests from any task and has its own debounce and
      * cooldown, so the button needs no gating that the screen does not. */
+    ESP_LOGI(TAG, "EVT bootclick");
     session_ctl_request_toggle();
 }
 

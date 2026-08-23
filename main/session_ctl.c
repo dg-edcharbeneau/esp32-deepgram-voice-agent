@@ -7,7 +7,7 @@
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
-#include "spectrum_ui.h"
+#include "ui.h"
 
 static const char *TAG = "session_ctl";
 
@@ -39,6 +39,7 @@ typedef enum {
     REQ_TOGGLE,
     REQ_RESTART,
     REQ_RELOAD,   /* same work as RESTART, but keeps the conversation */
+    REQ_STOP,     /* stop if running; never starts */
 } request_t;
 
 static TaskHandle_t s_task;
@@ -63,7 +64,7 @@ static void do_stop(void)
     /* Closing the socket raises DISCONNECTED, which would repaint the label
      * over "stopping". Suppressed until the next start is under way. */
     dg_agent_suppress_state_events(true);
-    spectrum_ui_set_status("stopping", false);
+    ui_set_status("stopping", false);
 
     /* Before the teardown: stop feeding the socket, and stop the ring reacting
      * to the room while we are on our way to "stopped". */
@@ -86,8 +87,8 @@ static void do_stop(void)
     audio_io_reset();
 
     s_running = false;
-    spectrum_ui_set_stopped(true);
-    spectrum_ui_set_status("stopped", false);
+    ui_set_stopped(true);
+    ui_set_status("stopped", false);
 }
 
 static void do_start(void)
@@ -105,14 +106,14 @@ static void do_start(void)
      */
     dg_agent_suppress_state_events(false);
 
-    spectrum_ui_set_stopped(false);
-    spectrum_ui_set_status("connecting", false);
+    ui_set_stopped(false);
+    ui_set_status("connecting", false);
 
     esp_err_t err = dg_agent_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "start failed: %s", esp_err_to_name(err));
-        spectrum_ui_set_stopped(true);
-        spectrum_ui_set_status("error", false);
+        ui_set_stopped(true);
+        ui_set_status("error", false);
         return;
     }
 
@@ -140,6 +141,21 @@ static void session_ctl_task(void *arg)
                 do_stop();
             } else {
                 do_start();
+            }
+            break;
+        case REQ_STOP:
+            /*
+             * Idempotent, unlike REQ_TOGGLE. The idle timeout must never be able
+             * to START a session -- a toggle that raced the running flag would
+             * turn a cost-saving measure into an unattended session that bills
+             * until someone notices.
+             *
+             * History is kept: the device stopped because nobody was talking, not
+             * because anyone ended the conversation, so picking it up again should
+             * resume rather than re-greet.
+             */
+            if (s_running) {
+                do_stop();
             }
             break;
         case REQ_RESTART:
@@ -236,4 +252,5 @@ static void request(request_t req)
 void session_ctl_request_reload(void)  { request_now(REQ_RELOAD); }
 void session_ctl_request_start(void)   { request(REQ_START); }
 void session_ctl_request_toggle(void)  { request(REQ_TOGGLE); }
+void session_ctl_request_stop(void)    { request(REQ_STOP); }
 void session_ctl_request_restart(void) { request(REQ_RESTART); }

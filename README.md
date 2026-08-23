@@ -55,54 +55,134 @@ where only L carries signal.
 
 ## What is on the screen
 
-The 466x466 AMOLED shows a radial spectrum analyzer, ported from the sibling
-`spec_analyzer_radial` project and driven by the session rather than by its own
-I2S read (the codec is already owned by `audio_io`). Bass sits at 12 o'clock,
-treble at 6, mirrored about the vertical axis, with the session state in the
-middle.
+The 466x466 AMOLED shows one of two interchangeable **faces**, and you switch
+between them by asking out loud — see "Changing the face by asking" below.
 
-The ring shows whichever half of the conversation is live:
+Both are driven by the session rather than by their own I2S read, because the
+codec is already owned by `audio_io`.
 
-| | palette | centre |
-|---|---|---|
-| agent speaking | full warm-to-violet sweep | `speaking` |
-| you speaking | narrow cyan-to-blue | `listening` |
-| nothing | flat bars, breathing inner ring | session state |
+### The orb (default)
 
-**Agent audio is tapped where it reaches the speaker**, not where it arrives
-from the network. Deepgram delivers a whole turn faster than it plays — that is
-what the 384 kB ring buffer absorbs — so a visualizer fed from `on_audio()`
-would race ahead and finish while the speaker was still talking. The tap sits in
-`playback_task()`, which is paced by the blocking codec write. It still leads by
-about 90 ms, the depth of the I2S DMA.
+A dotted shell of 456 dots, a C port of the voice orb from
+[thinking-orbs](https://github.com/Jakubantalik/thinking-orbs) and
+[expo-thinking-orbs](https://github.com/mahdidavoodi7/expo-thinking-orbs), both
+MIT. It has a vocabulary rather than a level meter:
 
-**The mic tap sits after the half-duplex gate**, so the ring shows what actually
-goes upstream. With `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` set, that also means
-the two sources are never live at once.
+| | what the shell does |
+|---|---|
+| you speaking | wavefronts travel **inward**, depth set by your volume |
+| agent speaking | wavefronts travel **outward** from a slightly smaller shell |
+| between turns | a quasi-periodic breath, a differential twist, and occasional gestures |
+| connecting | a ladder — `connecting`, `buffering`, `initializing` — each visibly fuller and brighter than the last, so progress reads without reading the label |
+| stopped | drawn in, dim, with a faint ping every 5 s |
 
-Everything else — FFT, layout, drawing — happens in one LVGL timer on a task
-pinned to core 1 at priority **4**, below `audio_play` (6) and `audio_cap` (7).
-The adapter defaults to 6, which would round-robin against playback; the
-override matters, because a starved LVGL task drops frames while a starved audio
-task drops audio. Watch `dropped` in the status line to confirm it is holding.
+Amplitude scales how **deep** a gesture goes, never how fast. Driving rate from
+level is frequency modulation, and reads as vibration rather than as a voice.
+
+The geometry is verified numerically rather than by eye. `host/run.sh` runs the
+upstream TypeScript under node's native type stripping and diffs the C
+dot-for-dot: 14 frames, 456/456 dots, worst deviation 0.0043 px. That harness
+caught two bugs that would each have survived a look at the screen — `hashD`
+needs double precision, and the reference's body breath is not gated on idle.
+
+### The spectrum analyser
+
+The original radial FFT display, ported from the sibling `spec_analyzer_radial`
+project: 24 bands mirrored into 48 bars, bass at 12 o'clock, treble at 6, with a
+warm-to-violet sweep for agent audio and a narrow cyan-to-blue for yours.
+
+**The bar count is a memory decision, not a visual one.** Every `lv_draw_line`
+allocates a mask buffer sized to that bar's screen width at its angle, from
+internal RAM, and the sizes vary — which is what fragments. At 96 bars the
+largest free internal block fell to 11,776 B with a live session; at 48 it is
+32,768 B, against the orb's 43,008. Do not raise `STRIPE_COUNT` back without
+re-measuring. Its FFT and esp-dsp buffers initialise on first activation, so a
+device that never selects it never pays for them.
+
+### Where the audio comes from
+
+**Agent audio is tapped where it reaches the speaker**, not where it arrives from
+the network. Deepgram delivers a whole turn faster than it plays — that is what
+the 384 kB ring buffer absorbs — so a visualizer fed from `on_audio()` would race
+ahead and finish while the speaker was still talking. The tap sits in
+`playback_task()`, paced by the blocking codec write. It still leads by about
+90 ms, the depth of the I2S DMA.
+
+**The mic tap sits after the half-duplex gate**, so the display shows what
+actually goes upstream. With `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` set, that also
+means the two sources are never live at once.
+
+**There is no FFT in the default path.** The orb needs a scalar RMS for gesture
+depth and three bands — from two cascaded one-pole crossovers at 250 Hz and
+2 kHz — for a post-pass where low is bulk swell, mid a travelling ripple, and
+high ink with no motion at all. That split is what stops a loud vowel and a sharp
+consonant looking identical.
+
+Gains are **per source**, and that is not tidiness: agent playback runs about 3x
+hotter than the microphone (RMS 0.31 against 0.095), so one shared gain either
+pins the agent at its ceiling or leaves the mic barely moving. Measured peaks are
+now within a few percent of each other on both paths.
+
+### Threading and memory
+
+Analysis, layout and drawing happen in one LVGL timer on a task pinned to core 1
+at priority **4**, below `audio_play` (6) and `audio_cap` (7). The adapter
+defaults to 6, which would round-robin against playback; the override matters,
+because a starved LVGL task drops frames while a starved audio task drops audio.
+Watch `drop=` in the telemetry line to confirm it is holding.
 
 Internal RAM is the binding constraint once the display is up, and the case that
 bites is a WebSocket reconnect — a TLS handshake wanting a burst of it with the
-render buffer already allocated. Hence the status line reports internal free and
-largest-block, the LVGL render chunk is 32 rows rather than 64, LVGL uses the
-C library allocator (its builtin one emits a 64 kB internal array), and the FFT
-scratch lives in PSRAM. If largest-block sags towards 40 kB, cut `DRAW_ROWS` in
-[main/spectrum_ui.c](main/spectrum_ui.c) before tuning anything else.
+render buffer already allocated. What matters is the **largest contiguous block**,
+not the total: total free has been observed above 44 kB while the largest block
+sat at 11 kB. Hence the telemetry reports `int`, `intmax`, `ifree` and `iblocks`;
+the LVGL render chunk is 32 rows rather than 64; LVGL uses the C library
+allocator (its builtin one emits a 64 kB internal array); and every large orb
+array lives in PSRAM. Note the threshold trap there:
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` is 4096, so several allocations each below
+it still land internal and have to be combined into one larger block to reach
+PSRAM. If largest-block sags towards 40 kB, cut `DRAW_ROWS` in
+[main/ui.c](main/ui.c) before tuning anything else.
+
+### Telemetry
+
+One machine-parseable line per second, plus `EVT` lines on every transition:
+
+```
+TLM up=123.4 face=orb beh=SPEAKING src=agent sess=ready frames=22 fps=22.8
+    draw=17.4/20.1 amp=0.41/0.56 low=0.32/0.49 mid=0.55/0.71 high=0.48/0.62
+    ... int=65851 intmax=49152 ifree=65851 iblocks=5 ialloc=521
+EVT beh IDLE->SPEAKING after=4.20s
+```
+
+It is emitted from the **main task**, not the UI: console writes block, and
+logging from the frame timer would corrupt the timings it reports. `avg/max`
+pairs everywhere, because speech and frame timing are both mostly-quiet with
+occasional peaks and a periodic spot sample misses exactly the peaks that matter.
+
+This replaced five logs on five drifting cadences and found four bugs within
+minutes of existing — including that the orb had been permanently in its
+listening pose, because the old test was "did a PCM block arrive recently" and
+the capture tap fires every 80 ms whether or not anyone is speaking.
+`CONFIG_UI_TELEMETRY_MS` turns it down.
 
 ## Ending and starting a conversation
 
-The **inner circle** is the control — the same circle the ring is drawn around,
-about 70 px in radius. **Tap** it to toggle: end the current conversation, or
-open a new one. **Hold it for a second** to force a restart from either state,
-for when a session is up but wedged. It lights up cyan while your finger is on
-it, since a press that lands during the cooldown otherwise gives no sign it was
-seen. Touches outside the circle are ignored — the whole panel used to be live,
-and brushing the bezel was enough to end a conversation.
+The **inner circle** is the control, about 70 px in radius. **Tap** it to
+toggle: end the current conversation, or open a new one. **Hold it for a second**
+to force a restart from either state, for when a session is up but wedged.
+Touches outside the circle are ignored — the whole panel used to be live, and
+brushing the bezel was enough to end a conversation.
+
+A press has to show, because a tap landing during the cooldown otherwise gives no
+sign it was seen. Each face signals it in its own grammar: the spectrum lights
+its inner ring cyan, and the orb lifts the whole shell's amplitude, which reuses
+the "event" coupling every one of its behaviours already has.
+
+One rough edge, recorded rather than fixed: the spectrum draws a ring at exactly
+the hit radius, so its affordance and its target coincide. The orb paints across
+about 410 px with no centre landmark at all, so it looks like a much larger
+button than it is.
 
 There is also a **1.5 s cooldown** after each action completes, and requests are
 refused outright while one is in progress rather than queued. Queueing was the
@@ -284,6 +364,48 @@ If a touch or UI volume control is ever added, funnel both callers through
 `audio_io_adjust_volume()` and put a mutex there — outside `esp_codec_dev`, so it
 cannot invert against the WebSocket client's own recursive lock.
 
+## Changing the face by asking
+
+"Show me the bars instead" works, and so does "go back to the orb". `set_face`
+takes a name from a two-entry catalog.
+
+Mechanically it is the sibling of `adjust_volume`, not of `set_voice`:
+**Deepgram knows nothing about the display.** No `Settings` field, so no session
+reload, no history replay and no gap — the confirmation is phrased as already
+done, because it is.
+
+The catalog lives in [main/faces.c](main/faces.c) with no LVGL in it, mirroring
+the `voices.c` / `voices.h` split for exactly the same reason: `dg_agent` has to
+build the function schema, and its blurbs are written for the model rather than
+for a reader, so indirect phrasings resolve without anyone naming a face
+exactly. `ui_set_face()` stores an index that the frame timer applies **before**
+anything draws, so the incoming face owns a whole frame instead of painting over
+half of the outgoing one's output.
+
+## Stopping when nobody is talking
+
+The device uplinks 16 kHz mono for as long as a session is open — roughly
+32 kB/s — and reconnects on its own if the socket drops. A board left powered on
+a desk therefore streams, and bills, indefinitely.
+`CONFIG_SESSION_IDLE_TIMEOUT_S` (default 15, 0 disables) stops the session once
+nothing has happened for that long; tapping the screen or the BOOT button starts
+it again.
+
+The trade is reconnect latency on the next word — measured, 1.1–6.0 s of
+connecting plus 0.5 s of buffering — so a short timeout costs a wait before the
+device can hear you.
+
+Two details worth knowing. `session_ctl_request_stop()` is a distinct request
+rather than a toggle, because a toggle that raced the running flag could *start*
+a session and turn a cost-saving measure into an unattended one that bills until
+someone notices. And history is kept, unlike a deliberate tap-to-stop: the device
+stopped for want of conversation rather than because anyone ended it, so picking
+it up again resumes instead of re-greeting.
+
+Activity means an end-of-turn, Deepgram reporting the user started speaking, or
+the speaker being busy — deliberately not the local microphone level, which would
+tie session lifetime to whether the display came up.
+
 ## Changing the voice by asking
 
 The agent can change its own voice. Say "switch to a British woman" and it picks
@@ -443,10 +565,12 @@ Besides matching the model, it cuts mic sends from ~31/s to ~12.5/s, which
 directly reduces the write pressure behind the reconnect failure described
 below. Cost is ~4.6 kB more internal RAM for the capture buffers.
 
-One side effect: the spectrum ring's *mic* feed now arrives in 80 ms bursts
-against a 32 ms FFT hop, so the mic-driven ring updates a little lumpier.
-`spectrum_ui`'s `feed()` accumulates arbitrary chunk sizes so it stays correct,
-and agent-driven visuals are unaffected — those come off the playback tap.
+One side effect: the display's *mic* feed now arrives in 80 ms bursts rather
+than 32 ms ones. `ui.c`'s `feed()` accumulates arbitrary chunk sizes so it stays
+correct either way, and the level pipeline peak-holds between frames precisely
+because the two rates do not divide — a plain "newest value" would drop
+transients that fall between frames. Agent-driven visuals are unaffected; those
+come off the playback tap.
 
 ## Speaker volume
 
@@ -512,7 +636,14 @@ same monitor command works for both projects.
 | [main/boot_button.c](main/boot_button.c) | BOOT/GPIO 0: click toggles, 3 s hold forgets the network |
 | [main/dg_agent.c](main/dg_agent.c) | Agent API client: `Settings`, event decoding, KeepAlive |
 | [main/audio_io.c](main/audio_io.c) | both codecs: ES7210 capture, ES8311 playback, mono↔stereo, gating |
-| [main/spectrum_ui.c](main/spectrum_ui.c) | radial FFT display: panel bring-up, sample handoff, ring render |
+| [main/ui.c](main/ui.c) | panel and touch bring-up, status label, QR overlay, frame timer, audio levels, face dispatch |
+| [main/ui_face.h](main/ui_face.h) | the face vtable and per-frame render context |
+| [main/face_orb.c](main/face_orb.c) | orb face: behaviour selection and the 280 ms crossfade |
+| [main/orb_geometry.c](main/orb_geometry.c) | the shell's maths. No LVGL, no ESP-IDF — compiles on the host so `host/run.sh` can diff it against upstream |
+| [main/orb_raster.c](main/orb_raster.c) | dots to RGB565: coverage-normalised blend, dirty-rect clear, zero per-frame allocation |
+| [main/face_spectrum.c](main/face_spectrum.c) | spectrum face: FFT, sample handoff, ring render. Initialises lazily |
+| [main/faces.c](main/faces.c) | the face catalog, LVGL-free so `dg_agent` can build the `set_face` schema |
+| [host/](host/) | geometry parity harness — runs the upstream TypeScript and diffs the C dot-for-dot |
 | [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
 | [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / prompt / greeting / audio, and the Wi-Fi seed |
 | [WIFI-SETUP.md](WIFI-SETUP.md) | every way to get credentials onto the device, and why it will not connect |
