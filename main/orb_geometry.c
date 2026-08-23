@@ -87,6 +87,17 @@ static orb_ring_t s_wave_rings[WAVE_RING_COUNT];
 static int s_wave_dot_count;
 static float *s_wave_cos_lon;
 static float *s_wave_sin_lon;
+/*
+ * The same lattice as unit cartesian coordinates, which is what rubik's slab
+ * test needs -- and it must be computed in DOUBLE, as buildLattice does.
+ *
+ * Not a micro-optimisation avoided: rubik decides slab membership with
+ * `coord < lo || coord >= hi` where the bounds are exact multiples of 0.5, so
+ * the SIGN of a coordinate near zero changes which slab a dot turns with.
+ * cos(pi/2) is +6.1e-17 in double and -4.4e-8 in float -- opposite sides of the
+ * 0.0 boundary. Deriving these per frame in float moved 26 of 384 dots.
+ */
+static double *s_wave_unit; /* ux,uy,uz interleaved: 3 doubles a dot */
 
 /*
  * The per-dot lattice tables, heap allocated as ONE block.
@@ -487,6 +498,11 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
     }
 }
 
+/* Defined with the voice build below; every mode sorts into the same order. */
+static int cmp_draw_order(const void *pa, const void *pb);
+/* Built once by orb_init(), defined with the rubik mode below. */
+static void rubik_make_moves(void);
+
 /* ---------------- setup ---------------- */
 
 bool orb_init(float size)
@@ -501,6 +517,12 @@ bool orb_init(float size)
          */
         s_lattice = malloc((3 * ORB_MAX_DOTS + 2 * WAVE_MAX_DOTS) * sizeof(float));
         if (s_lattice == NULL) {
+            return false;
+        }
+        /* Doubles, so a separate block -- 9.2 kB, which clears
+         * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL on its own and lands in PSRAM. */
+        s_wave_unit = malloc(3 * WAVE_MAX_DOTS * sizeof(double));
+        if (s_wave_unit == NULL) {
             return false;
         }
         s_cos_lon = &s_lattice[0];
@@ -562,19 +584,26 @@ bool orb_init(float size)
         s_wave_rings[ri].lon_count = lon_count;
         s_wave_rings[ri].base = wn;
 
+        /* Double throughout, matching buildLattice, then narrowed. The cast
+         * keeps the sign of a near-zero cosine, which is the whole point. */
+        double lat_d = -M_PI / 2.0 + ((double)ri / (double)WAVE_RINGS) * M_PI;
+        double cos_lat_d = cos(lat_d);
+        double sin_lat_d = sin(lat_d);
         for (int lj = 0; lj < lon_count; lj++) {
-            float lon = ((float)lj / (float)lon_count) * TAU;
-            s_wave_cos_lon[wn + lj] = cosf(lon);
-            s_wave_sin_lon[wn + lj] = sinf(lon);
+            double lon_d = ((double)lj / (double)lon_count) * 2.0 * M_PI;
+            s_wave_cos_lon[wn + lj] = (float)cos(lon_d);
+            s_wave_sin_lon[wn + lj] = (float)sin(lon_d);
+            s_wave_unit[3 * (wn + lj) + 0] = cos_lat_d * cos(lon_d);
+            s_wave_unit[3 * (wn + lj) + 1] = sin_lat_d;
+            s_wave_unit[3 * (wn + lj) + 2] = cos_lat_d * sin(lon_d);
         }
         wn += lon_count;
     }
     s_wave_dot_count = wn;
+
+    rubik_make_moves();
     return true;
 }
-
-/* Defined with the voice build below; both sort into the same draw order. */
-static int cmp_draw_order(const void *pa, const void *pb);
 
 /* ---------------- wave (lattice.ts buildWave) ---------------- */
 
@@ -652,6 +681,222 @@ void orb_build_wave(orb_frame_t *out, float t)
             }
             d->white = INK_FAR - INK_SPAN * depth - 0.1f * crest;
             d->a = 1.0f; /* wave never signals an event, so never fades */
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+}
+
+/* ---------------- rubik (lattice.ts buildRubik) ---------------- */
+
+/*
+ * The playground's `solving` orb: a dotted sphere whose bands scramble and
+ * unscramble, one quarter-turn at a time, forever.
+ *
+ * Shares wave's lattice -- its profile is latRings 15 / lonDensity 40 too -- but
+ * nothing else. Its own shell radius (0.82, not 0.874), its own ink constants,
+ * and a projection that folds R into makeProj's `scale` rather than scaling
+ * afterwards, which is why depth here comes from an UNSCALED z.
+ */
+#define RUBIK_MOVE_COUNT 14
+#define RUBIK_SLOT_DUR 0.42f
+#define RUBIK_REST 1.2f
+
+typedef struct {
+    int axis;     /* 0 = x, 1 = y, 2 = z */
+    float lo, hi; /* the slab this move turns */
+    double ang;   /* double: see rubik_apply_moves */
+} rubik_move_t;
+
+static rubik_move_t s_rubik_moves[RUBIK_MOVE_COUNT];
+
+/* makeMoves: a fixed, hash-derived scramble. Same every boot on purpose -- the
+ * reference's sequence is part of what the harness diffs. */
+static void rubik_make_moves(void)
+{
+    for (int i = 0; i < RUBIK_MOVE_COUNT; i++) {
+        int axis = (int)floorf(hash_d((double)i, 2.3) * 3.0f);
+        if (axis > 2) {
+            axis = 2;
+        }
+        int step = (int)floorf(hash_d((double)i, 5.9) * 4.0f);
+        if (step > 3) {
+            step = 3;
+        }
+        float dir = (hash_d((double)i, 7.7) < 0.5f) ? 1.0f : -1.0f;
+
+        s_rubik_moves[i].axis = axis;
+        s_rubik_moves[i].lo = -1.0f + 0.5f * (float)step;
+        s_rubik_moves[i].hi = s_rubik_moves[i].lo + 0.5f;
+        s_rubik_moves[i].ang = (double)dir * M_PI / 2.0;
+    }
+}
+
+/*
+ * How far through the scramble-and-solve cycle each move is.
+ *
+ * Moves land one at a time, then unwind in reverse -- so the orb is never
+ * "wrong", it is always mid-procedure. The ease-out is cubic and deliberately
+ * mechanical: it arrives like a machine placing a part, not like something alive.
+ */
+static int rubik_solve_cycle(float t, double amount[RUBIK_MOVE_COUNT])
+{
+    const int count = RUBIK_MOVE_COUNT;
+    for (int i = 0; i < count; i++) {
+        amount[i] = 0.0;
+    }
+
+    float cyc = 2.0f * (float)count * RUBIK_SLOT_DUR + RUBIK_REST;
+    float tc = fmodf(t, cyc);
+    if (tc < 0.0f) {
+        tc += cyc;
+    }
+    if (tc >= 2.0f * (float)count * RUBIK_SLOT_DUR) {
+        return -1; /* the rest between cycles: solved and still */
+    }
+
+    int slot = (int)floorf(tc / RUBIK_SLOT_DUR);
+    /* Double from here down: `ep` becomes a rotation angle whose cosine decides
+     * the next move's slab test, so its last bits are not cosmetic. */
+    double pr = ((double)tc - (double)slot * (double)RUBIK_SLOT_DUR) / (double)RUBIK_SLOT_DUR;
+    double cl = (pr / 0.7 > 1.0) ? 1.0 : (pr / 0.7);
+    double inv = 1.0 - cl;
+    double ep = 1.0 - inv * inv * inv;
+
+    int active;
+    if (slot < count) {
+        for (int i = 0; i < slot; i++) {
+            amount[i] = 1.0;
+        }
+        amount[slot] = ep;
+        active = slot;
+    } else {
+        int u = 2 * count - 1 - slot;
+        for (int i = 0; i < u; i++) {
+            amount[i] = 1.0;
+        }
+        amount[u] = 1.0 - ep;
+        active = u;
+    }
+    return active;
+}
+
+/*
+ * Rotate a dot through every move whose slab contains it. Returns true if the
+ * dot is inside the move currently turning -- the band that inks darker.
+ *
+ * DOUBLE, unlike every other hot path in this file, and not by preference.
+ * Slab membership is tested against the coordinate AS ALREADY ROTATED by earlier
+ * moves, so this is a chain of discontinuous decisions rather than a smooth
+ * function -- and a fully applied move turns by exactly +/-pi/2, where cosf
+ * gives -4.4e-8 and cos gives +6.1e-17. Opposite sides of the 0.0 slab
+ * boundary. In float, 38 of 384 dots turned with the wrong band.
+ *
+ * The trig is per MOVE, not per dot -- hoisted by the caller -- so what this
+ * actually costs is a few double multiplies for the ~25% of dots inside any
+ * given slab.
+ */
+static bool rubik_apply_moves(const double *unit, const double *amount,
+                              const double *ca_tab, const double *sa_tab,
+                              int active, float out[3])
+{
+    double x = unit[0], y = unit[1], z = unit[2];
+    bool in_active = false;
+
+    for (int i = 0; i < RUBIK_MOVE_COUNT; i++) {
+        if (amount[i] <= 0.0) {
+            continue;
+        }
+        const rubik_move_t *mv = &s_rubik_moves[i];
+        double coord = (mv->axis == 0) ? x : (mv->axis == 1) ? y : z;
+        if (coord < (double)mv->lo || coord >= (double)mv->hi) {
+            continue;
+        }
+        if (i == active) {
+            in_active = true;
+        }
+        double ca = ca_tab[i], sa = sa_tab[i];
+        if (mv->axis == 0) {
+            double y2 = y * ca - z * sa;
+            z = y * sa + z * ca;
+            y = y2;
+        } else if (mv->axis == 1) {
+            double x2 = x * ca + z * sa;
+            z = -x * sa + z * ca;
+            x = x2;
+        } else {
+            double x2 = x * ca - y * sa;
+            y = x * sa + y * ca;
+            x = x2;
+        }
+    }
+    out[0] = (float)x;
+    out[1] = (float)y;
+    out[2] = (float)z;
+    return in_active;
+}
+
+#define RUBIK_R_ACTIVE 0.3f
+#define RUBIK_INK_FAR 0.62f
+#define RUBIK_INK_SPAN 0.54f
+
+void orb_build_rubik(orb_frame_t *out, float t)
+{
+    const float R = s_cx * 0.82f; /* rubik's own shell, tighter than wave's */
+
+    /* buildRubik folds R into makeProj's `scale`, so the projection returns
+     * screen pixels directly and an UNSCALED z. */
+    const float yaw = t * 0.55f;
+    const float tilt = 0.35f + 0.1f * sinf(t * 0.9f);
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    double amount[RUBIK_MOVE_COUNT];
+    int active = rubik_solve_cycle(t, amount);
+
+    /* Per move, not per dot: fourteen sin/cos a frame rather than thousands. */
+    double ca_tab[RUBIK_MOVE_COUNT], sa_tab[RUBIK_MOVE_COUNT];
+    for (int i = 0; i < RUBIK_MOVE_COUNT; i++) {
+        double a = s_rubik_moves[i].ang * amount[i];
+        ca_tab[i] = cos(a);
+        sa_tab[i] = sin(a);
+    }
+
+    size_t count = 0;
+
+    for (int ri = 0; ri < WAVE_RING_COUNT; ri++) {
+        const orb_ring_t *ring = &s_wave_rings[ri];
+
+        for (int lj = 0; lj < ring->lon_count; lj++) {
+            size_t k = (size_t)ring->base + (size_t)lj;
+            float m[3];
+            bool in_active = rubik_apply_moves(&s_wave_unit[3 * k], amount,
+                                               ca_tab, sa_tab, active, m);
+
+            float x1 = m[0] * cyw + m[2] * sy;
+            float z1 = -m[0] * sy + m[2] * cyw;
+            float y1 = m[1] * ct - z1 * st;
+            float zr = m[1] * st + z1 * ct;
+
+            /* Unscaled, because R went into the projection's scale. */
+            float depth = (zr + 1.0f) / 2.0f;
+            if (depth < 0.0f) {
+                depth = 0.0f;
+            } else if (depth > 1.0f) {
+                depth = 1.0f;
+            }
+
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1 * R;
+            d->y = s_cy - y1 * R;
+            d->z = zr;
+            d->r = (R_BASE + R_DEPTH * depth + (in_active ? RUBIK_R_ACTIVE : 0.0f)) * s_rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = RUBIK_INK_FAR - RUBIK_INK_SPAN * depth - (in_active ? 0.14f : 0.0f);
+            d->a = 1.0f;
         }
     }
 

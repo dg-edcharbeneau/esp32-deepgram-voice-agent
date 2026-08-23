@@ -48,6 +48,14 @@ static const wave_case_t WAVE_CASES[] = {
     { "wave_d", 13.2f },
 };
 
+/* Must match RUBIK_CASES in orb_ref.mjs, in order. */
+static const wave_case_t RUBIK_CASES[] = {
+    { "rubik_a", 1.7f },
+    { "rubik_b", 5.0f },
+    { "rubik_c", 9.3f },
+    { "rubik_d", 12.4f },
+};
+
 int main(int argc, char **argv)
 {
     float size = (argc > 1) ? strtof(argv[1], NULL) : 466.0f;
@@ -59,6 +67,16 @@ int main(int argc, char **argv)
     for (size_t c = 0; c < sizeof(WAVE_CASES) / sizeof(WAVE_CASES[0]); c++) {
         const wave_case_t *k = &WAVE_CASES[c];
         orb_build_wave(&frame, k->t);
+        for (size_t i = 0; i < frame.count; i++) {
+            const orb_dot_t *d = &frame.dots[i];
+            printf("%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
+                   k->label, d->x, d->y, d->z, d->r, d->white, d->a);
+        }
+    }
+
+    for (size_t c = 0; c < sizeof(RUBIK_CASES) / sizeof(RUBIK_CASES[0]); c++) {
+        const wave_case_t *k = &RUBIK_CASES[c];
+        orb_build_rubik(&frame, k->t);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];
             printf("%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",

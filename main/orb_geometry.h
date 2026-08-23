@@ -81,6 +81,13 @@ typedef struct {
 void orb_build_wave(orb_frame_t *out, float t);
 
 /*
+ * Build one frame of `rubik` -- the playground's `solving` orb, ported from
+ * lattice.ts buildRubik. Shares wave's lattice and dot count; everything else,
+ * including the shell radius and the ink constants, is its own.
+ */
+void orb_build_rubik(orb_frame_t *out, float t);
+
+/*
  * Evaluate one frame.
  *
  * `t` is seconds; everything here is a pure function of it, so a dropped frame

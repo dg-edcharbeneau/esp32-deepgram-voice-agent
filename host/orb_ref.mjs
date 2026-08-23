@@ -5,7 +5,7 @@
 // finalize step (cull, clamp, z-sort) that thinking-orbs' finalizeFrame
 // performs, because the expo port does it inside its Skia recorder.
 import { precomputeVoice, buildVoice } from './ref/voice.ts';
-import { precomputeWave, buildWave } from './ref/lattice.ts';
+import { precomputeWave, buildWave, precomputeRubik, buildRubik } from './ref/lattice.ts';
 
 const SIZE = Number(process.env.ORB_SIZE ?? 466);
 const R_MIN = 0.3;
@@ -69,6 +69,42 @@ function waveFrame(t) {
   return out;
 }
 
+// Rubik shares wave's lattice size but has its own precompute (the move list).
+const rs_ = precomputeRubik(opts);
+const rbuf = {
+  xs: new Float32Array(rs_.dotCount), ys: new Float32Array(rs_.dotCount),
+  zs: new Float32Array(rs_.dotCount), rs: new Float32Array(rs_.dotCount),
+  ws: new Float32Array(rs_.dotCount), as: new Float32Array(rs_.dotCount),
+  count: 0,
+};
+
+function rubikFrame(t) {
+  rbuf.count = 0;
+  buildRubik(rbuf, SIZE, t, opts, rs_, {
+    amp: 0, from: 0, to: 0, mix: 1,
+    rMul: 1, yaw: 0, pitch: 0, roll: 0, orient: undefined,
+  });
+  const out = [];
+  for (let i = 0; i < rbuf.count; i++) {
+    if (rbuf.as[i] < ALPHA_CULL) continue;
+    out.push({
+      x: rbuf.xs[i], y: rbuf.ys[i], z: rbuf.zs[i],
+      r: Math.max(R_MIN, rbuf.rs[i]), w: rbuf.ws[i], a: rbuf.as[i],
+    });
+  }
+  out.sort((a, b) => a.z - b.z);
+  return out;
+}
+
+// Timestamps chosen to land in different parts of the solve cycle: mid-scramble,
+// mid-unwind, and inside the rest where nothing is turning.
+const RUBIK_CASES = [
+  ['rubik_a', 1.7],
+  ['rubik_b', 5.0],
+  ['rubik_c', 9.3],
+  ['rubik_d', 12.4],
+];
+
 const WAVE_CASES = [
   ['wave_a', 1.7],
   ['wave_b', 3.3],
@@ -102,6 +138,14 @@ const CASES = [
 
 for (const [label, t] of WAVE_CASES) {
   for (const d of waveFrame(t)) {
+    process.stdout.write(
+      `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
+      `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);
+  }
+}
+
+for (const [label, t] of RUBIK_CASES) {
+  for (const d of rubikFrame(t)) {
     process.stdout.write(
       `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
       `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);
