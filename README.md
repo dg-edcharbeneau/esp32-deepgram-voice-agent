@@ -861,10 +861,51 @@ capture while playback is active, plus a 300 ms tail for audio already in the I2
 DMA.
 
 It is a crude fix and it costs barge-in: with it on you cannot interrupt the
-agent, and `UserStartedSpeaking` will not fire mid-reply. Deepgram's echo
-cancellation is the real answer — see the Voice Agent "Audio Preprocessing &
-Barge-In" docs — at which point turn this off and the `audio_io_flush()` barge-in
-path already wired up starts earning its keep.
+agent, and `UserStartedSpeaking` will not fire mid-reply.
+
+**The real answer is not server-side, and an earlier version of this file was
+wrong to say it was.** Deepgram's
+[Audio Preprocessing & Barge-In](https://developers.deepgram.com/guides/deep-dives/audio-preprocessing-barge-in)
+guide has no AEC setting and explicitly pushes it to the device: platform-level
+cancellation has direct access to both the microphone and the speaker output, so
+time alignment is handled for it. For hardware with no browser it names exactly
+this situation — a separate mic stream and speaker reference stream — and treats
+server-side AEC as an advanced case needing zero clock skew.
+
+**Waveshare's "hardware echo cancellation" is also wrong.** The ES7210 datasheet
+titles it "High Performance Four Channels Audio ADC"; there is no echo canceller
+in it, nor in the ES8311, nor in the NS4150B amplifier.
+
+**What the board really gives you is an echo *reference*** — which is the part
+that is genuinely hard to retrofit. The schematic netlist shows an `AEC ADC`
+block tapping the ES8311's outputs through a differential RC network into ES7210
+MIC3P/MIC3N, every component populated. The reference is captured by the same
+ADC, on the same clock, in the same frame as the mics, so it is sample-aligned by
+construction.
+
+Nothing enables it by default: the BSP builds the ES7210 with `mic_selected` at
+0, so the driver falls back to MIC1|MIC2 and MIC3 is never powered. And SDOUT2 —
+the non-TDM route to MIC3 — is cut on this board (R48 is NC), so **4-channel TDM
+is the only way it reaches the S3.**
+
+`CONFIG_AEC_REF_PROBE` proves it. With all four inputs selected and the frame
+read as 2 ch x 32-bit standard I2S, measured peaks per lane:
+
+| lane | idle | playback | what it is |
+|---|---|---|---|
+| 0 | 2–3 | 7867–9359 | **the echo reference** — note the absent noise floor |
+| 1 | 30–115 | 537–11439 | a MEMS mic |
+| 2 | 3 | 3–9 | MIC4, AC-coupled to AGND, dead always |
+| 3 | 30–115 | 520–12353 | the other MEMS mic |
+
+Lane 2 being permanently dead is the control that identifies the ordering rather
+than guessing it — and the slot order is *not* MIC1/2/3/4, because a 32-bit word
+arrives MSB-first and stores little-endian so each pair swaps in memory.
+
+Cancellation itself is still to do: `espressif/esp-sr`'s AFE with
+`input_format = "MMRN"`, `aec_init = true`. It wants 16-bit/16 kHz, which is
+already this project's format. Then this gate comes off and the
+`audio_io_flush()` barge-in path already wired up starts earning its keep.
 
 ### The BSP init-order trap
 
@@ -889,4 +930,4 @@ default. This is the order `bsp_extra` uses.
 | `CONFIG_MIC_IN_GAIN` | 24 dB | raise if mic peaks stay near zero while you talk |
 | `CONFIG_AUDIO_OUT_VOLUME` | 80 | speaker too quiet or clipping |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
-| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | on | off once echo cancellation exists |
+| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | on | off once the AFE runs — the reference channel it needs is proven, see above |

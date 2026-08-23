@@ -224,6 +224,37 @@ menu "Deepgram Agent Device"
 
             0 disables the timeout and restores the old always-on behaviour.
 
+    config AEC_REF_PROBE
+        bool "Probe the echo-reference channel (ES7210 4-channel TDM)"
+        default n
+        help
+            BENCH TOOL, and the prerequisite for any echo cancellation work.
+
+            Waveshare advertises "hardware echo cancellation" and calls the
+            ES7210 an "Echo Cancellation Algorithm Chip". Both are wrong -- the
+            datasheet titles it a four-channel ADC and there is no echo canceller
+            anywhere on this board. What the schematic DOES show is an echo
+            REFERENCE channel: the ES8311's outputs fed back through an RC
+            network into ES7210 MIC3, every component populated. That is the hard
+            part to retrofit, because the reference is captured by the same ADC on
+            the same clock in the same frame as the microphones, so it is
+            sample-aligned by construction.
+
+            Nothing enables it. The BSP builds the ES7210 with mic_selected at 0,
+            so the driver defaults to MIC1|MIC2 and MIC3 is never powered. And
+            SDOUT2 -- the non-TDM route to MIC3 -- is cut on this board (R48 is
+            NC), so a 4-channel TDM frame is the only way it reaches the chip.
+
+            Turning this on selects all four inputs, which puts the ES7210 into
+            TDM, and moves the audio path to 32 bits so one I2S word carries two
+            16-bit TDM slots. It costs internal RAM for the wider buffers and it
+            logs four channel peaks instead of two. The conversation keeps working
+            throughout -- Deepgram is still fed from the same microphone lane.
+
+            The cancellation algorithm itself is NOT included; that would be
+            esp-sr's AFE, and it is only worth adding once this run proves the
+            reference lane is real and its alignment is stable.
+
     config AUDIO_CAPTURE_ALWAYS
         bool "Keep visualizing the microphone while the session is stopped"
         default n

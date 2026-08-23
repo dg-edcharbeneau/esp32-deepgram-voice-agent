@@ -12,13 +12,37 @@
 
 #include "bsp/esp-bsp.h"
 
+#include "audio_codecs.h"
 #include "audio_io.h"
 
 static const char *TAG = "audio_io";
 
 /* The codecs are opened with this many channels; see the header. */
 #define CODEC_CHANNELS 2
+/*
+ * Sample width on the wire to both codecs.
+ *
+ * 32 under CONFIG_AEC_REF_PROBE, and it is not about audio quality. The ES7210
+ * emits a 4x16-bit TDM frame -- 64 bits -- and the S3's I2S RX cannot be put in
+ * TDM mode independently, because RX and TX share BCLK/WS in full duplex and
+ * must be configured identically. Reading the same 64 bits as 2 channels x
+ * 32 bits gets the whole frame through standard I2S, with one 32-bit word
+ * carrying two 16-bit channels.
+ *
+ * es7210_set_fs() is written for exactly this: in TDM mode with channel <= 2 and
+ * channel_mask == 0 it halves the requested width, so asking for 32 programs
+ * 16-bit slots.
+ *
+ * Do NOT ask for 16 expecting 8-bit slots. `bits >>= 1` gives 8 and
+ * es7210_set_bits() has no case 8 -- it falls through to default and writes
+ * 16-bit anyway, so the ADC would clock out 64 bits against 32 from the S3 and
+ * MIC3/MIC4 would never be shifted out at all.
+ */
+#if CONFIG_AEC_REF_PROBE
+#define CODEC_BITS     32
+#else
 #define CODEC_BITS     16
+#endif
 
 /*
  * Mono frames per capture read. 1280 at 16 kHz is 80 ms, the chunk size Flux
@@ -110,10 +134,19 @@ static bool s_in_carry_valid;
 
 static void playback_task(void *arg)
 {
-    /* Mono in, stereo out: the codec is open with two channels, so every
-     * sample has to be written twice. */
+    /*
+     * Mono in, stereo out: the codec is open with two channels, so every sample
+     * has to be written twice. Under the probe the codec is also open at 32 bits,
+     * so each written sample is four bytes and the output buffer doubles again.
+     */
+#if CONFIG_AEC_REF_PROBE
+    const size_t out_bytes_per_sample = 2 * sizeof(int32_t);
+#else
+    const size_t out_bytes_per_sample = 2 * sizeof(int16_t);
+#endif
     int16_t *mono = heap_caps_malloc(CHUNK_MONO, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    int16_t *stereo = heap_caps_malloc(CHUNK_MONO * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    void *stereo = heap_caps_malloc((CHUNK_MONO / sizeof(int16_t)) * out_bytes_per_sample,
+                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (mono == NULL || stereo == NULL) {
         ESP_LOGE(TAG, "no internal RAM for playback buffers");
         vTaskDelete(NULL);
@@ -174,12 +207,28 @@ static void playback_task(void *arg)
             s_play_tap(mono, samples);
         }
 
+#if CONFIG_AEC_REF_PROBE
+        /*
+         * Left-justified into the 32-bit slot: the ES8311 takes the top 16 bits,
+         * so << 16 is the identity transform on the audio and only the container
+         * changed. Shifting the other way would attenuate by 96 dB.
+         */
+        int32_t *out32 = (int32_t *)stereo;
         for (size_t i = 0; i < samples; i++) {
-            stereo[2 * i] = mono[i];
-            stereo[2 * i + 1] = mono[i];
+            int32_t v = (int32_t)mono[i] << 16;
+            out32[2 * i] = v;
+            out32[2 * i + 1] = v;
         }
+#else
+        int16_t *out16 = (int16_t *)stereo;
+        for (size_t i = 0; i < samples; i++) {
+            out16[2 * i] = mono[i];
+            out16[2 * i + 1] = mono[i];
+        }
+#endif
 
-        int err = esp_codec_dev_write(s_spk, stereo, (int)(samples * 2 * sizeof(int16_t)));
+        int err = esp_codec_dev_write(s_spk, stereo,
+                                      (int)(samples * out_bytes_per_sample));
         if (err != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "esp_codec_dev_write failed: %d", err);
         }
@@ -191,7 +240,15 @@ static void playback_task(void *arg)
 
 static void capture_task(void *arg)
 {
+    /*
+     * Under the probe a frame is four 16-bit TDM slots -- 8 bytes -- read as two
+     * 32-bit I2S words. Without it, two 16-bit channels, 4 bytes.
+     */
+#if CONFIG_AEC_REF_PROBE
+    const size_t stereo_bytes = CAPTURE_FRAMES * 4 * sizeof(int16_t);
+#else
     const size_t stereo_bytes = CAPTURE_FRAMES * CODEC_CHANNELS * sizeof(int16_t);
+#endif
     const size_t mono_bytes = CAPTURE_FRAMES * sizeof(int16_t);
 
     int16_t *stereo = heap_caps_malloc(stereo_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -211,6 +268,31 @@ static void capture_task(void *arg)
             continue;
         }
 
+#if CONFIG_AEC_REF_PROBE
+        /*
+         * Four lanes. Slot ORDER in TDM is not documented by the driver, so this
+         * deliberately does not assume which lane is which: it measures all four
+         * and lets the run identify them. Two independent signatures pin it down
+         * -- exactly one lane should track playback amplitude (the reference,
+         * expected at index 2), and exactly one should sit at the noise floor
+         * under all conditions, because the netlist AC-couples MIC4 to AGND.
+         * Finding the dead lane is what distinguishes "the reference works" from
+         * "the slots are offset".
+         */
+        int16_t peak[4] = { 0, 0, 0, 0 };
+        for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
+            const int16_t *f = &stereo[4 * i];
+            for (int c = 0; c < 4; c++) {
+                int16_t a = (f[c] < 0) ? (int16_t)-f[c] : f[c];
+                if (a > peak[c]) {
+                    peak[c] = a;
+                }
+            }
+            /* Deepgram keeps being fed from the same two microphone lanes, so the
+             * conversation is unaffected while probing. */
+            mono[i] = (int16_t)(((int32_t)f[0] + (int32_t)f[1]) / 2);
+        }
+#else
         int16_t peak_l = 0, peak_r = 0;
         for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
             int16_t l = stereo[2 * i];
@@ -223,6 +305,7 @@ static void capture_task(void *arg)
             if (al > peak_l) peak_l = al;
             if (ar > peak_r) peak_r = ar;
         }
+#endif
 
 #if CONFIG_MIC_LEVEL_LOG
         /*
@@ -234,8 +317,22 @@ static void capture_task(void *arg)
         int64_t now = esp_timer_get_time();
         if (now >= next_level_log) {
             next_level_log = now + 3000000;
+#if CONFIG_AEC_REF_PROBE
+            /*
+             * Reading this: with the agent speaking and nobody talking, exactly
+             * one lane should rise -- that is the echo reference. Exactly one
+             * should stay at the floor in every condition -- that is the
+             * grounded MIC4, and it is what fixes the slot order. Speak with the
+             * speaker idle and lanes 0/1 should rise while the reference stays
+             * down, which rules out crosstalk being mistaken for a reference.
+             */
+            ESP_LOGI(TAG, "AECPROBE lanes=%d,%d,%d,%d play=%d",
+                     peak[0], peak[1], peak[2], peak[3],
+                     audio_io_playback_active() ? 1 : 0);
+#else
             ESP_LOGI(TAG, "mic peak L=%d R=%d%s", peak_l, peak_r,
                      audio_io_playback_active() ? " (gated: agent speaking)" : "");
+#endif
         }
 #endif
 
@@ -245,9 +342,15 @@ static void capture_task(void *arg)
          * cancellation in this project, so anything the agent says is captured
          * and sent straight back, and the agent starts answering itself.
          * Dropping capture while it speaks is the crude fix; it also disables
-         * barge-in, which is the trade. Deepgram's echo-cancellation support is
-         * the real answer -- see the Voice Agent "Audio Preprocessing &
-         * Barge-In" docs.
+         * barge-in, which is the trade.
+         *
+         * The real answer is NOT server-side. Deepgram's "Audio Preprocessing &
+         * Barge-In" guide has no AEC setting and explicitly pushes it to the
+         * device. It has to run here, and the board does provide what is needed:
+         * an echo reference wired from the ES8311's outputs into ES7210 MIC3,
+         * sample-aligned because it is captured by the same ADC in the same
+         * frame. Measured and confirmed -- see CONFIG_AEC_REF_PROBE and
+         * audio_codecs.h. Cancellation itself would be esp-sr's AFE.
          */
         if (audio_io_playback_active()) {
             continue;
@@ -386,6 +489,18 @@ esp_err_t audio_io_init(int sample_rate)
      * esp_codec_dev_open() below sets the clock, overriding the BSP's 22050 Hz
      * default. This is the order spec_analyzer_radial's bsp_extra uses.
      */
+#if CONFIG_AEC_REF_PROBE
+    /*
+     * Build the codecs ourselves so the ES7210 gets all four inputs, which is
+     * the only way MIC3 -- the echo reference -- is ever powered or clocked.
+     * See audio_codecs.h. The BSP's own path hardcodes mic_selected to 0.
+     */
+    esp_err_t codec_err = audio_codecs_init_tdm(&s_spk, &s_mic);
+    if (codec_err != ESP_OK) {
+        ESP_LOGE(TAG, "TDM codec init failed: %s", esp_err_to_name(codec_err));
+        return ESP_FAIL;
+    }
+#else
     s_spk = bsp_audio_codec_speaker_init();
     if (s_spk == NULL) {
         ESP_LOGE(TAG, "speaker (ES8311) init failed");
@@ -397,6 +512,8 @@ esp_err_t audio_io_init(int sample_rate)
         ESP_LOGE(TAG, "microphone (ES7210) init failed");
         return ESP_FAIL;
     }
+
+#endif
 
     s_rate = sample_rate;
 
