@@ -27,7 +27,9 @@
 typedef struct {
     const char *name;  /* "orange" -- what the model says, and the enum value */
     uint32_t rgb;      /* 0xRRGGBB, multiplicative on the orb's ink */
-    const char *blurb; /* what it looks like, for the function description */
+    const char *blurb; /* what it looks like, for the function description, or
+                        * NULL when the name already says it -- every colour goes
+                        * into every session's schema, so "pink (pink)" is waste */
 } orb_color_t;
 
 /* How many colours exist. Index 0 is the boot default. */

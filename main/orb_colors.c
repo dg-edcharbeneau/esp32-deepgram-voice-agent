@@ -16,22 +16,36 @@
 static const char *TAG = "orb_colors";
 
 /*
- * The blurbs are written for the model, not for a person reading source. They
- * have to carry enough for it to resolve something indirect -- "make it warmer",
- * "put it back to normal" -- rather than only matching a colour named outright.
+ * The Vira palette's accent colours. Names are the palette's, lowercased to match
+ * the other catalogs.
  *
- * White is first because it is the shell's original monochrome look, and
- * 0xFFFFFF is the rasteriser's exact identity: selecting it is genuinely a
- * return to the default, not an approximation of one.
+ * WHITE IS FIRST, NOT WHERE THE PALETTE PUTS IT. Index 0 is the boot default, and
+ * 0xFFFFFF is the rasteriser's exact identity -- so keeping it first is what makes
+ * the device's out-of-box look unchanged and makes "put it back to normal" a real
+ * return rather than an approximation. The remaining thirteen are in palette order.
+ *
+ * BLURBS ONLY WHERE THE NAME DOES NOT CARRY IT. All fourteen go into every
+ * session's function schema, so describing "pink" as pink is tokens for nothing.
+ * They earn their place for a brand name the model cannot know, and for the four
+ * that would otherwise be guesswork against a near neighbour -- lime against acid
+ * lime, teal against bright teal.
  */
 static const orb_color_t s_colors[] = {
-    { "white", 0xFFFFFF,
-      "the plain white dots it normally shows; the default, and the way back "
-      "from any other colour" },
-    { "orange", 0xFFA700,
-      "a warm amber, like a filament bulb" },
-    { "blue", 0x00FFFF,
-      "a bright cyan, cool and electric" },
+    { "white",       0xFFFFFF, "the plain white dots it normally shows; the "
+                               "default, and the way back from any other colour" },
+    { "vira",        0xE9A581, "a soft peach-coral" },
+    { "tomato",      0xF85044, "a warm red" },
+    { "orange",      0xFF7042, NULL },
+    { "yellow",      0xFFCF3D, NULL },
+    { "acid lime",   0xC6FF00, "a sharp yellow-green" },
+    { "lime",        0x39EA5F, "a clean green, no yellow in it" },
+    { "teal",        0x80CBC4, "a muted blue-green" },
+    { "bright teal", 0x64FFDA, "a vivid aqua" },
+    { "cyan",        0x57D7FF, NULL },
+    { "blue",        0x5393FF, NULL },
+    { "indigo",      0x758AFF, "a blue-violet" },
+    { "purple",      0xB54DFF, NULL },
+    { "pink",        0xFF669E, NULL },
 };
 
 #define COLOR_COUNT (sizeof(s_colors) / sizeof(s_colors[0]))
@@ -86,8 +100,12 @@ void orb_colors_describe(char *out, size_t out_len)
     out[0] = '\0';
 
     for (size_t i = 0; i < COLOR_COUNT; i++) {
-        int n = snprintf(out + used, out_len - used, "%s%s (%s)",
-                         (used > 0) ? ", " : "", s_colors[i].name, s_colors[i].blurb);
+        const char *sep = (used > 0) ? ", " : "";
+        int n = (s_colors[i].blurb != NULL)
+                    ? snprintf(out + used, out_len - used, "%s%s (%s)",
+                               sep, s_colors[i].name, s_colors[i].blurb)
+                    : snprintf(out + used, out_len - used, "%s%s",
+                               sep, s_colors[i].name);
         if (n < 0 || (size_t)n >= out_len - used) {
             /* Truncated: better a short catalog than a corrupt one. */
             out[out_len - 1] = '\0';

@@ -538,7 +538,10 @@ static esp_err_t send_settings(void)
      * so it is freed immediately. If a fourth function ever wants a described
      * catalog, do this rather than the pattern above it.
      */
-    enum { COLOR_DESC_LEN = 768 };
+    /* 543 B in use at fourteen colours (201 prefix + 341 catalog + NUL). Rounded
+     * up because it is PSRAM and free, so a couple more colours cannot quietly
+     * run into orb_colors_describe()'s truncation path. */
+    enum { COLOR_DESC_LEN = 1024 };
     char *color_desc = heap_caps_malloc(COLOR_DESC_LEN, MALLOC_CAP_SPIRAM);
     /* Losing the catalog is survivable -- the enum still constrains the model to
      * valid names, it just has less to reason about. Losing the function is not. */
