@@ -7,6 +7,7 @@
 import { precomputeVoice, buildVoice } from './ref/voice.ts';
 import { precomputeWave, buildWave, precomputeRubik, buildRubik } from './ref/lattice.ts';
 import { precomputeRibbon, buildRibbon } from './ref/ribbon.ts';
+import { frameBraid } from './ref/braid.ts';
 
 const SIZE = Number(process.env.ORB_SIZE ?? 466);
 const R_MIN = 0.3;
@@ -132,6 +133,21 @@ function ribbonFrame(t) {
   return out;
 }
 
+// braid uses thinking-orbs' canvas API: it returns an already-finalized frame
+// (culled, clamped, z-sorted) rather than filling a DotBuffer, so there is
+// nothing for this harness to finalize.
+function braidFrame(t) {
+  return frameBraid(SIZE, t, {}).dots.map((d) => ({
+    x: d.x, y: d.y, z: d.z, r: d.r, w: d.white, a: d.a ?? 1,
+  }));
+}
+
+const BRAID_CASES = [
+  ['braid_a', 1.7],
+  ['braid_b', 6.2],
+  ['braid_c', 14.5],
+];
+
 const RIBBON_CASES = [
   ['ribbon_a', 1.7],
   ['ribbon_b', 4.6],
@@ -187,6 +203,14 @@ for (const [label, t] of RUBIK_CASES) {
 
 for (const [label, t] of RIBBON_CASES) {
   for (const d of ribbonFrame(t)) {
+    process.stdout.write(
+      `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
+      `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);
+  }
+}
+
+for (const [label, t] of BRAID_CASES) {
+  for (const d of braidFrame(t)) {
     process.stdout.write(
       `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
       `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);

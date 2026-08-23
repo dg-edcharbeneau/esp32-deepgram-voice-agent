@@ -1063,6 +1063,127 @@ void orb_build_ribbon(orb_frame_t *out, float t)
     out->count = count;
 }
 
+/* ---------------- braid (braid.ts frameBraid) ---------------- */
+
+/*
+ * frac, in DOUBLE, and that matters more than it looks.
+ *
+ * It is discontinuous at every integer, and it is what walks a strand pole to
+ * pole -- so a float rounding that lands on the other side of an integer does not
+ * shift a dot slightly, it teleports it to the opposite pole. Same class of
+ * problem as rubik's slab test: a smooth-looking mode with one discrete decision
+ * buried in it.
+ */
+static double orb_frac(double x)
+{
+    return x - floor(x);
+}
+
+/*
+ * The playground's `weaving` orb: three strands plaiting pole to pole, over the
+ * same Fibonacci ghost shell ribbon uses.
+ *
+ * THE ONLY MODE THAT CULLS. A strand fades to nothing at the poles, so dots fall
+ * below the 0.02 alpha floor and the count varies frame to frame -- which is why
+ * the harness compares counts rather than assuming them.
+ */
+#define BRAID_STRANDS 3
+#define BRAID_STRAND_N 52
+#define BRAID_TURNS 3.0f
+#define BRAID_R_BASE 1.2f
+#define BRAID_R_DEPTH 1.8f
+
+void orb_build_braid(orb_frame_t *out, float t)
+{
+    const float R = s_cx * 0.76f;
+
+    const float yaw = t * 0.4f;
+    const float tilt = 0.3f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    size_t count = 0;
+
+    /* Ghosts: identical to ribbon's but on braid's tighter shell. */
+    const float ghost_r = 0.8f * s_rs;
+    for (int i = 0; i < RIBBON_GHOSTS; i++) {
+        float ux = s_ghost_dx[i] * R, uy = s_ghost_dy[i] * R, uz = s_ghost_dz[i] * R;
+
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        float z = uy * st + z1 * ct;
+
+        /* NOT CLAMPED, unlike every other mode here. braid's weave term pushes a
+         * strand past R, so depth legitimately exceeds 1 and the reference lets
+         * it -- radius and alpha run slightly over their nominal range on the
+         * near side. Clamping pinned r to a constant and cost 15 dots. */
+        float depth = (z / R + 1.0f) / 2.0f;
+
+        float alpha = 0.1f + 0.22f * depth;
+        if (alpha < ALPHA_CULL) {
+            continue;
+        }
+        orb_dot_t *d = &out->dots[count++];
+        d->x = s_cx + x1;
+        d->y = s_cy - y1;
+        d->z = z;
+        d->r = (ghost_r < R_MIN) ? R_MIN : ghost_r;
+        d->white = RIBBON_GHOST_INK;
+        d->a = alpha;
+    }
+
+    for (int sn = 0; sn < BRAID_STRANDS; sn++) {
+        float phase = ((float)sn / (float)BRAID_STRANDS) * TAU;
+        for (int i = 0; i < BRAID_STRAND_N; i++) {
+            /* u walks pole to pole; the frac drift slides the whole strand. */
+            float u = (float)((orb_frac((double)i / (double)BRAID_STRAND_N
+                                        + (double)t * 0.045) * 2.0 - 1.0) * 0.96);
+            float s1 = 1.0f - u * u;
+            float surf = sqrtf((s1 > 0.0f) ? s1 : 0.0f);
+            float end_fade = (1.0f - fabsf(u)) / 0.1f;
+            if (end_fade > 1.0f) {
+                end_fade = 1.0f;
+            }
+            float a = u * (float)M_PI * BRAID_TURNS + phase;
+            /* Radial breathing: the strands trade places, which is what reads as
+             * the over-and-under of a plait rather than three separate helices. */
+            float weave = 1.0f + 0.075f * sinf(u * (float)M_PI * BRAID_TURNS * 2.0f
+                                               + phase * 2.0f + t * 0.8f);
+            float rr = surf * R * weave;
+
+            float vx = cosf(a) * rr;
+            float vy = u * R * weave;
+            float vz = sinf(a) * rr;
+
+            float x1 = vx * cyw + vz * sy;
+            float z1 = -vx * sy + vz * cyw;
+            float y1 = vy * ct - z1 * st;
+            float zr = vy * st + z1 * ct;
+
+            float depth = (zr / R + 1.0f) / 2.0f; /* unclamped: see above */
+
+            float alpha = end_fade * (0.45f + 0.55f * depth);
+            if (alpha < ALPHA_CULL) {
+                continue;
+            }
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1;
+            d->y = s_cy - y1;
+            d->z = zr;
+            d->r = (BRAID_R_BASE + BRAID_R_DEPTH * depth) * s_rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = 0.55f - 0.45f * depth;
+            d->a = alpha;
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+}
+
 /* ---------------- the voice pass ---------------- */
 
 /*

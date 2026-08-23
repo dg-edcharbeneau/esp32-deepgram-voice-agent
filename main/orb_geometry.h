@@ -49,10 +49,13 @@ typedef enum {
 #define ORB_VOICE_DOTS 456  /* 18 rings of cosine-tapered longitude counts */
 #define ORB_WAVE_DOTS 384   /* rings 15 / lonDensity 40; rubik shares it */
 #define ORB_RIBBON_DOTS 590 /* ghostN 150 + lanes 5 * segs 88 */
+#define ORB_BRAID_DOTS 306  /* ghostN 150 + 3 strands * strandN 52 */
 
 #define ORB_MAX2(a, b) ((a) > (b) ? (a) : (b))
-#define ORB_MAX_DOTS \
-    ORB_MAX2(ORB_VOICE_DOTS, ORB_MAX2(ORB_WAVE_DOTS, ORB_RIBBON_DOTS))
+#define ORB_MAX_DOTS                                        \
+    ORB_MAX2(ORB_VOICE_DOTS,                                \
+             ORB_MAX2(ORB_WAVE_DOTS,                        \
+                      ORB_MAX2(ORB_RIBBON_DOTS, ORB_BRAID_DOTS)))
 
 typedef struct {
     float x, y;  /* screen pixels */
@@ -109,6 +112,16 @@ void orb_build_rubik(orb_frame_t *out, float t);
  * varies alpha per dot, so its ghosts read as a haze behind the band.
  */
 void orb_build_ribbon(orb_frame_t *out, float t);
+
+/*
+ * Build one frame of `braid` -- the playground's `weaving` orb, ported from
+ * braid.ts frameBraid.
+ *
+ * Three strands plaiting pole to pole over the same ghost shell ribbon uses. The
+ * only mode so far that CULLS: a strand fades out at the poles, so the dot count
+ * varies from frame to frame.
+ */
+void orb_build_braid(orb_frame_t *out, float t);
 
 /*
  * Evaluate one frame.
