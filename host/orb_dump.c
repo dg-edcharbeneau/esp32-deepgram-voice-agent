@@ -16,6 +16,10 @@ typedef struct {
 
 /* Must match CASES in orb_ref.mjs exactly, in order. */
 static const orb_case_t CASES[] = {
+    { "idle_a",        ORB_IDLE,         ORB_IDLE,         1.0f, 1.7f,  0.0f },
+    { "idle_b",        ORB_IDLE,         ORB_IDLE,         1.0f, 5.5f,  0.0f },
+    { "idle_c",        ORB_IDLE,         ORB_IDLE,         1.0f, 13.2f, 0.0f },
+    { "idle_d",        ORB_IDLE,         ORB_IDLE,         1.0f, 20.9f, 0.0f },
     { "initializing",  ORB_INITIALIZING, ORB_INITIALIZING, 1.0f, 1.7f, 0.0f },
     { "listening",     ORB_LISTENING,    ORB_LISTENING,    1.0f, 1.7f, 0.0f },
     { "listening_amp", ORB_LISTENING,    ORB_LISTENING,    1.0f, 3.3f, 0.8f },

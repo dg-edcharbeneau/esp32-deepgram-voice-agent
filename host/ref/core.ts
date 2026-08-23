@@ -83,31 +83,38 @@ export function angleDelta(a: number, b: number): number {
 }
 
 /** Shared spin + tilt + orthographic projection. */
-// SHIM for the harness only.
+// Faithful re-implementation of expo-thinking-orbs' makeProj, for the harness.
 //
-// expo-thinking-orbs' voice.ts calls the projector as `pt(x, y, z, out)`,
-// writing into a caller-supplied array, where this (thinking-orbs) version
-// returns a fresh one. Its makeProj also takes trailing `roll` and `orient`
-// arguments. The transform below is thinking-orbs' verbatim; the out-param is
-// added and the extra arguments ignored, which is exact for the case the
-// harness drives (roll = 0, orient = undefined) and wrong for any other -- so
-// do not reuse this outside the harness.
+// expo's version differs from thinking-orbs' in two ways that matter: it writes
+// into a caller-supplied `out` array rather than returning a fresh one, and it
+// takes trailing `roll` and `orient` arguments. Transcribed from that file so the
+// harness can compare `idle`, which is the one behaviour that drives roll.
+//
+// `roll` is a 2D rotation in SCREEN space, applied after yaw/tilt and before the
+// scale, and it leaves z untouched -- so it cannot reorder the painter's sort.
+// `orient` is a 3x3 applied between the two; the harness never supplies one and
+// throws rather than pretend.
 export function makeProj(
   yaw: number, tilt: number, cx: number, cy: number, scale: number,
-  _roll?: number, _orient?: unknown
+  roll = 0, orient: unknown = null
 ): any {
   const st = Math.sin(tilt);
   const ct = Math.cos(tilt);
   const sy = Math.sin(yaw);
   const cyw = Math.cos(yaw);
-  if (_roll) throw new Error('harness shim does not implement roll');
-  if (_orient !== undefined) throw new Error('harness shim does not implement orient');
-  return (x: number, y: number, z: number, out?: any) => {
-    const x1 = x * cyw + z * sy;
-    const z1 = -x * sy + z * cyw;
-    const y1 = y * ct - z1 * st;
-    const z2 = y * st + z1 * ct;
-    const px = cx + x1 * scale, py = cy - y1 * scale;
+  const sr = Math.sin(roll);
+  const cr = Math.cos(roll);
+  if (orient !== null && orient !== undefined) {
+    throw new Error('harness shim does not implement orient');
+  }
+  return (x0: number, y0: number, z0: number, out?: any) => {
+    const x1 = x0 * cyw + z0 * sy;
+    const z1 = -x0 * sy + z0 * cyw;
+    const y1 = y0 * ct - z1 * st;
+    const z2 = y0 * st + z1 * ct;
+    const xr = roll === 0 ? x1 : x1 * cr - y1 * sr;
+    const yr = roll === 0 ? y1 : x1 * sr + y1 * cr;
+    const px = cx + xr * scale, py = cy - yr * scale;
     if (out) { out[0] = px; out[1] = py; out[2] = z2; return out; }
     return [px, py, z2];
   };

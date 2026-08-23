@@ -154,6 +154,89 @@ static float idle_time(float t)
     return t + 1.6f * sinf(t * 0.211f) + 0.7f * sinf(t * 0.0873f + 2.1f);
 }
 
+/* ---------------- idle's gestures and body ---------------- */
+
+/*
+ * `idle` is where a live session sits between turns, and where a home screen
+ * sits indefinitely -- so it is the state most likely to be watched long enough
+ * to be found out. A single looping pose reads as a mechanism after about ten
+ * seconds. On top of its quasi-periodic base pose it therefore carries two more
+ * layers: a BODY that floats, breathes and deforms, and one of four GESTURES
+ * that plays every so often.
+ *
+ * Which gesture and when are pure functions of the clock. The epoch length is
+ * FIXED and the start time inside it is hashed: a jittered epoch length would
+ * make floor(t / epoch) disagree with itself, where a hashed start keeps the
+ * index exact and still puts an uneven gap between one gesture and the next --
+ * which is the part that reads as unpredictable.
+ */
+#define GESTURE_EPOCH 9.0f
+#define GESTURE_SPAN 3.2f
+#define GESTURE_COUNT 4
+#define GESTURE_RIPPLE 0
+#define GESTURE_TWIST 1
+#define GESTURE_SIGH 2
+#define GESTURE_HOP 3
+
+/* The float: two sines, so the drift never quite repeats. */
+#define BODY_BOB_A1 0.015f
+#define BODY_BOB_W1 0.31f
+#define BODY_BOB_A2 0.007f
+#define BODY_BOB_W2 0.1971f
+
+/* Squash and stretch, driven by the float's ANALYTIC velocity -- differencing
+ * frames would make the deformation depend on frame rate. */
+#define BODY_WOBBLE 0.55f
+#define BODY_WOBBLE_MAX 0.038f
+
+/* The hop: a real bounce, stretching as it leaves and squashing as it lands. */
+#define HOP_HEIGHT 0.026f
+#define HOP_BOUNCES 1.5f
+#define HOP_DEFORM 0.055f
+
+/*
+ * The hive ripple: one dot twitches and the disturbance travels out across the
+ * SURFACE, dying as it spreads -- a jostle passing through a dense colony rather
+ * than a concentric pulse on the screen. That distinction is why it cannot live
+ * in ring_state: a front spreading from a point crosses each latitude ring at a
+ * different longitude, so it is per-dot by nature.
+ */
+#define HIVE_WIDTH 0.34f
+#define HIVE_INV_WIDTH (1.0f / HIVE_WIDTH)
+#define HIVE_LIFT 0.028f
+#define HIVE_CREST 0.5f
+#define HIVE_BEE_D 0.06f
+#define HIVE_BEE_LIFT 0.017f
+#define HIVE_SQUASH 0.05f
+
+/*
+ * Which gesture is playing and how far into it: `which`, `env`, `local`.
+ *
+ * `env` is a raised cosine -- zero VALUE and zero SLOPE at both ends -- and
+ * zero for the quiet remainder of the epoch. Everything a gesture does is
+ * scaled by it, which is what makes epoch boundaries silent: a gesture can never
+ * be cut off mid-movement, because it has already returned to rest before its
+ * slot ends.
+ */
+static void idle_gesture(float t, int *which, float *env, float *local)
+{
+    float k = floorf(t / GESTURE_EPOCH);
+    float in_epoch = t - k * GESTURE_EPOCH;
+    /* Somewhere in the epoch's slack, so consecutive gestures are 6-12 clock
+     * units apart rather than exactly 9. */
+    float start = hash_d((double)k, 7.31) * (GESTURE_EPOCH - GESTURE_SPAN);
+    float u = (in_epoch - start) / GESTURE_SPAN;
+
+    *which = (int)(hash_d((double)k, 3.17) * (float)GESTURE_COUNT);
+    if (u <= 0.0f || u >= 1.0f) {
+        *env = 0.0f;
+        *local = 0.0f;
+        return;
+    }
+    *env = 0.5f - 0.5f * cosf(TAU * u);
+    *local = u;
+}
+
 /* Wave's own resting radius factor -- the family's scale. */
 #define WAVE_BASE 0.88f
 /* Nothing may exceed this: wave's own maximum radius factor. */
@@ -216,7 +299,8 @@ enum { RS_RF, RS_CREST, RS_SHEAR, RS_ALPHA, RS_FORM, RS_SPIKE, RS_CRESTGAIN, RS_
  *   crestGain  how much a passing wavefront emphasises the dots under it
  */
 static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
-                       float t, float amp, float *out)
+                       float t, float amp, int g_which, float g_env,
+                       float g_local, float *out)
 {
     out[RS_FORM] = 1.0f;
     out[RS_SPIKE] = 0.0f;
@@ -359,6 +443,26 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
                               0.05f * sinf(ti * 0.2571f - ri * 1.31f) +
                               0.035f * sinf(ri * 0.9f) * sinf(ti * 0.1733f));
         out[RS_ALPHA] = 1.0f;
+
+        /* ...and on top, one of idle's gestures. Only the two per-RING ones are
+         * answerable here; the ripple is per-dot and lives in orb_build(). */
+        if (g_env > 0.0f) {
+            if (g_which == GESTURE_TWIST) {
+                /* A gust through the twist: the differential shear briefly
+                 * deepens and runs the other way, like a breeze crossing a
+                 * field. Rides the same cos^2(lat) profile as the base twist so
+                 * it cannot tear at the poles. */
+                out[RS_SHEAR] -= g_env * 0.16f * eq * sinf(ti * 0.29f);
+            } else if (g_which == GESTURE_SIGH) {
+                /* One deep, slow breath. The swing roughly doubles and the crest
+                 * lifts with it, so the shell fills visibly and settles -- the
+                 * same gesture a body makes, and the reason it is separate from
+                 * the base breath rather than a bigger version of it. */
+                float slow = sinf(TAU * g_local * 0.5f);
+                out[RS_RF] += g_env * 0.04f * slow;
+                out[RS_CREST] += g_env * 0.18f * ((slow > 0.0f) ? slow : 0.0f);
+            }
+        }
         return;
     }
     }
@@ -568,31 +672,119 @@ void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
      * state is the overwhelmingly common one. */
     bool blending = (mix < 1.0f) && (from != to);
 
+    /* Idle's gesture, resolved ONCE for the whole frame: it is a pure function of
+     * t, so one evaluation is the same answer any caller would compute. */
+    int g_which;
+    float g_env, g_local;
+    idle_gesture(t, &g_which, &g_env, &g_local);
+
+    /*
+     * How much of this frame is IDLE, from the same blend the poses use. Every
+     * idle-only flourish is scaled by it, so a call arriving mid-gesture fades
+     * the gesture out over the blend instead of cutting it -- and non-idle frames
+     * skip the work entirely rather than multiplying by zero per dot.
+     */
+    float idle_w = ((from == ORB_IDLE) ? (1.0f - mix) : 0.0f) +
+                   ((to == ORB_IDLE) ? mix : 0.0f);
+
+    /* --- idle's body: float, breath, wobble, hop --------------------------
+     *
+     * All of it on idle's own wandering clock, so the body drifts in tempo with
+     * the surface rather than beating against it, and all of it scaled by idle_w
+     * so a call arrives at a body that is exactly centred and round.
+     */
+    float tb = idle_time(t);
+    /* Position AND analytic velocity: the derivative of the same two sines,
+     * because differencing frames would make the wobble frame-rate dependent. */
+    float bob = BODY_BOB_A1 * sinf(tb * BODY_BOB_W1) +
+                BODY_BOB_A2 * sinf(tb * BODY_BOB_W2 + 1.7f);
+    float bob_vel = BODY_BOB_A1 * BODY_BOB_W1 * cosf(tb * BODY_BOB_W1) +
+                    BODY_BOB_A2 * BODY_BOB_W2 * cosf(tb * BODY_BOB_W2 + 1.7f);
+
+    /* The breath draws IN only, and is NOT gated on idle -- see BODY_BREATH. */
+    float body_scale =
+        1.0f - BODY_BREATH * (0.5f + 0.5f * sinf(tb * BODY_BREATH_W));
+
+    if (idle_w > 0.0f && g_env > 0.0f && g_which == GESTURE_HOP) {
+        /*
+         * NEGATIVE sine, and that sign is the whole gesture. The envelope peaks
+         * mid-span, so the lobe landing there is what the eye reads as the
+         * movement: with this sign that is the LEAP, and what falls either side
+         * becomes an anticipating dip before it and a squashing landing after.
+         * The obvious sign gives a body that sinks in the middle of its own hop.
+         */
+        float hop = -sinf(TAU * g_local * HOP_BOUNCES);
+        float hop_vel = -TAU * HOP_BOUNCES * cosf(TAU * g_local * HOP_BOUNCES);
+        bob += idle_w * g_env * HOP_HEIGHT * hop;
+        /* Follows the hop's own VELOCITY, not the envelope shape, so it stretches
+         * on the way up, rounds at the apex and squashes through the landing. */
+        bob_vel += idle_w * g_env * HOP_HEIGHT * hop_vel * HOP_DEFORM * 12.0f;
+        /* Heaviest at the bottom of the arc -- the body compressing under itself. */
+        body_scale -= idle_w * g_env * HOP_DEFORM * 0.35f *
+                      ((-hop > 0.0f) ? -hop : 0.0f);
+    }
+
+    /* Vertical travel stretches the body along its motion and narrows it across;
+     * volume roughly preserved, which is what sells mass. */
+    float stretch = idle_w * BODY_WOBBLE * bob_vel;
+    if (stretch > BODY_WOBBLE_MAX) {
+        stretch = BODY_WOBBLE_MAX;
+    } else if (stretch < -BODY_WOBBLE_MAX) {
+        stretch = -BODY_WOBBLE_MAX;
+    }
+    const float body_x = body_scale * (1.0f - stretch);
+    const float body_y = body_scale * (1.0f + stretch);
+    /* Screen y grows downward, so a POSITIVE bob subtracts to float up. */
+    const float body_cy = s_cy - idle_w * bob * (s_cx * 2.0f);
+
+    /* --- the hive ripple, set up once per frame ------------------------- */
+    bool hiving = (idle_w > 0.0f) && (g_env > 0.0f) && (g_which == GESTURE_RIPPLE);
+    float ox = 0.0f, oy = 1.0f, oz = 0.0f;
+    float front = 0.0f, hive_decay = 0.0f, hive_squash = 1.0f;
+    if (hiving) {
+        /* Where the first dot moved. Uniform on the sphere (oy uniform in height
+         * is what makes it uniform in AREA), hashed off the epoch -- so the
+         * origin differs every time and is still a pure function of the clock. */
+        float k = floorf(t / GESTURE_EPOCH);
+        oy = 2.0f * hash_d((double)k, 11.13) - 1.0f;
+        float ring_r = sqrtf((1.0f - oy * oy > 0.0f) ? (1.0f - oy * oy) : 0.0f);
+        float az = TAU * hash_d((double)k, 19.07);
+        ox = ring_r * cosf(az);
+        oz = ring_r * sinf(az);
+        /* Advanced through a cosine so the front travels at constant ANGULAR
+         * speed, and reaches the far side just as the envelope closes -- so it
+         * never has to be cut off, it runs out of surface. */
+        front = 1.0f - cosf((float)M_PI * g_local);
+        hive_squash = 1.0f - HIVE_SQUASH * idle_w * g_env;
+        /* Fades as it goes, the way a disturbance loses energy to the dots it has
+         * already moved. g_env alone would let the far side move as much as the
+         * origin did, which reads as a pulse rather than a ripple. */
+        hive_decay = idle_w * g_env * (1.0f - 0.75f * g_local);
+    }
+
     /*
      * ONE shared base rotation for every behaviour. A state change must never
      * alter the accumulated yaw, or blending would whip the shell round;
      * per-ring shear rides on top and is bounded.
      *
-     * The idle-only spin drift and tilt wobble are the not-yet-ported body
-     * layer, so their weight is pinned at zero here.
+     * The spin no longer runs at one speed: three BOUNDED terms ride the
+     * accumulating base rate, so the turn visibly gathers pace and eases off.
+     * Their summed derivative stays well under the 0.18 base, so the shell never
+     * stalls or reverses -- a spin that stops reads as a dropped frame, not life.
      */
-    const float yaw = t * 0.18f;
-    const float tilt = 0.38f;
+    float spin_drift = 0.45f * sinf(t * 0.081f) +
+                       0.18f * sinf(t * 0.1913f + 0.7f) +
+                       0.06f * sinf(t * 0.27f);
+    const float yaw = t * 0.18f + idle_w * spin_drift;
+    /* Two rates on the axis as well, so the pole traces a slow irregular path
+     * instead of rocking between two positions. */
+    const float tilt = 0.38f + idle_w * (0.05f * sinf(t * 0.19f + 1.1f) +
+                                         0.025f * sinf(t * 0.0729f));
+    const float roll = idle_w * 0.03f * sinf(t * 0.13f);
 
     const float st = sinf(tilt), ct = cosf(tilt);
     const float sy = sinf(yaw), cyw = cosf(yaw);
-
-    /*
-     * Screen-space squash, so it goes on the x/y radius and NOT on z: the squash
-     * is what the viewer sees, not a change to the shell's geometry, and scaling
-     * z would reorder the painter's sort.
-     *
-     * The idle-only companion terms -- the float that offsets the centre and the
-     * velocity-driven squash-and-stretch that makes x and y differ -- are part of
-     * the unported body layer, so x and y share one scale here.
-     */
-    const float body_scale =
-        1.0f - BODY_BREATH * (0.5f + 0.5f * sinf(idle_time(t) * BODY_BREATH_W));
+    const float sr = sinf(roll), cr = cosf(roll);
 
     float ra[RS_N], rb[RS_N];
     size_t count = 0;
@@ -603,7 +795,8 @@ void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
         float sin_lat = ring->sin_lat;
         float cos_lat = ring->cos_lat;
 
-        ring_state(blending ? from : to, ri, ring_t, sin_lat, t, amp, ra);
+        ring_state(blending ? from : to, ri, ring_t, sin_lat, t, amp,
+                   g_which, g_env, g_local, ra);
         float rf = ra[RS_RF];
         float crest = ra[RS_CREST];
         float shear = ra[RS_SHEAR];
@@ -623,7 +816,8 @@ void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
         float crest_gain_b = crest_gain_a;
 
         if (blending) {
-            ring_state(to, ri, ring_t, sin_lat, t, amp, rb);
+            ring_state(to, ri, ring_t, sin_lat, t, amp,
+                       g_which, g_env, g_local, rb);
             rf += (rb[RS_RF] - rf) * mix;
             crest += (rb[RS_CREST] - crest) * mix;
             shear += (rb[RS_SHEAR] - shear) * mix;
@@ -677,12 +871,63 @@ void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
             float y1 = vy * ct - z1 * st;
             float dz = vy * st + z1 * ct;
 
-            /* Offsets of a UNIT vector, so dx/dy are in shell space. */
-            float dx = x1;
-            float dy = -y1;
+            /* Roll is a rotation in SCREEN space, applied after yaw and tilt and
+             * before the scale. It leaves z alone, so it cannot reorder the
+             * painter's sort. */
+            float xr = (roll == 0.0f) ? x1 : (x1 * cr - y1 * sr);
+            float yr = (roll == 0.0f) ? y1 : (x1 * sr + y1 * cr);
+
+            /* Offsets of a UNIT vector, so dx/dy are in shell space. Measured
+             * against the FLOATING centre, not the static one: fold the float in
+             * here and the ripple's screen radius below -- which has to be read
+             * in the shell's own frame -- would swell as the body drifted. */
+            float dx = xr;
+            float dy = -yr;
 
             float dr = rf;
             float dot_crest = crest;
+
+            if (hiving) {
+                /*
+                 * Angular distance from the origin as 1 - cos: a dot product, no
+                 * trig. Measured on the PRE-shear vector deliberately -- the
+                 * shear twists the surface, and anchoring the origin after it
+                 * would slide the ripple's source around the shell as the twist
+                 * moved.
+                 */
+                float c = ux * ox + sin_lat * oy + uz * oz;
+                float d = 1.0f - c;
+                /*
+                 * A quadratic bump rather than a gaussian: the same shape where
+                 * it matters, no expf per dot, and exactly zero outside the
+                 * front's width so most dots cost a compare. The width is
+                 * constant in the 1 - cos measure, so the front reads a little
+                 * broader across the far hemisphere -- which flatters a dying
+                 * ripple rather than fighting it.
+                 */
+                float x = (d - front) * HIVE_INV_WIDTH;
+                if (x > -1.0f && x < 1.0f) {
+                    float bump = (1.0f - x * x);
+                    bump *= bump;
+                    /* Lift and darken together, the coupling every event here
+                     * uses. */
+                    dr += HIVE_LIFT * bump * hive_decay;
+                    dot_crest += HIVE_CREST * bump * hive_decay;
+                }
+                /* The bee itself: a tighter, sharper move right at the origin
+                 * over the first fifth of the gesture, before the ripple has
+                 * gone anywhere. This is the part that makes it read as CAUSED --
+                 * something moved, and then the surface answered. */
+                if (g_local < 0.2f && d < HIVE_BEE_D) {
+                    float near = 1.0f - d / HIVE_BEE_D;
+                    float kick = sinf((float)M_PI * (g_local / 0.2f));
+                    dr += HIVE_BEE_LIFT * near * near * kick * idle_w * g_env;
+                }
+                /* ...and the whole shell contracts under all of it. Applied last
+                 * so it scales the front's lift too: the front stays
+                 * proportionally as strong against a body drawn in around it. */
+                dr *= hive_squash;
+            }
 
             if (rippling) {
                 /*
@@ -731,8 +976,11 @@ void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
             }
 
             orb_dot_t *d = &out->dots[count++];
-            d->x = s_cx + dx * rr * body_scale;
-            d->y = s_cy + dy * rr * body_scale;
+            /* The body's squash goes on HERE rather than into dr, because it is a
+             * screen-space deformation and dr is a radius factor the RF_CEILING
+             * clamp is expressed in. */
+            d->x = s_cx + dx * rr * body_x;
+            d->y = body_cy + dy * rr * body_y;
             /* Depth stays unsquashed: it decides draw order, not appearance. */
             d->z = dz * rr;
             /* Rule 4: a crest makes a dot bigger AND darker at the same instant,

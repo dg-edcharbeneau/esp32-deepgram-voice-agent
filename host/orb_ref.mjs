@@ -39,14 +39,16 @@ function frame(t, from, to, mix, amp) {
 }
 
 // (label, behaviour, t, amp) cases. Behaviour indices are voice.ts's own.
-//
-// `idle` is absent deliberately. buildVoice gives it idleW = 1, which switches on
-// the body layer -- float, breath, squash, spin drift, and a roll the projector
-// shim does not implement -- and that layer is not ported yet (stage 11). Adding
-// it here would require expo's own core.ts to stay ground truth rather than a
-// guess. Every case below has idleW = 0, so the reference and the port are
-// comparing exactly the same maths.
+// `idle` is included now that the projector shim implements roll faithfully. It
+// is the only behaviour with idleW = 1, which switches on the whole body layer --
+// float, breath, squash-and-stretch, spin drift and roll -- plus one of four
+// gestures chosen per 9-second epoch. Several timestamps, to catch epochs with
+// and without a gesture playing.
 const CASES = [
+  ['idle_a',        0, 1.7,  0.0],
+  ['idle_b',        0, 5.5,  0.0],
+  ['idle_c',        0, 13.2, 0.0],
+  ['idle_d',        0, 20.9, 0.0],
   ['initializing',  1, 1.7,  0.0],
   ['listening',     2, 1.7,  0.0],
   ['listening_amp', 2, 3.3,  0.8],
