@@ -70,6 +70,25 @@ static orb_ring_t s_rings[ORB_RING_COUNT];
 static int s_dot_count;
 
 /*
+ * WAVE'S OWN LATTICE. Its profile is rings 15 / lonDensity 40 against the voice
+ * shell's 17 / 42, so it cannot share the tables above -- 384 dots, not 456.
+ *
+ * Worth a second lattice rather than a parameterised one: rubik's profile is
+ * latRings 15 / lonDensity 40 too, so this serves both, and leaving the voice
+ * shell's tables untouched keeps 1,000 lines of parity-verified code out of the
+ * blast radius.
+ */
+#define WAVE_RINGS 15
+#define WAVE_RING_COUNT (WAVE_RINGS + 1)
+#define WAVE_LON_DENSITY 40
+#define WAVE_MAX_DOTS 384
+
+static orb_ring_t s_wave_rings[WAVE_RING_COUNT];
+static int s_wave_dot_count;
+static float *s_wave_cos_lon;
+static float *s_wave_sin_lon;
+
+/*
  * The per-dot lattice tables, heap allocated as ONE block.
  *
  * Deliberately not static arrays. On the device those land in internal .bss, and
@@ -473,13 +492,22 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
 bool orb_init(float size)
 {
     if (s_lattice == NULL) {
-        s_lattice = malloc(3 * ORB_MAX_DOTS * sizeof(float));
+        /*
+         * ONE allocation for every table, wave's included. Not tidiness: a
+         * separate 3 kB block for wave's longitudes would sit under
+         * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL and be handed internal RAM, which
+         * is the resource this file has always been careful with. Pooled, the
+         * block clears the threshold and lands in PSRAM.
+         */
+        s_lattice = malloc((3 * ORB_MAX_DOTS + 2 * WAVE_MAX_DOTS) * sizeof(float));
         if (s_lattice == NULL) {
             return false;
         }
         s_cos_lon = &s_lattice[0];
         s_sin_lon = &s_lattice[ORB_MAX_DOTS];
         s_scatter = &s_lattice[2 * ORB_MAX_DOTS];
+        s_wave_cos_lon = &s_lattice[3 * ORB_MAX_DOTS];
+        s_wave_sin_lon = &s_lattice[3 * ORB_MAX_DOTS + WAVE_MAX_DOTS];
     }
 
     s_cx = size / 2.0f;
@@ -516,7 +544,119 @@ bool orb_init(float size)
         /* Inside the shell only -- a scattered dot must not poke past the rim. */
         s_scatter[i] = 0.16f + 0.8f * hash_d((double)i, 3.71);
     }
+
+    /* Wave's lattice: same cosine taper, its own ring count and density. */
+    int wn = 0;
+    for (int ri = 0; ri <= WAVE_RINGS; ri++) {
+        float lat = -(float)M_PI / 2.0f + ((float)ri / (float)WAVE_RINGS) * (float)M_PI;
+        float cos_lat = cosf(lat);
+        float sin_lat = sinf(lat);
+
+        int lon_count = (int)lroundf(fabsf(cos_lat) * (float)WAVE_LON_DENSITY);
+        if (lon_count < 1) {
+            lon_count = 1;
+        }
+
+        s_wave_rings[ri].sin_lat = sin_lat;
+        s_wave_rings[ri].cos_lat = cos_lat;
+        s_wave_rings[ri].lon_count = lon_count;
+        s_wave_rings[ri].base = wn;
+
+        for (int lj = 0; lj < lon_count; lj++) {
+            float lon = ((float)lj / (float)lon_count) * TAU;
+            s_wave_cos_lon[wn + lj] = cosf(lon);
+            s_wave_sin_lon[wn + lj] = sinf(lon);
+        }
+        wn += lon_count;
+    }
+    s_wave_dot_count = wn;
     return true;
+}
+
+/* Defined with the voice build below; both sort into the same draw order. */
+static int cmp_draw_order(const void *pa, const void *pb);
+
+/* ---------------- wave (lattice.ts buildWave) ---------------- */
+
+/*
+ * The playground's `listening` orb: one lat/long shell undulating under two
+ * incommensurate sines. No behaviours, no events, no amplitude -- a wave does
+ * the same thing forever, which is exactly why it reads as attentive.
+ *
+ * Reuses wave_w() above, which the voice shell already carried verbatim, and the
+ * same radius/ink coupling: R_BASE, R_DEPTH, INK_FAR and INK_SPAN are wave's own
+ * defaults, which is where the voice shell got them.
+ */
+void orb_build_wave(orb_frame_t *out, float t)
+{
+    const float R = s_shell_r;
+
+    /* buildWave's projection: yaw = t*0.18, pitch = 0.38, no roll, no shear. */
+    const float yaw = t * 0.18f;
+    const float tilt = 0.38f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    size_t count = 0;
+
+    for (int ri = 0; ri < WAVE_RING_COUNT; ri++) {
+        const orb_ring_t *ring = &s_wave_rings[ri];
+        float sin_lat = ring->sin_lat;
+        float cos_lat = ring->cos_lat;
+
+        float w = wave_w(t, ri);
+        /* The undulation pulls the shell in and out around 0.88 of the rim. */
+        float dr = 0.88f + 0.105f * w;
+        float rr = R * dr;
+        float crest = (w > 0.0f) ? w : 0.0f;
+
+        const float *cos_lon = &s_wave_cos_lon[ring->base];
+        const float *sin_lon = &s_wave_sin_lon[ring->base];
+
+        for (int lj = 0; lj < ring->lon_count; lj++) {
+            /* Project the unit vector and scale after: the projection is linear,
+             * so this is identical to projecting the scaled vector. */
+            float ux = cos_lat * cos_lon[lj];
+            float uz = cos_lat * sin_lon[lj];
+
+            float x1 = ux * cyw + uz * sy;
+            float z1 = -ux * sy + uz * cyw;
+            float y1 = sin_lat * ct - z1 * st;
+            float dz = sin_lat * st + z1 * ct;
+
+            /*
+             * DEPTH COMES FROM THE SCALED z, NOT THE UNIT ONE. The reference
+             * reads (z / R + 1) / 2 off a vector of magnitude rr, and rr is not
+             * R here -- it is R * dr. The voice build's (dz + 1) / 2 is only
+             * equivalent because its radius is exactly R.
+             */
+            float depth = (dz * dr + 1.0f) / 2.0f;
+            if (depth < 0.0f) {
+                depth = 0.0f;
+            } else if (depth > 1.0f) {
+                depth = 1.0f;
+            }
+
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1 * rr;
+            /* MINUS: makeProj's py is `cy - yr * scale`. Screen y grows
+             * downward and the shell's y grows up, so the projection flips it.
+             * Everything else here matched the reference to 0.0001 with this
+             * wrong -- a mirrored orb looks perfectly plausible on a round
+             * panel, which is why the harness catches it and an eye would not. */
+            d->y = s_cy - y1 * rr;
+            d->z = dz * rr;
+            d->r = (R_BASE + R_DEPTH * depth) * (1.0f + 0.4f * crest) * s_rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = INK_FAR - INK_SPAN * depth - 0.1f * crest;
+            d->a = 1.0f; /* wave never signals an event, so never fades */
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
 }
 
 /* ---------------- the voice pass ---------------- */

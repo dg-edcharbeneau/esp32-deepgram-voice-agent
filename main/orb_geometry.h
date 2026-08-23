@@ -72,6 +72,15 @@ typedef struct {
 } orb_bands_t;
 
 /*
+ * Build one frame of `wave` -- the playground's `listening` orb, ported from
+ * lattice.ts buildWave.
+ *
+ * No behaviour, no blend, no amplitude: a wave is a single animation that does
+ * the same thing forever. 384 dots on its own lattice, not the shell's 456.
+ */
+void orb_build_wave(orb_frame_t *out, float t);
+
+/*
  * Evaluate one frame.
  *
  * `t` is seconds; everything here is a pure function of it, so a dropped frame

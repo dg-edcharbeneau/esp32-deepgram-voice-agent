@@ -32,12 +32,40 @@ static const orb_case_t CASES[] = {
     { "blend_l2s",     ORB_LISTENING,    ORB_SPEAKING,     0.4f, 2.5f, 0.6f },
 };
 
+/*
+ * Wave has no behaviour, mix or amplitude, so it gets its own table rather than
+ * dead columns in the one above. Must match WAVE_CASES in orb_ref.mjs, in order.
+ */
+typedef struct {
+    const char *label;
+    float t;
+} wave_case_t;
+
+static const wave_case_t WAVE_CASES[] = {
+    { "wave_a", 1.7f },
+    { "wave_b", 3.3f },
+    { "wave_c", 5.5f },
+    { "wave_d", 13.2f },
+};
+
 int main(int argc, char **argv)
 {
     float size = (argc > 1) ? strtof(argv[1], NULL) : 466.0f;
     orb_init(size);
 
     static orb_frame_t frame;
+
+    /* Wave first, matching orb_ref.mjs's emission order. */
+    for (size_t c = 0; c < sizeof(WAVE_CASES) / sizeof(WAVE_CASES[0]); c++) {
+        const wave_case_t *k = &WAVE_CASES[c];
+        orb_build_wave(&frame, k->t);
+        for (size_t i = 0; i < frame.count; i++) {
+            const orb_dot_t *d = &frame.dots[i];
+            printf("%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
+                   k->label, d->x, d->y, d->z, d->r, d->white, d->a);
+        }
+    }
+
     for (size_t c = 0; c < sizeof(CASES) / sizeof(CASES[0]); c++) {
         const orb_case_t *k = &CASES[c];
         /*

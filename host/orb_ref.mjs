@@ -5,6 +5,7 @@
 // finalize step (cull, clamp, z-sort) that thinking-orbs' finalizeFrame
 // performs, because the expo port does it inside its Skia recorder.
 import { precomputeVoice, buildVoice } from './ref/voice.ts';
+import { precomputeWave, buildWave } from './ref/lattice.ts';
 
 const SIZE = Number(process.env.ORB_SIZE ?? 466);
 const R_MIN = 0.3;
@@ -38,6 +39,43 @@ function frame(t, from, to, mix, amp) {
   return out;
 }
 
+// --- wave -------------------------------------------------------------
+// The playground's `listening` orb. Its own lattice (rings 15 / lonDensity 40 =
+// 384 dots), no behaviour, no amplitude -- so it needs its own precompute and a
+// frame helper that finalizes identically.
+const ws = precomputeWave(opts);
+const wbuf = {
+  xs: new Float32Array(ws.dotCount), ys: new Float32Array(ws.dotCount),
+  zs: new Float32Array(ws.dotCount), rs: new Float32Array(ws.dotCount),
+  ws: new Float32Array(ws.dotCount), as: new Float32Array(ws.dotCount),
+  count: 0,
+};
+
+function waveFrame(t) {
+  wbuf.count = 0;
+  buildWave(wbuf, SIZE, t, opts, ws, {
+    amp: 0, from: 0, to: 0, mix: 1,
+    rMul: 1, yaw: 0, pitch: 0, roll: 0, orient: undefined,
+  });
+  const out = [];
+  for (let i = 0; i < wbuf.count; i++) {
+    if (wbuf.as[i] < ALPHA_CULL) continue;
+    out.push({
+      x: wbuf.xs[i], y: wbuf.ys[i], z: wbuf.zs[i],
+      r: Math.max(R_MIN, wbuf.rs[i]), w: wbuf.ws[i], a: wbuf.as[i],
+    });
+  }
+  out.sort((a, b) => a.z - b.z);
+  return out;
+}
+
+const WAVE_CASES = [
+  ['wave_a', 1.7],
+  ['wave_b', 3.3],
+  ['wave_c', 5.5],
+  ['wave_d', 13.2],
+];
+
 // (label, behaviour, t, amp) cases. Behaviour indices are voice.ts's own.
 // `idle` is included now that the projector shim implements roll faithfully. It
 // is the only behaviour with idleW = 1, which switches on the whole body layer --
@@ -61,6 +99,14 @@ const CASES = [
   // A live transition, which is where the wavefront sign convention is decided.
   ['blend_l2s',     0, 2.5,  0.6],
 ];
+
+for (const [label, t] of WAVE_CASES) {
+  for (const d of waveFrame(t)) {
+    process.stdout.write(
+      `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
+      `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);
+  }
+}
 
 for (const [label, b, t, amp] of CASES) {
   let dots;
