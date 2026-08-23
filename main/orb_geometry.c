@@ -704,11 +704,18 @@ bool orb_init(float size)
  * parameter upstream does not have, which is exactly what the parity harness
  * exists to stop.
  *
- * Gain is a first guess against a measured microphone peak of about 0.1 in
- * ordinary speech, so ~30% swell at a normal talking volume. Wants confirming
- * against a real voice rather than another estimate.
+ * Gain set from measured microphone level, which runs a mean near 0.067 and peaks
+ * near 0.1 in ordinary speech -- far lower than the playback path even after the
+ * 600% microphone gain ui.c applies. So a swell of ~1.34 at a normal talking
+ * volume and ~1.5 at a peak.
+ *
+ * CAPPED AT 1.6 FOR THE RASTERISER, not for taste. blit_dot's footprint buffer is
+ * SPRITE_MAX 14 px square and it CLIPS a disc that does not fit rather than
+ * overrunning. A dot's worst case here is (0.6 + 1.7) * rs * rMul, which at
+ * rs 1.302 reaches a 14 px sprite around rMul 1.85. 1.6 leaves margin.
  */
-#define WAVE_RMUL_GAIN 3.0f
+#define WAVE_RMUL_GAIN 5.0f
+#define WAVE_RMUL_MAX 1.6f
 
 void orb_build_wave(orb_frame_t *out, float t, float amp)
 {
@@ -718,7 +725,11 @@ void orb_build_wave(orb_frame_t *out, float t, float amp)
     else if (amp > 1.0f) amp = 1.0f;
     /* rMul is 1 at rest, which is the reference's default -- so silence is the
      * unmodified mode rather than a special case. */
-    const float rs = s_rs * (1.0f + WAVE_RMUL_GAIN * amp);
+    float r_mul = 1.0f + WAVE_RMUL_GAIN * amp;
+    if (r_mul > WAVE_RMUL_MAX) {
+        r_mul = WAVE_RMUL_MAX;
+    }
+    const float rs = s_rs * r_mul;
 
     /* buildWave's projection: yaw = t*0.18, pitch = 0.38, no roll, no shear. */
     const float yaw = t * 0.18f;
@@ -1029,11 +1040,27 @@ void orb_build_rubik(orb_frame_t *out, float t)
  * modulation and reads as vibration rather than as a voice. The band's tempo is
  * untouched; only how far it flexes moves.
  *
- * The base is not zero: a dead-flat band at silence reads as a broken display
- * rather than as a quiet one.
+ * TUNED FROM MEASURED PLAYBACK, after a first attempt that "hardly moved".
+ *
+ * The fault was the BASE, not the gain. At 0.35 the band already rippled clearly
+ * in silence, and since tempo is fixed the only thing speech could change was
+ * depth -- so the eye had constant motion to compare against and the modulation
+ * vanished into it. Dropping the base gives it a still reference to see against.
+ *
+ * Against real agent playback, amp runs a mean of 0.26..0.50 and peaks 0.39..0.65,
+ * varying by better than 2x inside a single second. So:
+ *
+ *   silence      amp 0.00 -> 0.08   nearly a clean band
+ *   speech mean  amp 0.35 -> 0.85   clearly flexing
+ *   speech peak  amp 0.65 -> 1.51   deep, past the reference's own default
+ *
+ * A 19x range where the first attempt had 2.7x. Capped, because the offset is
+ * applied before the band is renormalised onto the sphere and very large values
+ * stop reading as a band at all.
  */
-#define RIBBON_WOB_BASE 0.35f
-#define RIBBON_WOB_GAIN 0.9f
+#define RIBBON_WOB_BASE 0.08f
+#define RIBBON_WOB_GAIN 2.2f
+#define RIBBON_WOB_MAX 1.6f
 
 void orb_build_ribbon(orb_frame_t *out, float t, float amp)
 {
@@ -1047,7 +1074,10 @@ void orb_build_ribbon(orb_frame_t *out, float t, float amp)
 
     if (amp < 0.0f) amp = 0.0f;
     else if (amp > 1.0f) amp = 1.0f;
-    const float wob_mul = RIBBON_WOB_BASE + RIBBON_WOB_GAIN * amp;
+    float wob_mul = RIBBON_WOB_BASE + RIBBON_WOB_GAIN * amp;
+    if (wob_mul > RIBBON_WOB_MAX) {
+        wob_mul = RIBBON_WOB_MAX;
+    }
 
     size_t count = 0;
 

@@ -60,7 +60,7 @@ function waveFrame(t, amp = 0) {
     amp: 0, from: 0, to: 0, mix: 1,
     /* rMul is how the device feeds the microphone level in. Same mapping as
      * orb_build_wave's. */
-    rMul: 1 + 3.0 * amp,
+    rMul: Math.min(1.6, 1 + 5.0 * amp),
     yaw: 0, pitch: 0, roll: 0, orient: undefined,
   });
   const out = [];
@@ -131,7 +131,7 @@ function ribbonFrame(t, amp = 0) {
   bbuf.count = 0;
   /* wobMul is the undulation's depth, and what the device drives from the voice
    * level. Same mapping as orb_build_ribbon's. */
-  const o = { ...RIBBON_OPTS, wobMul: 0.35 + 0.9 * amp };
+  const o = { ...RIBBON_OPTS, wobMul: Math.min(1.6, 0.08 + 2.2 * amp) };
   buildRibbon(bbuf, SIZE, t, o, bs_, {
     amp: 0, from: 0, to: 0, mix: 1,
     rMul: 1, yaw: 0, pitch: 0, roll: 0, orient: undefined,
