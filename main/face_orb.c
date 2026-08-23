@@ -179,7 +179,7 @@ static void render(const ui_render_ctx_t *ctx)
     switch (ctx->orb_mode) {
     case UI_ORB_MODE_WAVE:   orb_build_wave(s_frame, t); break;
     case UI_ORB_MODE_RUBIK:  orb_build_rubik(s_frame, t); break;
-    case UI_ORB_MODE_RIBBON: orb_build_ribbon(s_frame, t); break;
+    case UI_ORB_MODE_RIBBON: orb_build_ribbon(s_frame, t, amp); break;
     case UI_ORB_MODE_BRAID:  orb_build_braid(s_frame, t); break;
     case UI_ORB_MODE_WEB:    orb_build_web(s_frame, t); break;
     default:

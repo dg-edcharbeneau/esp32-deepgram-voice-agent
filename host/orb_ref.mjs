@@ -108,7 +108,15 @@ const RUBIK_CASES = [
   ['rubik_d', 12.4],
 ];
 
-const bs_ = precomputeRibbon(opts);
+/*
+ * Ribbon's own opts, not the shared ones. It is tuned down from the reference
+ * defaults for frame budget -- 90 ghosts and 56 segments -- and the harness has
+ * to pass the SAME numbers, because parity needs the two sides to agree rather
+ * than to use defaults. Sharing `opts` would also have reached braid, whose
+ * ghostN is deliberately still 150.
+ */
+const RIBBON_OPTS = { ghostN: 90, segs: 56 };
+const bs_ = precomputeRibbon(RIBBON_OPTS);
 const bbuf = {
   xs: new Float32Array(bs_.dotCount), ys: new Float32Array(bs_.dotCount),
   zs: new Float32Array(bs_.dotCount), rs: new Float32Array(bs_.dotCount),
@@ -116,9 +124,12 @@ const bbuf = {
   count: 0,
 };
 
-function ribbonFrame(t) {
+function ribbonFrame(t, amp = 0) {
   bbuf.count = 0;
-  buildRibbon(bbuf, SIZE, t, opts, bs_, {
+  /* wobMul is the undulation's depth, and what the device drives from the voice
+   * level. Same mapping as orb_build_ribbon's. */
+  const o = { ...RIBBON_OPTS, wobMul: 0.35 + 0.9 * amp };
+  buildRibbon(bbuf, SIZE, t, o, bs_, {
     amp: 0, from: 0, to: 0, mix: 1,
     rMul: 1, yaw: 0, pitch: 0, roll: 0, orient: undefined,
   });
@@ -160,9 +171,11 @@ const BRAID_CASES = [
 ];
 
 const RIBBON_CASES = [
-  ['ribbon_a', 1.7],
-  ['ribbon_b', 4.6],
-  ['ribbon_c', 11.9],
+  ['ribbon_a', 1.7, 0.0],
+  ['ribbon_b', 4.6, 0.0],
+  ['ribbon_c', 11.9, 0.0],
+  /* At voice level, which is the whole point of the wobMul path. */
+  ['ribbon_amp', 4.6, 0.8],
 ];
 
 const WAVE_CASES = [
@@ -212,8 +225,8 @@ for (const [label, t] of RUBIK_CASES) {
   }
 }
 
-for (const [label, t] of RIBBON_CASES) {
-  for (const d of ribbonFrame(t)) {
+for (const [label, t, amp] of RIBBON_CASES) {
+  for (const d of ribbonFrame(t, amp)) {
     process.stdout.write(
       `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
       `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);

@@ -48,7 +48,7 @@ typedef enum {
  */
 #define ORB_VOICE_DOTS 456  /* 18 rings of cosine-tapered longitude counts */
 #define ORB_WAVE_DOTS 384   /* rings 15 / lonDensity 40; rubik shares it */
-#define ORB_RIBBON_DOTS 590 /* ghostN 150 + lanes 5 * segs 88 */
+#define ORB_RIBBON_DOTS 370 /* ghostN 90 + lanes 5 * segs 56, tuned down */
 #define ORB_BRAID_DOTS 306  /* ghostN 150 + 3 strands * strandN 52 */
 #define ORB_WEB_DOTS 35     /* nodeN 30 + signals 5 */
 
@@ -132,8 +132,12 @@ void orb_build_rubik(orb_frame_t *out, float t);
  * The largest mode at 590 dots: a 150-dot Fibonacci ghost shell plus a five-lane
  * band of 88 segments that precesses and undulates. Unlike wave and rubik it
  * varies alpha per dot, so its ghosts read as a haze behind the band.
+ *
+ * `amp` is 0..1 and scales how DEEP the undulation goes, never how fast -- the
+ * band's tempo is fixed. Tuned below the reference's dot counts for frame budget;
+ * see RIBBON_GHOSTS in orb_geometry.c.
  */
-void orb_build_ribbon(orb_frame_t *out, float t);
+void orb_build_ribbon(orb_frame_t *out, float t, float amp);
 
 /*
  * Build one frame of `braid` -- the playground's `weaving` orb, ported from

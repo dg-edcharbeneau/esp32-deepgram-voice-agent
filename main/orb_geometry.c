@@ -103,11 +103,29 @@ static double *s_wave_unit; /* ux,uy,uz interleaved: 3 doubles a dot */
  * ghost shell for depth, and a band of `lanes` parallel tracks each of `segs`
  * segments, precessing as a plane and undulating along its length.
  */
-#define RIBBON_GHOSTS 150
-#define RIBBON_SEGS 88
+/*
+ * Tuned DOWN from the reference's 150/88. At the defaults ribbon cost ~30 ms a
+ * frame -- 12.9 of geometry, 17.7 of raster -- and dropped the panel from 26 fps
+ * to 19, which is the wrong trade for the state on screen most of a turn. 90/56
+ * is 370 dots against 590, and 280 band dots against 440. The band dots are the
+ * expensive ones: two sinf and a sqrtf each.
+ *
+ * Parity is unaffected. The harness passes the same numbers -- it needs the two
+ * sides to AGREE, not to use defaults.
+ */
+#define RIBBON_GHOSTS 90
+#define RIBBON_SEGS 56
 #define RIBBON_LANES 5
 
+/*
+ * Braid keeps the reference's 150, on its OWN table though it shared ribbon's
+ * until now: fibDir(i, n) depends on n, so a prefix of a 150-ghost table is not a
+ * 90-ghost table. Shrinking ribbon's would have quietly restyled braid.
+ */
+#define BRAID_GHOSTS 150
+
 static float *s_ghost_dx, *s_ghost_dy, *s_ghost_dz;
+static float *s_bghost_dx, *s_bghost_dy, *s_bghost_dz;
 static float *s_seg_a, *s_seg_cos, *s_seg_sin;
 static float *s_lane_off, *s_lane_edge;
 
@@ -529,7 +547,8 @@ bool orb_init(float size)
          */
         s_lattice = malloc((3 * ORB_VOICE_DOTS + 2 * ORB_WAVE_DOTS
                             + 3 * RIBBON_GHOSTS + 3 * RIBBON_SEGS
-                            + 2 * RIBBON_LANES) * sizeof(float));
+                            + 2 * RIBBON_LANES
+                            + 3 * BRAID_GHOSTS) * sizeof(float));
         if (s_lattice == NULL) {
             return false;
         }
@@ -553,6 +572,9 @@ bool orb_init(float size)
         s_seg_sin = &s_lattice[off]; off += RIBBON_SEGS;
         s_lane_off = &s_lattice[off]; off += RIBBON_LANES;
         s_lane_edge = &s_lattice[off]; off += RIBBON_LANES;
+        s_bghost_dx = &s_lattice[off]; off += BRAID_GHOSTS;
+        s_bghost_dy = &s_lattice[off]; off += BRAID_GHOSTS;
+        s_bghost_dz = &s_lattice[off]; off += BRAID_GHOSTS;
     }
 
     s_cx = size / 2.0f;
@@ -635,6 +657,14 @@ bool orb_init(float size)
         s_ghost_dx[i] = (float)(rad * cos(ga));
         s_ghost_dy[i] = (float)gy;
         s_ghost_dz[i] = (float)(rad * sin(ga));
+    }
+    for (int i = 0; i < BRAID_GHOSTS; i++) {
+        double gy = 1.0 - (2.0 * ((double)i + 0.5)) / (double)BRAID_GHOSTS;
+        double rad = sqrt(1.0 - gy * gy);
+        double ga = (double)i * golden;
+        s_bghost_dx[i] = (float)(rad * cos(ga));
+        s_bghost_dy[i] = (float)gy;
+        s_bghost_dz[i] = (float)(rad * sin(ga));
     }
     for (int k = 0; k < RIBBON_SEGS; k++) {
         double a = ((double)k / (double)RIBBON_SEGS) * 2.0 * M_PI;
@@ -966,7 +996,22 @@ void orb_build_rubik(orb_frame_t *out, float t)
 #define RIBBON_R_BASE 1.1f
 #define RIBBON_GHOST_INK 0.78f
 
-void orb_build_ribbon(orb_frame_t *out, float t)
+/*
+ * How the voice level reaches the band: it scales the undulation's DEPTH.
+ *
+ * The reference exposes this as wobMul, and it is the right hook rather than a
+ * convenient one -- rule 5 of the voice shell is that amplitude scales how deep a
+ * gesture goes and never how fast, because driving rate from level is frequency
+ * modulation and reads as vibration rather than as a voice. The band's tempo is
+ * untouched; only how far it flexes moves.
+ *
+ * The base is not zero: a dead-flat band at silence reads as a broken display
+ * rather than as a quiet one.
+ */
+#define RIBBON_WOB_BASE 0.35f
+#define RIBBON_WOB_GAIN 0.9f
+
+void orb_build_ribbon(orb_frame_t *out, float t, float amp)
 {
     const float R = s_cx * 0.78f;
 
@@ -975,6 +1020,10 @@ void orb_build_ribbon(orb_frame_t *out, float t)
     const float tilt = 0.3f;
     const float sy = sinf(yaw), cyw = cosf(yaw);
     const float st = sinf(tilt), ct = cosf(tilt);
+
+    if (amp < 0.0f) amp = 0.0f;
+    else if (amp > 1.0f) amp = 1.0f;
+    const float wob_mul = RIBBON_WOB_BASE + RIBBON_WOB_GAIN * amp;
 
     size_t count = 0;
 
@@ -1028,8 +1077,8 @@ void orb_build_ribbon(orb_frame_t *out, float t)
 
             /* Two travelling waves along the band, phased per lane so the whole
              * ribbon flexes rather than every lane moving as one. */
-            float wob = 0.16f * sinf(a * 3.0f - t * 1.7f + (float)w * 0.22f) +
-                        0.07f * sinf(a * 5.0f + t * 1.1f);
+            float wob = (0.16f * sinf(a * 3.0f - t * 1.7f + (float)w * 0.22f) +
+                         0.07f * sinf(a * 5.0f + t * 1.1f)) * wob_mul;
             float off = lane_off + wob;
 
             float x = bux * ca + bvx * sa + bnx * off;
@@ -1109,8 +1158,8 @@ void orb_build_braid(orb_frame_t *out, float t)
 
     /* Ghosts: identical to ribbon's but on braid's tighter shell. */
     const float ghost_r = 0.8f * s_rs;
-    for (int i = 0; i < RIBBON_GHOSTS; i++) {
-        float ux = s_ghost_dx[i] * R, uy = s_ghost_dy[i] * R, uz = s_ghost_dz[i] * R;
+    for (int i = 0; i < BRAID_GHOSTS; i++) {
+        float ux = s_bghost_dx[i] * R, uy = s_bghost_dy[i] * R, uz = s_bghost_dz[i] * R;
 
         float x1 = ux * cyw + uz * sy;
         float z1 = -ux * sy + uz * cyw;

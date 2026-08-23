@@ -63,10 +63,16 @@ static const wave_case_t BRAID_CASES[] = {
 };
 
 /* Must match RIBBON_CASES in orb_ref.mjs, in order. */
-static const wave_case_t RIBBON_CASES[] = {
-    { "ribbon_a", 1.7f },
-    { "ribbon_b", 4.6f },
-    { "ribbon_c", 11.9f },
+typedef struct {
+    const char *label;
+    float t, amp;
+} ribbon_case_t;
+
+static const ribbon_case_t RIBBON_CASES[] = {
+    { "ribbon_a", 1.7f,  0.0f },
+    { "ribbon_b", 4.6f,  0.0f },
+    { "ribbon_c", 11.9f, 0.0f },
+    { "ribbon_amp", 4.6f, 0.8f },
 };
 
 /* Must match RUBIK_CASES in orb_ref.mjs, in order. */
@@ -106,8 +112,8 @@ int main(int argc, char **argv)
     }
 
     for (size_t c = 0; c < sizeof(RIBBON_CASES) / sizeof(RIBBON_CASES[0]); c++) {
-        const wave_case_t *k = &RIBBON_CASES[c];
-        orb_build_ribbon(&frame, k->t);
+        const ribbon_case_t *k = &RIBBON_CASES[c];
+        orb_build_ribbon(&frame, k->t, k->amp);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];
             printf("%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
