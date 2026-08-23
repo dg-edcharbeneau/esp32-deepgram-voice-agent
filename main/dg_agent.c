@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 
@@ -523,22 +524,41 @@ static esp_err_t send_settings(void)
      * palette and ignores the setting, and saying so is what stops the model
      * offering a colour change as the answer to "the bars look wrong".
      */
-    char colors[512];
-    orb_colors_describe(colors, sizeof(colors));
-    /* 202 chars of prefix plus a full colors[], so 714 is the worst case; the
-     * three real blurbs come to 388. -Werror=format-truncation checks the worst
-     * case, not the actual, so this has to cover it. */
-    char color_desc[768];
-    snprintf(color_desc, sizeof(color_desc),
-             "Change the colour of the orb on the device's screen. Use when the "
-             "user asks for a different colour, or to go back to normal. Only the "
-             "orb is affected; the spectrum face keeps its own colours. "
-             "Colours: %s.",
-             colors);
+    /*
+     * PSRAM, and ONE buffer rather than a catalog-plus-description pair.
+     *
+     * NOT A STYLE CHOICE -- MEASURED. This task has task_stack = 6144, and the
+     * two existing pairs above already put 2,880 B of it on the stack (1,212 for
+     * faces, 1,668 for voices under Flux). Adding a third pair of 1,280 tripped
+     * the stack canary on the first session and put the device in a boot loop,
+     * before cJSON's own recursion is even counted.
+     *
+     * So the prefix is written first and the catalog appended into the tail of
+     * the same allocation, which costs no stack at all. cJSON copies the string,
+     * so it is freed immediately. If a fourth function ever wants a described
+     * catalog, do this rather than the pattern above it.
+     */
+    enum { COLOR_DESC_LEN = 768 };
+    char *color_desc = heap_caps_malloc(COLOR_DESC_LEN, MALLOC_CAP_SPIRAM);
+    /* Losing the catalog is survivable -- the enum still constrains the model to
+     * valid names, it just has less to reason about. Losing the function is not. */
+    const char *color_desc_str = "Change the colour of the orb on the device's screen.";
+    if (color_desc != NULL) {
+        int n = snprintf(color_desc, COLOR_DESC_LEN,
+                         "Change the colour of the orb on the device's screen. Use "
+                         "when the user asks for a different colour, or to go back "
+                         "to normal. Only the orb is affected; the spectrum face "
+                         "keeps its own colours. Colours: ");
+        if (n > 0 && (size_t)n < COLOR_DESC_LEN) {
+            orb_colors_describe(color_desc + n, COLOR_DESC_LEN - (size_t)n);
+            color_desc_str = color_desc;
+        }
+    }
 
     cJSON *set_color = cJSON_CreateObject();
     cJSON_AddStringToObject(set_color, "name", "set_color");
-    cJSON_AddStringToObject(set_color, "description", color_desc);
+    cJSON_AddStringToObject(set_color, "description", color_desc_str);
+    free(color_desc); /* cJSON copied it; free(NULL) is fine */
     cJSON *cparams = cJSON_AddObjectToObject(set_color, "parameters");
     cJSON_AddStringToObject(cparams, "type", "object");
     cJSON *cprops = cJSON_AddObjectToObject(cparams, "properties");
