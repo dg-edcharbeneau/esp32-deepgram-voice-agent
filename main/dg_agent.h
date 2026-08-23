@@ -79,6 +79,16 @@ typedef struct {
      */
     void (*on_reload_required)(void *ctx);
 
+    /*
+     * The user asked for the display test and the agent has finished saying so.
+     *
+     * Deferred to AgentAudioDone for the same reason the reload is: the session
+     * is about to be closed, and closing it mid-sentence cuts the confirmation
+     * off. Runs on the WebSocket task, which cannot stop the client itself, so
+     * the handler must hand the work to another task.
+     */
+    void (*on_display_test_required)(void *ctx);
+
     void *ctx;
 } dg_agent_callbacks_t;
 

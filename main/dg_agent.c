@@ -87,6 +87,9 @@ static int s_history_next;          /* ring cursor */
 /* Set when a setting change needs a new session; acted on once the agent has
  * finished saying so, then cleared. */
 static bool s_reload_pending;
+/* Same deferral as s_reload_pending, for the same reason: let the agent finish
+ * the sentence before the socket it is speaking over goes away. */
+static bool s_test_pending;
 
 void dg_agent_clear_history(void)
 {
@@ -357,6 +360,30 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+        if (strcmp(name->valuestring, "start_display_test") == 0) {
+            /*
+             * No arguments, but parse-and-free anyway: the model sometimes sends
+             * "{}" and function_args() allocates regardless of content.
+             */
+            cJSON *targs = function_args(fn);
+            cJSON_Delete(targs);
+
+            /*
+             * Logged at INFO with no detail to add, because the interesting
+             * question is only ever whether this fired at all -- the trigger is a
+             * spoken phrase that has to survive speech-to-text, and a miss looks
+             * identical to a user who never said it. The transcript lines
+             * either side of this in the log are what tell them apart.
+             */
+            ESP_LOGI(TAG, "EVT displaytest requested");
+            s_test_pending = true;
+            snprintf(content, sizeof(content),
+                     "Starting the display test. Tell the user to tap the screen "
+                     "to step through each state, briefly.");
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
         if (strcmp(name->valuestring, "set_voice") != 0) {
             send_function_response(id->valuestring, name->valuestring, "Unknown function.");
             continue;
@@ -572,6 +599,32 @@ static esp_err_t send_settings(void)
     cJSON_AddItemToArray(crequired, cJSON_CreateString("color"));
     cJSON_AddItemToArray(functions, set_color);
 
+    /*
+     * The display test. No parameters, so no enum and no catalog -- which means
+     * a plain literal description and none of the buffer juggling above.
+     *
+     * THE PHRASE HAS TO SURVIVE SPEECH-TO-TEXT, and that is the whole risk in
+     * this function. "up up down down left right left right" can arrive merged,
+     * hyphenated, as "up-up-down-down", or with a stray "B A" on the end from a
+     * user who knows the rest of the code. So this describes the SHAPE of the
+     * utterance -- a run of repeated directions -- rather than one exact string,
+     * and says to ignore the surrounding wording.
+     */
+    cJSON *set_test = cJSON_CreateObject();
+    cJSON_AddStringToObject(set_test, "name", "start_display_test");
+    cJSON_AddStringToObject(set_test, "description",
+        "Put the device into its display test, which steps through every visual "
+        "state of the orb one tap at a time. Call this when the user says a run "
+        "of directions in sequence -- the Konami code, \"up up down down left "
+        "right left right\" -- however it comes through: merged, hyphenated, "
+        "repeated, or with A and B on the end. Match on the sequence of "
+        "directions itself and ignore any wording around it. Do not call it for "
+        "a single direction, or for a question about the display.");
+    cJSON *tparams = cJSON_AddObjectToObject(set_test, "parameters");
+    cJSON_AddStringToObject(tparams, "type", "object");
+    cJSON_AddObjectToObject(tparams, "properties");
+    cJSON_AddItemToArray(functions, set_test);
+
 #if CONFIG_SPEECH_STACK_FLUX
     /* The catalog goes in the description because JSON Schema has nowhere to
      * hang a per-enum-value note, and without it the model is choosing from
@@ -707,6 +760,15 @@ static void handle_json(const char *json, int len)
             ESP_LOGI(TAG, "reopening session to apply new settings");
             if (s_cb.on_reload_required) {
                 s_cb.on_reload_required(s_cb.ctx);
+            }
+        }
+        if (s_test_pending) {
+            /* Same deferral: the confirmation is spoken over this session, and
+             * the display test closes it. */
+            s_test_pending = false;
+            ESP_LOGI(TAG, "handing the screen to the display test");
+            if (s_cb.on_display_test_required) {
+                s_cb.on_display_test_required(s_cb.ctx);
             }
         }
 

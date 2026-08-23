@@ -173,6 +173,20 @@ static void on_reload_required(void *ctx)
     session_ctl_request_reload();
 }
 
+static void on_display_test_required(void *ctx)
+{
+    /*
+     * ORDER MATTERS. session_ctl's stop path calls
+     * audio_io_capture_set_enabled(false), so the monitor flag has to go up
+     * after the session comes down or the stop clears it -- and then the orb
+     * would sit at zero amplitude for the whole test, which is most of the point
+     * of it gone.
+     */
+    session_ctl_request_stop();
+    audio_io_capture_set_monitor(true);
+    ui_start_display_test();
+}
+
 static void on_agent_audio_done(void *ctx)
 {
     note_activity();
@@ -213,6 +227,7 @@ static const dg_agent_callbacks_t s_callbacks = {
     .on_agent_audio_done = on_agent_audio_done,
     .on_user_started_speaking = on_user_started_speaking,
     .on_reload_required = on_reload_required,
+    .on_display_test_required = on_display_test_required,
 };
 
 /*
