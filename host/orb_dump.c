@@ -40,8 +40,15 @@ int main(int argc, char **argv)
     static orb_frame_t frame;
     for (size_t c = 0; c < sizeof(CASES) / sizeof(CASES[0]); c++) {
         const orb_case_t *k = &CASES[c];
-        /* No bands: the harness compares the behaviours themselves, and the
-         * voice pass is verified separately below. */
+        /*
+         * No bands, and nothing here covers voice_pass().
+         *
+         * This harness verifies a TRANSCRIPTION, and the band pass is not
+         * transcribed from anything -- the reference's buildVoice takes no band
+         * input at all, so there is no upstream frame to diff it against. It
+         * composes over the finished dot list precisely so it can stay out of
+         * the way of what is checked here.
+         */
         orb_build(&frame, k->t, k->from, k->to, k->mix, k->amp, NULL);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];

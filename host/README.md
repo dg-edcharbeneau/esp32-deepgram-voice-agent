@@ -11,20 +11,34 @@ lets the same source compile for the host.
 
 ## What is compared
 
-Ten frames -- every behaviour at a fixed `t`, two of them at a non-zero
-amplitude, plus one mid-transition frame where the wavefront sign convention is
-decided. Each is compared dot by dot in draw order across all six output fields
-(x, y, z, radius, ink, alpha).
+Fourteen frames: all eight behaviours at a fixed `t`, two of them at a non-zero
+amplitude, four idle timestamps chosen to catch epochs with and without a
+gesture playing, and one mid-transition frame where the wavefront sign
+convention is decided.
+
+Each frame is 456 dots, compared dot by dot across all six output fields
+(x, y, z, radius, ink, alpha) -- 38,304 numbers a run.
 
 Tolerance is 0.02 px. Observed worst deviation is 0.0043, which is float32
 against the reference's doubles -- the port keeps the shell in `float` because
 the device has a single-precision FPU.
 
-## Everything is compared
+Draw order is compared first, because it is part of the contract. It is expected
+to disagree: the reference sorts on depth alone, where the port buckets by row
+band and then depth for PSRAM locality. So `compare.py` falls back to matching
+the two frames as a MULTISET -- every reference dot must find one unmatched port
+dot agreeing on all six fields -- and prints "same dots, port's own draw order"
+when that is what it found.
 
-Fourteen frames: all eight behaviours, two at non-zero amplitude, four idle
-timestamps chosen to catch epochs with and without a gesture playing, and one
-mid-transition frame where the wavefront sign convention is decided.
+## What is not compared
+
+`voice_pass()` -- the band-driven swell, ripple, fatten and ink shift. It is this
+project's own addition rather than a transcription: the reference's `buildVoice`
+takes no band input at all, so there is no upstream frame to diff it against.
+`orb_dump.c` therefore passes no bands, and the pass composes over the finished
+dot list precisely so it can stay out of the way of what is checked here.
+
+## Why `idle` took a second attempt
 
 `idle` was excluded at first because `idleW = 1` switches on the body layer --
 float, breath, squash-and-stretch, spin drift and a projector `roll` -- and
