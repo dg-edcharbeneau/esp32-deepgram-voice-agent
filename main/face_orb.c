@@ -172,7 +172,10 @@ static void render(const ui_render_ctx_t *ctx)
     };
     orb_build(s_frame, t, s_from, s_to, mix, amp, &bands);
     int64_t t_rast = esp_timer_get_time();
-    orb_raster_draw(s_frame);
+    /* White for now: the colour catalog and the agent function that drives it
+     * arrive in the next commit. 0xFFFFFF is the rasteriser's identity, so this
+     * commit changes no pixels. */
+    orb_raster_draw(s_frame, 0xFFFFFFu);
     int64_t t_end = esp_timer_get_time();
 
     static int64_t geom_sum, rast_sum;
