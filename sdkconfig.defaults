@@ -83,3 +83,23 @@ CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 # Setup QR code on the provisioning screen (main/wifi_prov.c). Off by default in
 # LVGL; the encoder is a few kB and only instantiated while the portal is up.
 CONFIG_LV_USE_QRCODE=y
+
+# --- crash diagnostics -----------------------------------------------------
+#
+# The default canary stack-overflow check only looks at a context switch, so a
+# deep overflow corrupts neighbouring memory and crashes somewhere else first --
+# which is exactly how the esp-sr AEC bring-up presented: an abort on core 0 with
+# no overflow message anywhere near the actual fault. The watchpoint method traps
+# at the instruction that overruns, with a backtrace that names the real culprit.
+#
+# It costs one of the two hardware watchpoints, which nothing else here uses.
+# Note this is a separate boolean, NOT a member of the
+# FREERTOS_CHECK_STACKOVERFLOW choice -- that choice only offers none/ptrval/
+# canary in IDF 5.5, and setting a non-existent option fails silently.
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+
+# A full core dump over serial, decodable offline with espcoredump.py. No
+# partition needed, unlike the flash variant, and it survives the reboot that
+# follows a panic -- which matters on a board whose USB link is easy to lose.
+CONFIG_ESP_COREDUMP_ENABLE_TO_UART=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y

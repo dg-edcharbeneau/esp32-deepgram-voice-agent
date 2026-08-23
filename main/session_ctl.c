@@ -213,6 +213,14 @@ esp_err_t session_ctl_start(const dg_agent_callbacks_t *callbacks)
 
     if (xTaskCreatePinnedToCore(session_ctl_task, "session_ctl", CTL_TASK_STACK, NULL,
                                 CTL_TASK_PRIO, &s_task, CTL_TASK_CORE) != pdPASS) {
+        /* Report the heap, because this call being wrapped in ESP_ERROR_CHECK by
+         * the caller means a bare ESP_FAIL aborts the boot with a backtrace that
+         * points here and says nothing about why. */
+        ESP_LOGE(TAG, "could not create the control task (%d B stack): "
+                      "internal free %u B, largest block %u B",
+                 CTL_TASK_STACK,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         return ESP_FAIL;
     }
     return ESP_OK;

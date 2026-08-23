@@ -86,9 +86,6 @@ static audio_io_tap_t s_cap_tap;
 /* False if the AFE could not be created; the capture path then behaves exactly
  * as it does in a build without AEC. */
 static bool s_aec_running;
-#define CAPTURE_STACK 8192
-#else
-#define CAPTURE_STACK 4096
 #endif
 
 static volatile uint32_t s_played;
@@ -259,6 +256,49 @@ static void playback_task(void *arg)
  */
 static void aec_output(const int16_t *mono, size_t samples)
 {
+    /*
+     * SUPPRESSION MEASUREMENT -- the pass/fail for whether cancellation works.
+     *
+     * Configuration being right is not the same as echo being cancelled. The
+     * baseline from the reference probe, with no AEC at all:
+     *
+     *   mic lanes, agent speaking ... peaks 537-12353
+     *   mic lanes, room quiet ...... peaks 30-334
+     *
+     * So with cancellation working and nobody talking, the peak HERE during
+     * playback should fall toward the quiet-room floor instead of sitting at the
+     * echo level. Roughly an order of magnitude of suppression is a pass. If it
+     * does not, the filter is not converging: suspect the reference lane mapping
+     * (AFE_INPUT_FORMAT) first and aec_filter_length second.
+     *
+     * Logged before the gates below, because it is a property of the canceller
+     * rather than of what the session happens to be doing.
+     */
+#if CONFIG_MIC_LEVEL_LOG
+    int16_t peak = 0;
+    for (size_t i = 0; i < samples; i++) {
+        int16_t a = (mono[i] < 0) ? (int16_t)-mono[i] : mono[i];
+        if (a > peak) {
+            peak = a;
+        }
+    }
+    static int64_t next_log_us;
+    static int16_t peak_play, peak_quiet;
+    bool playing = audio_io_playback_active();
+    if (playing) {
+        if (peak > peak_play) peak_play = peak;
+    } else if (peak > peak_quiet) {
+        peak_quiet = peak;
+    }
+    int64_t now = esp_timer_get_time();
+    if (now >= next_log_us) {
+        next_log_us = now + 3000000;
+        ESP_LOGI(TAG, "AECOUT peak play=%d quiet=%d (echo baseline was 537-12353,"
+                      " quiet floor 30-334)", peak_play, peak_quiet);
+        peak_play = peak_quiet = 0;
+    }
+#endif
+
     /* Session gate: a stopped device neither streams nor visualizes the room. */
     if (!s_capture_enabled) {
         return;
@@ -682,7 +722,7 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink)
      * in, capture_task feeds the AFE and nothing else, so a missing AFE means no
      * audio reaches the session at all.
      */
-    esp_err_t aec_err = audio_aec_start(aec_output);
+    esp_err_t aec_err = audio_aec_start(aec_output, CAPTURE_FRAMES);
     if (aec_err != ESP_OK) {
         /*
          * NOT fatal, and this matters: main.c wraps this call in
@@ -707,18 +747,17 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink)
      * Priority above playback: a missed read is lost audio, a late write is only
      * a small gap the ring buffer absorbs.
      *
-     * 8 kB with AEC, 4 kB without. The AFE's feed() runs its filtering on the
-     * CALLER's stack, so 4 kB overflowed immediately and the device reboot-looped
-     * with "A stack overflow in task audio_cap has been detected" -- roughly a
-     * second after the AFE reported success, which made it look like an AFE
-     * problem rather than a stack one.
+     * 4 kB is enough again. It was raised to 8 kB when this task also fed the
+     * AFE -- which runs its filtering on the CALLER's stack and overflowed 4 kB
+     * immediately -- but that work now lives on the AEC's own task on core 0. All
+     * this task does is read the codec and hand the block over.
      */
-    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", CAPTURE_STACK, NULL, 7,
+    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7,
                                 NULL, 1) != pdPASS) {
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "capture started: %d frame chunks (%d ms), %d B stack",
-             CAPTURE_FRAMES, CAPTURE_FRAMES * 1000 / s_rate, CAPTURE_STACK);
+    ESP_LOGI(TAG, "capture started: %d frame chunks (%d ms)",
+             CAPTURE_FRAMES, CAPTURE_FRAMES * 1000 / s_rate);
     return ESP_OK;
 }
 

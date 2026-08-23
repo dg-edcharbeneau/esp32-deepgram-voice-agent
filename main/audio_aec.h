@@ -44,17 +44,21 @@
 typedef void (*audio_aec_out_t)(const int16_t *mono, size_t samples);
 
 /*
- * Build the AFE and start the task that drains it. `on_output` receives echo
- * -cancelled mono at the project's 16 kHz.
+ * Build the AFE and start the task that owns the pipeline. `on_output` receives
+ * echo-cancelled mono at the project's 16 kHz, on that task.
+ *
+ * `block_frames` is how many frames per channel the caller will hand over per
+ * audio_aec_feed() call. It must be a whole multiple of the AFE's own chunk size
+ * or this fails rather than silently sliding the channel interleaving.
  */
-esp_err_t audio_aec_start(audio_aec_out_t on_output);
+esp_err_t audio_aec_start(audio_aec_out_t on_output, size_t block_frames);
 
 /*
  * Hand over one block of raw interleaved capture, four channels per frame, in the
- * order the ES7210's TDM frame arrives in. Call from the capture task; it blocks
- * only as long as the AFE's ring buffer needs.
+ * order the ES7210's TDM frame arrives in.
+ *
+ * Never blocks: it copies into a free block and returns, and DROPS the block if
+ * the AEC task is behind. Safe to call from the codec-read task, where stalling
+ * would cost audio rather than a frame of echo.
  */
 void audio_aec_feed(const int16_t *interleaved, size_t frames);
-
-/* Samples per channel the AFE wants per feed call. 0 before audio_aec_start(). */
-size_t audio_aec_feed_frames(void);
