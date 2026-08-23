@@ -24,11 +24,18 @@ static const char *TAG = "orb_colors";
  * the device's out-of-box look unchanged and makes "put it back to normal" a real
  * return rather than an approximation. The remaining thirteen are in palette order.
  *
- * BLURBS ONLY WHERE THE NAME DOES NOT CARRY IT. All fourteen go into every
+ * NAMES ARE NOT ALL THE PALETTE'S. Its "acid lime" is plain lime here, its "lime"
+ * is green, its "bright teal" is teal, and its muted #80cbc4 teal is dropped
+ * entirely. The palette names three greens and two teals by relative intensity,
+ * which is fine to read off a swatch and poor to say out loud: "lime" and "acid
+ * lime" are a coin toss spoken aloud, and the pair only existed to tell each other
+ * apart. One name per colour a person would actually ask for.
+ *
+ * BLURBS ONLY WHERE THE NAME DOES NOT CARRY IT. All thirteen go into every
  * session's function schema, so describing "pink" as pink is tokens for nothing.
- * They earn their place for a brand name the model cannot know, and for the four
- * that would otherwise be guesswork against a near neighbour -- lime against acid
- * lime, teal against bright teal.
+ * They are kept for the brand name the model cannot know, and where a colour is
+ * not quite what its name suggests -- lime here is yellow-green, and teal sits
+ * close enough to cyan to be worth separating.
  */
 static const orb_color_t s_colors[] = {
     { "white",       0xFFFFFF, "the plain white dots it normally shows; the "
@@ -37,10 +44,9 @@ static const orb_color_t s_colors[] = {
     { "tomato",      0xF85044, "a warm red" },
     { "orange",      0xFF7042, NULL },
     { "yellow",      0xFFCF3D, NULL },
-    { "acid lime",   0xC6FF00, "a sharp yellow-green" },
-    { "lime",        0x39EA5F, "a clean green, no yellow in it" },
-    { "teal",        0x80CBC4, "a muted blue-green" },
-    { "bright teal", 0x64FFDA, "a vivid aqua" },
+    { "lime",        0xC6FF00, "a sharp yellow-green" },
+    { "green",       0x39EA5F, NULL },
+    { "teal",        0x64FFDA, "a vivid aqua" },
     { "cyan",        0x57D7FF, NULL },
     { "blue",        0x5393FF, NULL },
     { "indigo",      0x758AFF, "a blue-violet" },
