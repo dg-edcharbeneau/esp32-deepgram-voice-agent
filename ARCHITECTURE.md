@@ -13,7 +13,9 @@ touch, and a BOOT button on GPIO 0.
 
 Every arrow is a call, pointing from caller to callee. The one rule the whole
 layout defends: **nothing outside `ui.c` and the faces may call `lv_*`** — which
-is why the catalogs (`voices`, `faces`) are separate from the code that draws.
+is why the catalogs (`voices`, `faces`, `orb_colors`) are separate from the code
+that draws. A colour stays a plain `0xRRGGBB` until `orb_raster.c` for the same
+reason.
 
 ```mermaid
 flowchart TB
@@ -33,6 +35,7 @@ flowchart TB
     subgraph cat["Catalogs (LVGL-free, so the WebSocket side can read them)"]
         voices["voices.c<br/><i>Flux TTS voices + NVS</i>"]
         faces["faces.c<br/><i>face names for the schema</i>"]
+        colors["orb_colors.c<br/><i>orb colour names + RGB</i>"]
     end
 
     subgraph audio["Audio"]
@@ -49,12 +52,13 @@ flowchart TB
 
     main --> session & aio & ui & boot & sta & creds & prov & voices
     session --> agent
-    agent --> voices & faces & ui & aio
+    agent --> voices & faces & colors & ui & aio
     agent -. "on_reload_required" .-> session
     boot -. "toggle / erase+reboot" .-> session
     ui -. "tap / hold" .-> session
     aio -- "taps" --> ui
     ui --> spectrum & orbface
+    ui --> colors
     orbface --> geo & raster
     prov --> creds & ui
     sta --> creds
@@ -200,6 +204,7 @@ one, Deepgram would call a web service instead of asking the device:
 | --- | --- | --- |
 | `adjust_volume` | One ES8311 register write, effective on the next sample | always |
 | `set_face` | `ui_set_face()` — the frame timer picks it up | always |
+| `set_color` | `ui_set_orb_color()` — same handoff; orb only | always |
 | `set_voice` | Saves to NVS, then reopens the session | Flux stack |
 | `reset_voice` | Back to `CONFIG_DEEPGRAM_FLUX_VOICE`, then reopens | Flux stack |
 
@@ -268,7 +273,8 @@ flowchart TB
     render --> spec["spectrum: 1024-pt FFT<br/>48 bands → 96 bars"]
 ```
 
-Setters (`ui_set_status`, `ui_set_face`, `ui_set_behaviour`, `ui_show_qr`) are
+Setters (`ui_set_status`, `ui_set_face`, `ui_set_orb_color`, `ui_set_behaviour`,
+`ui_show_qr`) are
 safe from any task because they only store a value; the frame timer applies it.
 The gesture handler runs *on* the LVGL task with the lock held, so it may only
 signal.

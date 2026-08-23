@@ -198,9 +198,11 @@ static volatile int s_face_want = -1;
 static volatile int s_color_want = -1;
 
 /*
- * The live ink colour. Initialised to white rather than left in .bss on purpose:
+ * The live ink colour, replaced with CONFIG_UI_DEFAULT_ORB_COLOR's during
+ * build_ui(). Initialised to white here rather than left in .bss on purpose:
  * zero is 0xRRGGBB black, and black ink on the black ground is an invisible orb
- * -- which reads as a dead panel, not as a bug worth reporting.
+ * -- which reads as a dead panel, not as a bug worth reporting. So the static
+ * initialiser is the safe value even if the config lookup ever moves or fails.
  */
 static uint32_t s_tint_rgb = 0xFFFFFFu;
 
@@ -1252,6 +1254,11 @@ static esp_err_t build_ui(void)
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_LONG_PRESSED, NULL);
+
+    /* Not a static initialiser because it is a table lookup; orb_colors_rgb()
+     * returns white for an out-of-range index, so a Kconfig list that has drifted
+     * out of step with the table degrades to the default look. */
+    s_tint_rgb = orb_colors_rgb(CONFIG_UI_DEFAULT_ORB_COLOR);
 
     esp_err_t err = select_face(CONFIG_UI_DEFAULT_FACE);
     if (err != ESP_OK) {
