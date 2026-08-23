@@ -115,8 +115,12 @@ typedef struct {
  *
  * No behaviour, no blend, no amplitude: a wave is a single animation that does
  * the same thing forever. 384 dots on its own lattice, not the shell's 456.
+ *
+ * `amp` is the MICROPHONE level -- LISTENING is the user talking -- and scales
+ * every radius through the reference's dyn.rMul. See WAVE_RMUL_GAIN for why that
+ * is the only hook available and what it costs in expressiveness.
  */
-void orb_build_wave(orb_frame_t *out, float t);
+void orb_build_wave(orb_frame_t *out, float t, float amp);
 
 /*
  * Build one frame of `rubik` -- the playground's `solving` orb, ported from

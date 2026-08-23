@@ -33,54 +33,48 @@ static const orb_case_t CASES[] = {
 };
 
 /*
- * Wave has no behaviour, mix or amplitude, so it gets its own table rather than
- * dead columns in the one above. Must match WAVE_CASES in orb_ref.mjs, in order.
+ * The single-animation modes: no behaviour, no blend, just a time and a level.
+ * One case type for all five rather than dead columns in the shell's table above,
+ * and the ones that ignore `amp` simply pass zero. Each table must match its
+ * counterpart in orb_ref.mjs, in order.
  */
 typedef struct {
     const char *label;
-    float t;
-} wave_case_t;
-
-static const wave_case_t WAVE_CASES[] = {
-    { "wave_a", 1.7f },
-    { "wave_b", 3.3f },
-    { "wave_c", 5.5f },
-    { "wave_d", 13.2f },
-};
-
-/* Must match WEB_CASES in orb_ref.mjs, in order. */
-static const wave_case_t WEB_CASES[] = {
-    { "web_a", 1.7f },
-    { "web_b", 5.4f },
-    { "web_c", 13.1f },
-};
-
-/* Must match BRAID_CASES in orb_ref.mjs, in order. */
-static const wave_case_t BRAID_CASES[] = {
-    { "braid_a", 1.7f },
-    { "braid_b", 6.2f },
-    { "braid_c", 14.5f },
-};
-
-/* Must match RIBBON_CASES in orb_ref.mjs, in order. */
-typedef struct {
-    const char *label;
     float t, amp;
-} ribbon_case_t;
+} amp_case_t;
 
-static const ribbon_case_t RIBBON_CASES[] = {
-    { "ribbon_a", 1.7f,  0.0f },
-    { "ribbon_b", 4.6f,  0.0f },
-    { "ribbon_c", 11.9f, 0.0f },
-    { "ribbon_amp", 4.6f, 0.8f },
+static const amp_case_t WAVE_CASES[] = {
+    { "wave_a",   1.7f,  0.0f },
+    { "wave_b",   3.3f,  0.0f },
+    { "wave_c",   5.5f,  0.0f },
+    { "wave_d",   13.2f, 0.0f },
+    { "wave_amp", 3.3f,  0.1f }, /* a microphone level: LISTENING is the user */
 };
 
-/* Must match RUBIK_CASES in orb_ref.mjs, in order. */
-static const wave_case_t RUBIK_CASES[] = {
-    { "rubik_a", 1.7f },
-    { "rubik_b", 5.0f },
-    { "rubik_c", 9.3f },
-    { "rubik_d", 12.4f },
+static const amp_case_t RUBIK_CASES[] = {
+    { "rubik_a", 1.7f,  0.0f },
+    { "rubik_b", 5.0f,  0.0f },
+    { "rubik_c", 9.3f,  0.0f },
+    { "rubik_d", 12.4f, 0.0f },
+};
+
+static const amp_case_t RIBBON_CASES[] = {
+    { "ribbon_a",   1.7f,  0.0f },
+    { "ribbon_b",   4.6f,  0.0f },
+    { "ribbon_c",   11.9f, 0.0f },
+    { "ribbon_amp", 4.6f,  0.8f }, /* a playback level: SPEAKING is the agent */
+};
+
+static const amp_case_t BRAID_CASES[] = {
+    { "braid_a", 1.7f,  0.0f },
+    { "braid_b", 6.2f,  0.0f },
+    { "braid_c", 14.5f, 0.0f },
+};
+
+static const amp_case_t WEB_CASES[] = {
+    { "web_a", 1.7f,  0.0f },
+    { "web_b", 5.4f,  0.0f },
+    { "web_c", 13.1f, 0.0f },
 };
 
 int main(int argc, char **argv)
@@ -92,8 +86,8 @@ int main(int argc, char **argv)
 
     /* Wave first, matching orb_ref.mjs's emission order. */
     for (size_t c = 0; c < sizeof(WAVE_CASES) / sizeof(WAVE_CASES[0]); c++) {
-        const wave_case_t *k = &WAVE_CASES[c];
-        orb_build_wave(&frame, k->t);
+        const amp_case_t *k = &WAVE_CASES[c];
+        orb_build_wave(&frame, k->t, k->amp);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];
             printf("%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
@@ -102,7 +96,7 @@ int main(int argc, char **argv)
     }
 
     for (size_t c = 0; c < sizeof(RUBIK_CASES) / sizeof(RUBIK_CASES[0]); c++) {
-        const wave_case_t *k = &RUBIK_CASES[c];
+        const amp_case_t *k = &RUBIK_CASES[c];
         orb_build_rubik(&frame, k->t);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];
@@ -112,7 +106,7 @@ int main(int argc, char **argv)
     }
 
     for (size_t c = 0; c < sizeof(RIBBON_CASES) / sizeof(RIBBON_CASES[0]); c++) {
-        const ribbon_case_t *k = &RIBBON_CASES[c];
+        const amp_case_t *k = &RIBBON_CASES[c];
         orb_build_ribbon(&frame, k->t, k->amp);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];
@@ -122,7 +116,7 @@ int main(int argc, char **argv)
     }
 
     for (size_t c = 0; c < sizeof(WEB_CASES) / sizeof(WEB_CASES[0]); c++) {
-        const wave_case_t *k = &WEB_CASES[c];
+        const amp_case_t *k = &WEB_CASES[c];
         orb_build_web(&frame, k->t);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];
@@ -137,7 +131,7 @@ int main(int argc, char **argv)
     }
 
     for (size_t c = 0; c < sizeof(BRAID_CASES) / sizeof(BRAID_CASES[0]); c++) {
-        const wave_case_t *k = &BRAID_CASES[c];
+        const amp_case_t *k = &BRAID_CASES[c];
         orb_build_braid(&frame, k->t);
         for (size_t i = 0; i < frame.count; i++) {
             const orb_dot_t *d = &frame.dots[i];

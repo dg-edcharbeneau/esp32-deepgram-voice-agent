@@ -692,9 +692,33 @@ bool orb_init(float size)
  * same radius/ink coupling: R_BASE, R_DEPTH, INK_FAR and INK_SPAN are wave's own
  * defaults, which is where the voice shell got them.
  */
-void orb_build_wave(orb_frame_t *out, float t)
+/*
+ * How the microphone level reaches wave: it scales every radius, through the
+ * reference's own dyn.rMul.
+ *
+ * NOT AS EXPRESSIVE AS THE SHELL'S LISTENING, and that is inherent rather than a
+ * shortcut. buildWave has no wobMul and no wavefront term -- it undulates the same
+ * way whatever is happening -- so rMul is the only amplitude hook the reference
+ * gives it. The shell's listening pose sent wavefronts travelling inward with
+ * depth set by volume; wave can only swell. Anything more would mean inventing a
+ * parameter upstream does not have, which is exactly what the parity harness
+ * exists to stop.
+ *
+ * Gain is a first guess against a measured microphone peak of about 0.1 in
+ * ordinary speech, so ~30% swell at a normal talking volume. Wants confirming
+ * against a real voice rather than another estimate.
+ */
+#define WAVE_RMUL_GAIN 3.0f
+
+void orb_build_wave(orb_frame_t *out, float t, float amp)
 {
     const float R = s_shell_r;
+
+    if (amp < 0.0f) amp = 0.0f;
+    else if (amp > 1.0f) amp = 1.0f;
+    /* rMul is 1 at rest, which is the reference's default -- so silence is the
+     * unmodified mode rather than a special case. */
+    const float rs = s_rs * (1.0f + WAVE_RMUL_GAIN * amp);
 
     /* buildWave's projection: yaw = t*0.18, pitch = 0.38, no roll, no shear. */
     const float yaw = t * 0.18f;
@@ -751,7 +775,7 @@ void orb_build_wave(orb_frame_t *out, float t)
              * panel, which is why the harness catches it and an eye would not. */
             d->y = s_cy - y1 * rr;
             d->z = dz * rr;
-            d->r = (R_BASE + R_DEPTH * depth) * (1.0f + 0.4f * crest) * s_rs;
+            d->r = (R_BASE + R_DEPTH * depth) * (1.0f + 0.4f * crest) * rs;
             if (d->r < R_MIN) {
                 d->r = R_MIN;
             }

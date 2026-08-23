@@ -54,11 +54,14 @@ const wbuf = {
   count: 0,
 };
 
-function waveFrame(t) {
+function waveFrame(t, amp = 0) {
   wbuf.count = 0;
   buildWave(wbuf, SIZE, t, opts, ws, {
     amp: 0, from: 0, to: 0, mix: 1,
-    rMul: 1, yaw: 0, pitch: 0, roll: 0, orient: undefined,
+    /* rMul is how the device feeds the microphone level in. Same mapping as
+     * orb_build_wave's. */
+    rMul: 1 + 3.0 * amp,
+    yaw: 0, pitch: 0, roll: 0, orient: undefined,
   });
   const out = [];
   for (let i = 0; i < wbuf.count; i++) {
@@ -179,10 +182,12 @@ const RIBBON_CASES = [
 ];
 
 const WAVE_CASES = [
-  ['wave_a', 1.7],
-  ['wave_b', 3.3],
-  ['wave_c', 5.5],
-  ['wave_d', 13.2],
+  ['wave_a', 1.7, 0.0],
+  ['wave_b', 3.3, 0.0],
+  ['wave_c', 5.5, 0.0],
+  ['wave_d', 13.2, 0.0],
+  /* At a microphone level, which is the rMul path. */
+  ['wave_amp', 3.3, 0.1],
 ];
 
 // (label, behaviour, t, amp) cases. Behaviour indices are voice.ts's own.
@@ -209,8 +214,8 @@ const CASES = [
   ['blend_l2s',     0, 2.5,  0.6],
 ];
 
-for (const [label, t] of WAVE_CASES) {
-  for (const d of waveFrame(t)) {
+for (const [label, t, amp] of WAVE_CASES) {
+  for (const d of waveFrame(t, amp)) {
     process.stdout.write(
       `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
       `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);

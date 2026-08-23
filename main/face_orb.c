@@ -60,6 +60,32 @@ static int64_t s_t0_us;
  * any logged session. The mapping exists so the display test can show the pose,
  * which until now was parity-verified geometry nobody had seen render.
  */
+/*
+ * Which ported mode a state uses, or UI_ORB_MODE_NONE for the voice shell.
+ *
+ * The five that map are the states with a distinct thing to say. IDLE,
+ * INITIALIZING and DISCONNECTED stay on the shell: they are the resting and
+ * connecting poses the shell was written for, and its ladder is what makes
+ * session progress legible without a label.
+ *
+ * SPEAKING and LISTENING are not symmetric and must not be confused. SPEAKING is
+ * the AGENT talking -- Deepgram's synthesis coming out of the speaker -- and
+ * LISTENING is the USER talking, with the microphone open for transcription. So
+ * ribbon is driven by playback level and wave by microphone level, which ui.c
+ * already resolves into ctx->amp as whichever direction is live, at its own gain.
+ */
+static int mode_for(ui_behaviour_t b)
+{
+    switch (b) {
+    case UI_BEHAVIOUR_LISTENING:  return UI_ORB_MODE_WAVE;   /* the user talking */
+    case UI_BEHAVIOUR_THINKING:   return UI_ORB_MODE_RUBIK;
+    case UI_BEHAVIOUR_SPEAKING:   return UI_ORB_MODE_RIBBON; /* the agent talking */
+    case UI_BEHAVIOUR_CONNECTING: return UI_ORB_MODE_WEB;
+    case UI_BEHAVIOUR_BUFFERING:  return UI_ORB_MODE_BRAID;
+    default:                      return UI_ORB_MODE_NONE;
+    }
+}
+
 static orb_behaviour_t to_orb(ui_behaviour_t b)
 {
     switch (b) {
@@ -171,14 +197,37 @@ static void render(const ui_render_ctx_t *ctx)
         .high = ctx->band_high,
     };
     /*
-     * A display-test step can ask for a ported mode instead of the shell. No
-     * blend and no amplitude: these are whole animations rather than states, and
-     * the test cuts between steps anyway -- which is what lets them be looked at
-     * before the cross-mode crossfade is designed.
+     * A display-test step overrides; otherwise the state picks the mode.
      */
-    switch (ctx->orb_mode) {
-    case UI_ORB_MODE_WAVE:   orb_build_wave(s_frame, t); break;
+    int mode = (ctx->orb_mode != UI_ORB_MODE_NONE) ? ctx->orb_mode
+                                                   : mode_for(ctx->behaviour);
+
+    /*
+     * A CHANGE INVOLVING A MODE IS A CUT, not a crossfade.
+     *
+     * orb_build blends two shell behaviours per RING, which works because they
+     * share a lattice and every value they produce is a pose on it. Two different
+     * modes share nothing -- different lattices, different dot counts, and in
+     * web's case lines as well -- so there is no pose between them to interpolate
+     * towards. Blending them would mean building both frames and fading on alpha,
+     * which doubles the geometry for the length of a transition; ribbon is ~15 ms
+     * and web ~25 ms, so that is not obviously affordable.
+     *
+     * Cuts for now, logged once each so what a turn actually looks like is on the
+     * record rather than a matter of opinion. The shell keeps its 280 ms blend
+     * between its own behaviours.
+     */
+    static int s_mode_shown = UI_ORB_MODE_NONE;
+    if (mode != s_mode_shown) {
+        ESP_LOGI("face_orb", "EVT mode %d->%d (cut)", s_mode_shown, mode);
+        s_mode_shown = mode;
+    }
+
+    switch (mode) {
+    /* wave takes the microphone level: LISTENING is the user talking. */
+    case UI_ORB_MODE_WAVE:   orb_build_wave(s_frame, t, amp); break;
     case UI_ORB_MODE_RUBIK:  orb_build_rubik(s_frame, t); break;
+    /* ribbon takes the playback level: SPEAKING is the agent talking. */
     case UI_ORB_MODE_RIBBON: orb_build_ribbon(s_frame, t, amp); break;
     case UI_ORB_MODE_BRAID:  orb_build_braid(s_frame, t); break;
     case UI_ORB_MODE_WEB:    orb_build_web(s_frame, t); break;
