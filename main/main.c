@@ -214,6 +214,14 @@ static void on_gesture(ui_gesture_t gesture)
          */
         ESP_LOGI(TAG, "EVT test-done, restarting session");
         audio_io_capture_set_monitor(false);
+        /*
+         * Before the start, not after: the idle clock has been running
+         * untouched for the whole test -- nothing notes activity while the
+         * session is down -- so without this the timeout below sees the test's
+         * own duration as quiet time and stops the session it just started.
+         * Measured: a 41 s test killed the new session 9 s after it went ready.
+         */
+        note_activity();
         session_ctl_request_start();
         break;
     }
