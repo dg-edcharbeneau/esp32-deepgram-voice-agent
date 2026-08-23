@@ -205,6 +205,7 @@ one, Deepgram would call a web service instead of asking the device:
 | `adjust_volume` | One ES8311 register write, effective on the next sample | always |
 | `set_face` | `ui_set_face()` — the frame timer picks it up | always |
 | `set_color` | `ui_set_orb_color()` — same handoff; orb only | always |
+| `start_display_test` | Deferred to `AgentAudioDone`, then stops the session and hands the screen to `ui_start_display_test()` | always |
 | `set_voice` | Saves to NVS, then reopens the session | Flux stack |
 | `reset_voice` | Back to `CONFIG_DEEPGRAM_FLUX_VOICE`, then reopens | Flux stack |
 
@@ -273,8 +274,8 @@ flowchart TB
     render --> spec["spectrum: 1024-pt FFT<br/>48 bands → 96 bars"]
 ```
 
-Setters (`ui_set_status`, `ui_set_face`, `ui_set_orb_color`, `ui_set_behaviour`,
-`ui_show_qr`) are
+Setters (`ui_set_status`, `ui_set_face`, `ui_set_orb_color`,
+`ui_start_display_test`, `ui_set_behaviour`, `ui_show_qr`) are
 safe from any task because they only store a value; the frame timer applies it.
 The gesture handler runs *on* the LVGL task with the lock held, so it may only
 signal.
