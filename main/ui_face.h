@@ -14,6 +14,42 @@
  * feed_pcm hands over samples rather than ui.c publishing a window in some
  * size it would have to guess.
  *
+ * MEMORY -- READ THIS BEFORE ADDING A FACE
+ *
+ * Internal RAM is the resource that binds, not PSRAM: 288 kB shared with Wi-Fi,
+ * lwIP and TLS, and running short does not fail the boot, it fails a WebSocket
+ * write or a reconnect's TLS handshake mid-session.
+ *
+ * The catch is that a face's two kinds of memory scale differently. Heap is
+ * lazy -- init() runs on first activation, so a face nobody selects costs no
+ * heap. Statics are not: every face is linked in unconditionally, so its .bss is
+ * resident from boot whether or not it is ever shown. N faces means N faces'
+ * worth of statics on a device displaying one. So:
+ *
+ *   - Keep static data to a few hundred bytes. Tables, buffers and scratch go on
+ *     the heap in init(), not in .bss. The spectrum face was 6,984 B of internal
+ *     .bss on a device that boots to the orb before its buffers were moved out;
+ *     it is 848 B now.
+ *
+ *   - Ask for PSRAM explicitly: heap_caps_malloc(..., MALLOC_CAP_SPIRAM). A
+ *     plain malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (4096 B) is handed
+ *     internal memory silently, which is the whole trap. When a face needs
+ *     several small tables, pool them into one allocation that clears the
+ *     threshold -- orb_geometry.c does exactly this and says why.
+ *
+ *   - Watch contiguity, not just totals. Per-frame LVGL draw allocations of
+ *     varying sizes fragment the internal arena, and a TLS handshake wants one
+ *     large contiguous block. STRIPE_COUNT in face_spectrum.c is halved for this
+ *     reason alone, with the measured largest-free-block numbers recorded there.
+ *
+ *   - There is no deinit. A face selected once holds its heap for the rest of
+ *     the boot, so budget PSRAM as the sum over every face a session might
+ *     visit, not as the peak of one.
+ *
+ * main.c's TLM line reports int/intmax/iblocks/ialloc every window and is
+ * stamped on a face change, which is how all of the above gets checked rather
+ * than estimated.
+ *
  * Only ui.c and the face implementations include this header. The rest of the
  * firmware uses ui.h, which is deliberately free of LVGL.
  */
@@ -98,7 +134,10 @@ typedef struct {
     const char *name;
 
     /* Allocate, and latch whatever the face needs from the canvas. Called once,
-     * on first activation, so a face nobody selects costs nothing. */
+     * on first activation, so a face nobody selects pays no HEAP -- but its
+     * statics are resident from boot regardless. See the MEMORY note above:
+     * this is the hook that makes a face free when it is not showing, and only
+     * what is allocated here rather than declared static gets that benefit. */
     esp_err_t (*init)(lv_obj_t *canvas);
 
     /* Called on every switch to this face, after init(). Optional: use it to
