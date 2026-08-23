@@ -264,7 +264,7 @@ static const ui_test_step_t s_test_steps[] = {
     { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_RUBIK,  "rubik: thinking?" },
     { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_RIBBON, "ribbon: speaking?" },
     { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_BRAID,  "braid: buffering?" },
-    { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_WEB,    "web: connecting? (no lines)" },
+    { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_WEB,    "web: connecting?" },
 };
 #undef S
 #define TEST_STEP_COUNT (sizeof(s_test_steps) / sizeof(s_test_steps[0]))

@@ -198,7 +198,7 @@ static void render(const ui_render_ctx_t *ctx)
     geom_sum += t_rast - t_geom;
     rast_sum += t_end - t_rast;
     if (++n >= 60) {
-        ESP_LOGI("face_orb", "geometry %lld us, raster %lld us, %u dots, %u lines undrawn",
+        ESP_LOGI("face_orb", "geometry %lld us, raster %lld us, %u dots, %u lines",
                  (long long)(geom_sum / n), (long long)(rast_sum / n),
                  (unsigned)s_frame->count, (unsigned)s_frame->line_count);
         geom_sum = rast_sum = 0;
