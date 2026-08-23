@@ -99,10 +99,25 @@ static const char *TAG = "face_spectrum";
  * 7 on the same core. A torn window is not subtle: splicing two unrelated
  * segments puts a step discontinuity through the FFT and splatters the whole
  * spectrum. Hence the retry rather than a bare volatile.
+ *
+ * MOVING THE BANKS TO PSRAM WIDENED THAT RACE, deliberately and measurably.
+ * take_window() copies 1024 samples out of a bank, and a PSRAM-backed read is
+ * slower than an internal one, so there is more time for the writer to lap the
+ * reader mid-copy. The retry loop already handles it: three tears and the caller
+ * holds the previous frame, which costs one stale spectrum and never corrupts
+ * one. If "window torn three times" starts appearing in a log, this is why --
+ * and it is its own commit so it can be reverted alone.
+ *
+ * IN PSRAM, ALLOCATED IN init(). As internal .bss these buffers cost 6 kB from
+ * boot whether or not anyone ever selects this face -- both faces are linked in
+ * unconditionally, so a face's statics are resident even when it is not, and
+ * internal RAM is the resource that binds here. Safe because every toucher is a
+ * task and never an ISR: the taps fire inside the playback and capture task
+ * loops, and take_window() runs in the LVGL frame timer.
  */
-static int16_t s_window[FFT_N];  /* owned by the audio tasks */
+static int16_t *s_window;        /* owned by the audio tasks */
 static size_t s_hop_fill;        /* samples into the new half */
-static int16_t s_bank[2][FFT_N];
+static int16_t (*s_bank)[FFT_N];
 static uint32_t s_publishes;     /* release-stored by writer, acquire-loaded by reader */
 
 /* ---------------- LVGL-owned state ---------------- */
@@ -152,7 +167,7 @@ static void feed_pcm(const int16_t *mono, size_t samples)
         /* Publish into the bank the reader is not looking at, then make the
          * counter visible -- release ordering pairs with the reader's acquire. */
         uint32_t n = s_publishes;
-        memcpy(s_bank[n & 1], s_window, sizeof(s_window));
+        memcpy(s_bank[n & 1], s_window, FFT_N * sizeof(int16_t));
         __atomic_store_n(&s_publishes, n + 1, __ATOMIC_RELEASE);
 
         /* Slide: the half just published becomes the history half. */
@@ -346,7 +361,29 @@ static esp_err_t init(lv_obj_t *canvas)
     s_wind = heap_caps_aligned_alloc(16, FFT_N * sizeof(float), MALLOC_CAP_SPIRAM);
     s_fft = heap_caps_aligned_alloc(16, FFT_N * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
     s_spectrum = heap_caps_aligned_alloc(16, (FFT_N / 2) * sizeof(float), MALLOC_CAP_SPIRAM);
-    if (s_audio == NULL || s_wind == NULL || s_fft == NULL || s_spectrum == NULL) {
+
+    /*
+     * The rolling PCM window. MALLOC_CAP_SPIRAM explicitly, not plain malloc: at
+     * 2 kB this sits under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (4096) and would
+     * be handed internal memory anyway -- the same trap orb_geometry.c pools
+     * three small tables to dodge.
+     *
+     * calloc, not alloc, unlike the scratch buffers above. Those are written in
+     * full before they are read; this one is not. New audio only ever lands in
+     * the window's second half, so the first hop publishes a history half that
+     * nothing has written yet -- as .bss that was silently zero, and from the
+     * heap it would be whatever PSRAM held. That is exactly the step
+     * discontinuity the seqlock comment above is about, and at 5 dB of decay per
+     * frame one full-scale splatter takes ~600 ms to fall off the display.
+     */
+    s_window = heap_caps_aligned_calloc(16, FFT_N, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+
+    /* The banks need no zeroing: take_window() returns false until the first
+     * publish, and a publish writes a whole bank. */
+    s_bank = heap_caps_aligned_alloc(16, 2 * FFT_N * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+
+    if (s_audio == NULL || s_wind == NULL || s_fft == NULL || s_spectrum == NULL ||
+        s_window == NULL || s_bank == NULL) {
         ESP_LOGE(TAG, "no PSRAM for FFT buffers");
         return ESP_ERR_NO_MEM;
     }
