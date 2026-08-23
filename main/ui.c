@@ -254,15 +254,6 @@ static volatile int64_t s_speech_us;
 #define LISTEN_HOLD_US 700000
 
 /*
- * How long a reported state stays trustworthy.
- *
- * `s_reported` is sticky -- nothing clears it -- so without a freshness window a
- * THINKING reported during one turn would still be asserted during the next
- * user utterance and outrank it.
- */
-#define REPORTED_FRESH_US 5000000
-
-/*
  * Minimum time on screen for the connection rungs.
  *
  * Measured: BUFFERING lasted 130-220 ms and INITIALIZING 230-270 ms, both SHORTER
@@ -291,11 +282,11 @@ static volatile bool s_stopped;
 static volatile bool s_failed;
 
 /*
- * What the agent last said it was doing, or COUNT for "nothing reported".
+ * The connection phase the session layer last reported, or NONE.
  *
- * Only THINKING genuinely needs this: no audio flows while the agent thinks, so
- * the audio path cannot see it. Anything the audio path CAN see wins over this --
- * see resolve_behaviour().
+ * Only the phases need this: every conversational state is visible in the audio
+ * path, and anything the audio path can see wins over this -- see
+ * resolve_behaviour().
  */
 #define UI_BEHAVIOUR_NONE ((ui_behaviour_t)0xFF)
 static volatile ui_behaviour_t s_reported = UI_BEHAVIOUR_NONE;
@@ -566,21 +557,6 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
     }
 
     /*
-     * THINKING outranks the listening hold, and has to.
-     *
-     * Measured: THINKING was NEVER ONCE shown across ten turns. The agent's think
-     * time on this stack is shorter than LISTEN_HOLD_US, so the hold that stops
-     * LISTENING flickering through within-sentence pauses was also swallowing the
-     * entire gap where thinking happens. The agent saying it is thinking is
-     * definitive evidence the turn has passed to it -- better evidence than the
-     * hold's assumption that the user might still be mid-sentence.
-     */
-    bool fresh = (now_us - s_reported_us) < REPORTED_FRESH_US;
-    if (reported == UI_BEHAVIOUR_THINKING && fresh) {
-        return UI_BEHAVIOUR_THINKING;
-    }
-
-    /*
      * Speech, not merely data. See s_speech_us -- testing "a block arrived"
      * instead kept this permanently in LISTENING and IDLE was never once drawn.
      */
@@ -832,7 +808,6 @@ static const char *behaviour_name(ui_behaviour_t b)
     case UI_BEHAVIOUR_IDLE:         return "IDLE";
     case UI_BEHAVIOUR_INITIALIZING: return "INITIALIZING";
     case UI_BEHAVIOUR_LISTENING:    return "LISTENING";
-    case UI_BEHAVIOUR_THINKING:     return "THINKING";
     case UI_BEHAVIOUR_SPEAKING:     return "SPEAKING";
     case UI_BEHAVIOUR_CONNECTING:   return "CONNECTING";
     case UI_BEHAVIOUR_BUFFERING:    return "BUFFERING";

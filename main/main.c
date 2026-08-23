@@ -189,19 +189,6 @@ static void on_gesture(ui_gesture_t gesture)
     }
 }
 
-static void on_thinking(void *ctx)
-{
-    (void)ctx;
-    note_activity();
-    /* Logged because whether this fires at all was an open question: THINKING was
-     * never once shown across ten turns, and the branch it comes from used a
-     * LOGD that CONFIG_LOG_MAXIMUM_LEVEL compiles out. */
-    ESP_LOGI(TAG, "EVT thinking");
-    /* The display cannot see this any other way: no audio flows while the agent
-     * composes. Anything audible overrides it again on the next frame. */
-    ui_set_behaviour(UI_BEHAVIOUR_THINKING);
-}
-
 /* File scope so session_ctl can reopen a session with the same callbacks. */
 static const dg_agent_callbacks_t s_callbacks = {
     .on_state = on_state,
@@ -210,7 +197,6 @@ static const dg_agent_callbacks_t s_callbacks = {
     .on_agent_audio_done = on_agent_audio_done,
     .on_user_started_speaking = on_user_started_speaking,
     .on_reload_required = on_reload_required,
-    .on_thinking = on_thinking,
 };
 
 /*

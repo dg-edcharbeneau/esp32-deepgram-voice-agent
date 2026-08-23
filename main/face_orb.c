@@ -51,14 +51,21 @@ static int64_t s_blend_start_us;
  */
 static int64_t s_t0_us;
 
-/* ui_behaviour_t and orb_behaviour_t are separate on purpose: one is the public
- * vocabulary, the other is the shell's. This is the only place they meet. */
+/*
+ * ui_behaviour_t and orb_behaviour_t are separate on purpose: one is the public
+ * vocabulary, the other is the shell's. This is the only place they meet.
+ *
+ * ORB_THINKING has no entry, and that is deliberate. The shell's calm
+ * ring-indexed roll is ported and parity-verified, but nothing can select it:
+ * AgentThinking never arrived in any logged session, so the UI-level state was
+ * removed. The geometry keeps it because it is a faithful port the harness tests
+ * -- if the message ever appears, re-wiring is one line here and one in ui.h.
+ */
 static orb_behaviour_t to_orb(ui_behaviour_t b)
 {
     switch (b) {
     case UI_BEHAVIOUR_INITIALIZING: return ORB_INITIALIZING;
     case UI_BEHAVIOUR_LISTENING:    return ORB_LISTENING;
-    case UI_BEHAVIOUR_THINKING:     return ORB_THINKING;
     case UI_BEHAVIOUR_SPEAKING:     return ORB_SPEAKING;
     case UI_BEHAVIOUR_CONNECTING:   return ORB_CONNECTING;
     case UI_BEHAVIOUR_BUFFERING:    return ORB_BUFFERING;

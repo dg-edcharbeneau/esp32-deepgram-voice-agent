@@ -587,11 +587,13 @@ static void handle_json(const char *json, int len)
         }
 
     } else if (strcmp(t, "AgentThinking") == 0) {
-        /* No audio accompanies thinking, so this message is the ONLY way the
-         * display can know about it -- see resolve_behaviour() in ui.c. */
-        if (s_cb.on_thinking) {
-            s_cb.on_thinking(s_cb.ctx);
-        }
+        /*
+         * Never observed in practice. This was wired to a display state for a
+         * while; across every session logged it did not arrive once, so the state
+         * was unreachable and has been removed. Still handled here rather than
+         * left to the catch-all, so if this stack ever does start sending it the
+         * log says so instead of reading as an unknown type.
+         */
         ESP_LOGD(TAG, "agent thinking");
 
     } else if (strcmp(t, "AgentAudioDone") == 0) {

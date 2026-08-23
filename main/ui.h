@@ -43,15 +43,14 @@ typedef enum {
  * brighter than the one before -- so a session's progress reads without anyone
  * having to read the label.
  *
- * Most of these ui.c infers for itself from the audio path, which is tied to what
- * the speaker and microphone are actually doing. THINKING is the exception: no
- * audio flows during it, so it can only come from the agent saying so.
+ * ui.c infers the conversational states for itself from the audio path, which is
+ * tied to what the speaker and microphone are actually doing. The connection
+ * phases are the ones it cannot see and has to be told.
  */
 typedef enum {
     UI_BEHAVIOUR_IDLE = 0,
     UI_BEHAVIOUR_INITIALIZING,
     UI_BEHAVIOUR_LISTENING,
-    UI_BEHAVIOUR_THINKING,
     UI_BEHAVIOUR_SPEAKING,
     UI_BEHAVIOUR_CONNECTING,
     UI_BEHAVIOUR_BUFFERING,
@@ -59,11 +58,12 @@ typedef enum {
 } ui_behaviour_t;
 
 /*
- * Report a behaviour the display cannot work out for itself. Safe from any task.
+ * Report a connection phase, which the display cannot work out for itself. Safe
+ * from any task.
  *
- * Only latched until the audio path contradicts it: playback starting or the mic
- * going live both win, because they describe what the hardware is doing while this
- * describes what the agent last said it was doing.
+ * The audio path outranks anything reported here once a session is live: playback
+ * and a live mic describe what the hardware is doing, while this only describes
+ * what the session layer last said.
  */
 void ui_set_behaviour(ui_behaviour_t behaviour);
 
