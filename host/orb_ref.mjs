@@ -8,6 +8,7 @@ import { precomputeVoice, buildVoice } from './ref/voice.ts';
 import { precomputeWave, buildWave, precomputeRubik, buildRubik } from './ref/lattice.ts';
 import { precomputeRibbon, buildRibbon } from './ref/ribbon.ts';
 import { frameBraid } from './ref/braid.ts';
+import { frameWeb } from './ref/web.ts';
 
 const SIZE = Number(process.env.ORB_SIZE ?? 466);
 const R_MIN = 0.3;
@@ -142,6 +143,16 @@ function braidFrame(t) {
   }));
 }
 
+// web emits both dots and lines. Lines go out under a `~L` label so the two
+// never share a case -- compare.py reads the column count per case.
+function webFrame(t) { return frameWeb(SIZE, t, {}); }
+
+const WEB_CASES = [
+  ['web_a', 1.7],
+  ['web_b', 5.4],
+  ['web_c', 13.1],
+];
+
 const BRAID_CASES = [
   ['braid_a', 1.7],
   ['braid_b', 6.2],
@@ -206,6 +217,21 @@ for (const [label, t] of RIBBON_CASES) {
     process.stdout.write(
       `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
       `${d.r.toFixed(4)}\t${d.w.toFixed(4)}\t${d.a.toFixed(4)}\n`);
+  }
+}
+
+for (const [label, t] of WEB_CASES) {
+  const fr = webFrame(t);
+  for (const d of fr.dots) {
+    process.stdout.write(
+      `${label}\t${d.x.toFixed(4)}\t${d.y.toFixed(4)}\t${d.z.toFixed(4)}\t` +
+      `${d.r.toFixed(4)}\t${d.white.toFixed(4)}\t${(d.a ?? 1).toFixed(4)}\n`);
+  }
+  for (const l of fr.lines) {
+    process.stdout.write(
+      `${label}~L\t${l.x1.toFixed(4)}\t${l.y1.toFixed(4)}\t` +
+      `${l.x2.toFixed(4)}\t${l.y2.toFixed(4)}\t` +
+      `${l.white.toFixed(4)}\t${(l.a ?? 1).toFixed(4)}\t${l.w.toFixed(4)}\n`);
   }
 }
 

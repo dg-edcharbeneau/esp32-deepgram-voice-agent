@@ -732,6 +732,7 @@ void orb_build_wave(orb_frame_t *out, float t)
 
     qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
     out->count = count;
+    out->line_count = 0; /* only web emits lines */
 }
 
 /* ---------------- rubik (lattice.ts buildRubik) ---------------- */
@@ -948,6 +949,7 @@ void orb_build_rubik(orb_frame_t *out, float t)
 
     qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
     out->count = count;
+    out->line_count = 0; /* only web emits lines */
 }
 
 /* ---------------- ribbon (ribbon.ts buildRibbon) ---------------- */
@@ -1061,6 +1063,7 @@ void orb_build_ribbon(orb_frame_t *out, float t)
 
     qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
     out->count = count;
+    out->line_count = 0; /* only web emits lines */
 }
 
 /* ---------------- braid (braid.ts frameBraid) ---------------- */
@@ -1182,6 +1185,164 @@ void orb_build_braid(orb_frame_t *out, float t)
 
     qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
     out->count = count;
+    out->line_count = 0; /* only web emits lines */
+}
+
+/* ---------------- web (web.ts frameWeb) ---------------- */
+
+/*
+ * Value noise on an integer grid, smoothstepped. In DOUBLE: floor() is
+ * discontinuous, and this is what makes the nodes wander, so a rounding that
+ * crosses a grid line jumps a node rather than nudging it.
+ */
+static double orb_vnoise(double x, double y)
+{
+    double xi = floor(x), yi = floor(y);
+    double fx = x - xi, fy = y - yi;
+    fx = fx * fx * (3.0 - 2.0 * fx);
+    fy = fy * fy * (3.0 - 2.0 * fy);
+    double a = hash_d(xi, yi);
+    double b = hash_d(xi + 1.0, yi);
+    double c = hash_d(xi, yi + 1.0);
+    double d = hash_d(xi + 1.0, yi + 1.0);
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+
+/*
+ * The playground's `connecting` orb: a constellation wiring itself.
+ *
+ * Thirty nodes drift on the sphere, every pair closer than the threshold grows
+ * an edge, and five packets run along pairs re-picked on a coarse clock. The only
+ * mode with lines, and the only one whose node dots carry no alpha of their own --
+ * the reference leaves Dot.a undefined there, which finalizeFrame reads as 1.
+ */
+#define WEB_NODES 30
+#define WEB_SIGNALS 5
+#define WEB_THR 0.72f
+#define WEB_NODE_R 1.4f
+#define WEB_NODE_R_DEPTH 1.8f
+
+void orb_build_web(orb_frame_t *out, float t)
+{
+    const float R = s_cx * 0.8f;
+
+    /* scale = R here, so unit vectors go in and the distances below stay in
+     * unit-sphere space -- which is what the threshold is expressed in. */
+    const float yaw = t * 0.12f;
+    const float tilt = 0.32f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    /* Nodes: a Fibonacci lattice pushed around by slow noise, back onto the
+     * surface. Doubles, because orb_vnoise's grid is. */
+    double nx[WEB_NODES], ny[WEB_NODES], nz[WEB_NODES];
+    const double golden = M_PI * (3.0 - sqrt(5.0));
+    for (int i = 0; i < WEB_NODES; i++) {
+        double gy = 1.0 - (2.0 * ((double)i + 0.5)) / (double)WEB_NODES;
+        double rad = sqrt(1.0 - gy * gy);
+        double ga = (double)i * golden;
+        double x = rad * cos(ga) + 0.3 * (orb_vnoise((double)i * 0.31 + 9.0, (double)t * 0.24) - 0.5) * 2.0;
+        double y = gy + 0.3 * (orb_vnoise((double)i * 0.53 + 27.0, (double)t * 0.21) - 0.5) * 2.0;
+        double z = rad * sin(ga) + 0.3 * (orb_vnoise((double)i * 0.77 + 55.0, (double)t * 0.27) - 0.5) * 2.0;
+        double l = sqrt(x * x + y * y + z * z);
+        nx[i] = x / l; ny[i] = y / l; nz[i] = z / l;
+    }
+
+    /* Project each node once: both the edges and the node dots need it. */
+    float px[WEB_NODES], py[WEB_NODES], pz[WEB_NODES];
+    for (int i = 0; i < WEB_NODES; i++) {
+        float ux = (float)nx[i], uy = (float)ny[i], uz = (float)nz[i];
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        pz[i] = uy * st + z1 * ct;
+        px[i] = s_cx + x1 * R;
+        py[i] = s_cy - y1 * R;
+    }
+
+    size_t lines = 0;
+    for (int i = 0; i < WEB_NODES; i++) {
+        for (int j = i + 1; j < WEB_NODES; j++) {
+            double dx = nx[i] - nx[j], dy = ny[i] - ny[j], dz = nz[i] - nz[j];
+            double dist = sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist >= (double)WEB_THR) {
+                continue;
+            }
+            float depth = ((pz[i] + pz[j]) / 2.0f + 1.0f) / 2.0f;
+            float alpha = (float)(1.0 - dist / (double)WEB_THR) * (0.3f + 0.55f * depth);
+            if (alpha < ALPHA_CULL || lines >= ORB_MAX_LINES) {
+                continue;
+            }
+            orb_line_t *ln = &out->lines[lines++];
+            ln->x1 = px[i]; ln->y1 = py[i];
+            ln->x2 = px[j]; ln->y2 = py[j];
+            ln->white = 0.42f;
+            ln->a = alpha;
+            ln->w = (0.8f * s_rs < 0.6f) ? 0.6f : (0.8f * s_rs);
+        }
+    }
+
+    size_t count = 0;
+    for (int i = 0; i < WEB_NODES; i++) {
+        float depth = (pz[i] + 1.0f) / 2.0f;
+        float pulse = 1.0f + 0.25f * sinf(t * 1.4f + (float)i * 2.7f);
+        orb_dot_t *d = &out->dots[count++];
+        d->x = px[i];
+        d->y = py[i];
+        d->z = pz[i];
+        d->r = (WEB_NODE_R + WEB_NODE_R_DEPTH * depth) * pulse * s_rs;
+        if (d->r < R_MIN) {
+            d->r = R_MIN;
+        }
+        d->white = 0.55f - 0.45f * depth;
+        d->a = 1.0f; /* the reference leaves Dot.a undefined; finalizeFrame reads 1 */
+    }
+
+    /* Signals: the pair is re-picked on a coarse clock, so a packet finishes its
+     * run and the next one starts somewhere else entirely. */
+    for (int sg = 0; sg < WEB_SIGNALS; sg++) {
+        double phase = (double)t * 0.55 + (double)sg * 7.31;
+        double seg = floor(phase);
+        int ia = (int)floor(hash_d(seg, (double)sg * 3.1 + 1.7) * (double)WEB_NODES);
+        int ib = (int)floor(hash_d(seg, (double)sg * 5.7 + 4.2) * (double)WEB_NODES);
+        if (ia == ib || ia < 0 || ib < 0 || ia >= WEB_NODES || ib >= WEB_NODES) {
+            continue;
+        }
+        double f = orb_frac(phase);
+        double x = nx[ia] + (nx[ib] - nx[ia]) * f;
+        double y = ny[ia] + (ny[ib] - ny[ia]) * f;
+        double z = nz[ia] + (nz[ib] - nz[ia]) * f;
+        double l = sqrt(x * x + y * y + z * z);
+        if (l < 1e-6) {
+            l = 1e-6;
+        }
+        float ux = (float)(x / l), uy = (float)(y / l), uz = (float)(z / l);
+
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        float zr = uy * st + z1 * ct;
+        float depth = (zr + 1.0f) / 2.0f;
+
+        float alpha = 0.5f + 0.5f * depth;
+        if (alpha < ALPHA_CULL) {
+            continue;
+        }
+        orb_dot_t *d = &out->dots[count++];
+        d->x = s_cx + x1 * R;
+        d->y = s_cy - y1 * R;
+        d->z = zr;
+        d->r = (WEB_NODE_R * 1.5f + WEB_NODE_R_DEPTH * depth) * s_rs;
+        if (d->r < R_MIN) {
+            d->r = R_MIN;
+        }
+        d->white = 0.05f;
+        d->a = alpha;
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+    out->line_count = lines;
 }
 
 /* ---------------- the voice pass ---------------- */
@@ -1665,4 +1826,5 @@ void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
 
     qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
     out->count = count;
+    out->line_count = 0; /* only web emits lines */
 }

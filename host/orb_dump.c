@@ -48,6 +48,13 @@ static const wave_case_t WAVE_CASES[] = {
     { "wave_d", 13.2f },
 };
 
+/* Must match WEB_CASES in orb_ref.mjs, in order. */
+static const wave_case_t WEB_CASES[] = {
+    { "web_a", 1.7f },
+    { "web_b", 5.4f },
+    { "web_c", 13.1f },
+};
+
 /* Must match BRAID_CASES in orb_ref.mjs, in order. */
 static const wave_case_t BRAID_CASES[] = {
     { "braid_a", 1.7f },
@@ -105,6 +112,21 @@ int main(int argc, char **argv)
             const orb_dot_t *d = &frame.dots[i];
             printf("%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
                    k->label, d->x, d->y, d->z, d->r, d->white, d->a);
+        }
+    }
+
+    for (size_t c = 0; c < sizeof(WEB_CASES) / sizeof(WEB_CASES[0]); c++) {
+        const wave_case_t *k = &WEB_CASES[c];
+        orb_build_web(&frame, k->t);
+        for (size_t i = 0; i < frame.count; i++) {
+            const orb_dot_t *d = &frame.dots[i];
+            printf("%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
+                   k->label, d->x, d->y, d->z, d->r, d->white, d->a);
+        }
+        for (size_t i = 0; i < frame.line_count; i++) {
+            const orb_line_t *l = &frame.lines[i];
+            printf("%s~L\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
+                   k->label, l->x1, l->y1, l->x2, l->y2, l->white, l->a, l->w);
         }
     }
 

@@ -50,6 +50,7 @@ typedef enum {
 #define ORB_WAVE_DOTS 384   /* rings 15 / lonDensity 40; rubik shares it */
 #define ORB_RIBBON_DOTS 590 /* ghostN 150 + lanes 5 * segs 88 */
 #define ORB_BRAID_DOTS 306  /* ghostN 150 + 3 strands * strandN 52 */
+#define ORB_WEB_DOTS 35     /* nodeN 30 + signals 5 */
 
 #define ORB_MAX2(a, b) ((a) > (b) ? (a) : (b))
 #define ORB_MAX_DOTS                                        \
@@ -65,9 +66,30 @@ typedef struct {
     float a;     /* alpha, 0..1 */
 } orb_dot_t;
 
+/*
+ * A stroked edge. Only `web` emits these; every other mode leaves `line_count`
+ * at zero, and a renderer that ignores lines entirely still draws those modes
+ * correctly.
+ */
+typedef struct {
+    float x1, y1, x2, y2; /* screen pixels */
+    float white;          /* ink, same convention as orb_dot_t */
+    float a;              /* alpha, 0..1 */
+    float w;              /* stroke width in pixels */
+} orb_line_t;
+
+/*
+ * web pairs 30 nodes and keeps those closer than the threshold, so the bound is
+ * every pair -- 30*29/2. Typically far fewer survive; the cap is for the frame
+ * buffer, not a prediction.
+ */
+#define ORB_MAX_LINES 435
+
 typedef struct {
     orb_dot_t dots[ORB_MAX_DOTS];
     size_t count;
+    orb_line_t lines[ORB_MAX_LINES];
+    size_t line_count;
 } orb_frame_t;
 
 /*
@@ -122,6 +144,18 @@ void orb_build_ribbon(orb_frame_t *out, float t);
  * varies from frame to frame.
  */
 void orb_build_braid(orb_frame_t *out, float t);
+
+/*
+ * Build one frame of `web` -- the playground's `connecting` orb, ported from
+ * web.ts frameWeb.
+ *
+ * THE ONLY MODE THAT EMITS LINES. Thirty nodes drift on the sphere under slow
+ * value noise, every pair closer than the threshold grows an edge, and bright
+ * packets run along re-picked pairs. Sets both `count` and `line_count`; a
+ * renderer with no line support draws the nodes and none of the wiring, which is
+ * most of the point of it missing.
+ */
+void orb_build_web(orb_frame_t *out, float t);
 
 /*
  * Evaluate one frame.
