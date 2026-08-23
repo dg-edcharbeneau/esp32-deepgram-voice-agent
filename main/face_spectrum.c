@@ -38,7 +38,33 @@ static const char *TAG = "face_spectrum";
 #define FFT_N   1024
 #define FFT_HOP 512 /* 32 ms at 16 kHz -- one capture chunk, ~one frame */
 
-#define STRIPE_COUNT 48 /* analysis bands; also one half of the ring */
+/*
+ * Analysis bands, and one half of the ring -- so BAR_COUNT below is 48 bars.
+ *
+ * WAS 48 (96 bars), AND THE COUNT IS A MEMORY DECISION, NOT A VISUAL ONE.
+ *
+ * Every lv_draw_line allocates a mask buffer sized to the bar's screen width at
+ * its angle -- see lv_draw_sw_line.c -- so 96 bars is 96 differently-sized
+ * transient internal allocations per frame. Varying sizes are what fragment:
+ * free a 200 byte block, ask for 340, it does not fit, carve elsewhere, leave a
+ * hole. Uniform churn would coalesce and cost nothing.
+ *
+ * Measured with a live session, largest free block of internal RAM:
+ *
+ *   96 bars ...  11,776 B floor   (below the 29,824 B render buffer itself)
+ *   48 bars ...  32,768 B floor
+ *   orb face ... 43,008 B
+ *
+ * That matters because a TLS handshake on a reconnect wants one large
+ * contiguous block, and this is the failure ui.c's header warns about -- total
+ * free was never the problem here, it stayed above 44 kB throughout.
+ *
+ * Halving also made the face FASTER, 16 ms of draw down to 13.6-15.7 ms, since
+ * it halves the pixel work as well as the allocation count.
+ *
+ * Do not raise this back without re-measuring intmax under a live session.
+ */
+#define STRIPE_COUNT 24
 #define DB_MIN (-90.0f)
 #define DB_MAX (0.0f)
 

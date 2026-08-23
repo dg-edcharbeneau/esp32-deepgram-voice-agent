@@ -31,6 +31,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
+#include "multi_heap.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -72,6 +73,10 @@ static volatile uint32_t s_turns;
  * display would mean a headless boot never times out, or never stays up.
  */
 static volatile int64_t s_activity_us;
+
+/* Follow-up interval after a face switch -- long enough for a frame or two to
+ * land in the window, short enough not to smear the transition. */
+#define TELEMETRY_SWITCH_MS 200
 
 static void note_activity(void)
 {
@@ -333,8 +338,18 @@ void app_main(void)
      * than the total: if it sags towards 40 kB, shrink DRAW_ROWS in ui.c before
      * tuning anything else.
      */
+    /*
+     * After a face switch, shorten the next wait instead of the usual interval.
+     * The switch is reported in the window it happened, so the "before" sample is
+     * the previous line -- but the "after" would otherwise be a whole interval
+     * later, with a window's worth of averaging smeared across the transition.
+     * A short follow-up gives a clean post-switch reading.
+     */
+    uint32_t wait_ms = CONFIG_UI_TELEMETRY_MS;
+
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_UI_TELEMETRY_MS));
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        wait_ms = CONFIG_UI_TELEMETRY_MS;
 
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
@@ -364,15 +379,30 @@ void app_main(void)
             }
         }
 
+        /*
+         * Block COUNTS, not just sizes. A largest-free-block that falls without
+         * total-free falling means the arena is being carved up; a fall in both
+         * with one more allocated block means something simply took 29 kB. The
+         * two failure modes need opposite fixes, and only these numbers tell them
+         * apart.
+         */
+        multi_heap_info_t ih;
+        heap_caps_get_info(&ih, MALLOC_CAP_INTERNAL);
+
+        if (t.face_changed) {
+            wait_ms = TELEMETRY_SWITCH_MS;
+        }
+
         ESP_LOGI(TAG,
-                 "TLM up=%.1f face=%s beh=%s src=%s sess=%s "
+                 "TLM up=%.1f face=%s%s beh=%s src=%s sess=%s "
                  "frames=%" PRIu32 " fps=%.1f draw=%.1f/%.1f "
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32
-                 " heap=%" PRIu32 " int=%u intmax=%u",
+                 " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
+                 " ialloc=%u",
                  (double)esp_timer_get_time() / 1000000.0,
-                 t.face, t.behaviour, t.source,
+                 t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
                      : dg_agent_is_ready() ? "ready" : "notready",
                  t.frames, t.fps, t.draw_avg_ms, t.draw_max_ms,
@@ -382,6 +412,8 @@ void app_main(void)
                  s_turns, captured, s_audio_bytes, played, dropped,
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)ih.total_free_bytes, (unsigned)ih.free_blocks,
+                 (unsigned)ih.allocated_blocks);
     }
 }

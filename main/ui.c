@@ -189,6 +189,9 @@ static bool s_face_ready[FACE_COUNT];    /* has init() succeeded */
  * LVGL. -1 means nothing pending. */
 static volatile int s_face_want = -1;
 
+/* Latched on a switch, cleared when the telemetry is read. */
+static volatile bool s_face_changed;
+
 /* Defined with the rest of setup; the frame timer needs it to apply a switch. */
 static esp_err_t select_face(size_t idx);
 
@@ -849,6 +852,8 @@ void ui_get_telemetry(ui_telemetry_t *out)
     out->peak_mic = s_amp_peak_mic;
     out->peak_agent = s_amp_peak_agent;
     out->face = (s_face != NULL) ? s_face->name : "none";
+    out->face_changed = s_face_changed;
+    s_face_changed = false;
     out->behaviour = behaviour_name(s_behaviour_now);
     out->source = source_name(s_source);
 
@@ -1148,6 +1153,10 @@ static esp_err_t select_face(size_t idx)
     }
     ESP_LOGI(TAG, "EVT face %s->%s",
              (s_face != NULL) ? s_face->name : "none", face->name);
+    /* So the telemetry pair either side of a switch lands adjacently in the log
+     * rather than up to a window apart -- which is the whole point when the
+     * question is what a face costs. */
+    s_face_changed = true;
     s_face = face;
     s_face_index = idx;
     return ESP_OK;

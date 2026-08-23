@@ -152,6 +152,13 @@ typedef struct {
     const char *face;     /* static string */
     const char *behaviour;/* static string */
     const char *source;   /* static string */
+
+    /*
+     * Set when a face changed during this window, so the caller can log the
+     * before/after pair adjacently instead of up to a whole window apart. The UI
+     * cannot log it itself -- that blocks the LVGL task on the console.
+     */
+    bool face_changed;
 } ui_telemetry_t;
 
 /*
