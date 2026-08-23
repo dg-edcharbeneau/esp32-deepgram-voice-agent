@@ -170,7 +170,22 @@ static void render(const ui_render_ctx_t *ctx)
         .mid = ctx->band_mid,
         .high = ctx->band_high,
     };
-    orb_build(s_frame, t, s_from, s_to, mix, amp, &bands);
+    /*
+     * A display-test step can ask for a ported mode instead of the shell. No
+     * blend and no amplitude: these are whole animations rather than states, and
+     * the test cuts between steps anyway -- which is what lets them be looked at
+     * before the cross-mode crossfade is designed.
+     */
+    switch (ctx->orb_mode) {
+    case UI_ORB_MODE_WAVE:   orb_build_wave(s_frame, t); break;
+    case UI_ORB_MODE_RUBIK:  orb_build_rubik(s_frame, t); break;
+    case UI_ORB_MODE_RIBBON: orb_build_ribbon(s_frame, t); break;
+    case UI_ORB_MODE_BRAID:  orb_build_braid(s_frame, t); break;
+    case UI_ORB_MODE_WEB:    orb_build_web(s_frame, t); break;
+    default:
+        orb_build(s_frame, t, s_from, s_to, mix, amp, &bands);
+        break;
+    }
     int64_t t_rast = esp_timer_get_time();
     /* Colour is the user's, resolved by ui.c. Nothing to latch or reset: it is a
      * pure draw parameter, so a change lands on the next frame by itself -- which
@@ -183,9 +198,9 @@ static void render(const ui_render_ctx_t *ctx)
     geom_sum += t_rast - t_geom;
     rast_sum += t_end - t_rast;
     if (++n >= 60) {
-        ESP_LOGI("face_orb", "geometry %lld us, raster %lld us, %u dots",
+        ESP_LOGI("face_orb", "geometry %lld us, raster %lld us, %u dots, %u lines undrawn",
                  (long long)(geom_sum / n), (long long)(rast_sum / n),
-                 (unsigned)s_frame->count);
+                 (unsigned)s_frame->count, (unsigned)s_frame->line_count);
         geom_sum = rast_sum = 0;
         n = 0;
     }
