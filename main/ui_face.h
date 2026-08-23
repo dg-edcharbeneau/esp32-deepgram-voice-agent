@@ -126,6 +126,16 @@ typedef struct {
      * from a loud vowel.
      */
     float band_low, band_mid, band_high;
+
+    /*
+     * The ink colour the user asked for, 0xRRGGBB. 0xFFFFFF is the default and
+     * the orb rasteriser's exact identity.
+     *
+     * A face may ignore it, and the spectrum does: it colours its bands by
+     * frequency and by which half of the conversation is live, so one tint would
+     * destroy information rather than restyle it.
+     */
+    uint32_t tint_rgb;
 } ui_render_ctx_t;
 
 typedef struct {

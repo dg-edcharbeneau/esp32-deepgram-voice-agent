@@ -120,6 +120,16 @@ void ui_hide_qr(void);
 void ui_set_face(int index);
 
 /*
+ * Set the orb's ink colour by index into the orb_colors.c catalog.
+ *
+ * Same contract as ui_set_face: an index, not a colour, so this header stays
+ * free of both LVGL and the catalog. Out-of-range is logged and ignored. Applied
+ * on the next frame, not persisted across a reboot -- a local display setting,
+ * like the face and unlike the voice.
+ */
+void ui_set_orb_color(int index);
+
+/*
  * A window of accumulated measurements, for one telemetry line.
  *
  * WHY THE UI DOES NOT LOG THIS ITSELF

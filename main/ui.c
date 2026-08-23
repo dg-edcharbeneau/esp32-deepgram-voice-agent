@@ -48,6 +48,7 @@
 #include "esp_lv_adapter_input.h"
 
 #include "audio_io.h"
+#include "orb_colors.h"
 #include "ui.h"
 #include "ui_face.h"
 
@@ -188,6 +189,20 @@ static bool s_face_ready[FACE_COUNT];    /* has init() succeeded */
  * pattern as s_qr_payload, and for the same reason: bringing a face up touches
  * LVGL. -1 means nothing pending. */
 static volatile int s_face_want = -1;
+
+/*
+ * Requested colour index, -1 for nothing pending. Same handoff as s_face_want:
+ * written by whichever task takes the agent's function call, applied on the LVGL
+ * task before anything draws.
+ */
+static volatile int s_color_want = -1;
+
+/*
+ * The live ink colour. Initialised to white rather than left in .bss on purpose:
+ * zero is 0xRRGGBB black, and black ink on the black ground is an invisible orb
+ * -- which reads as a dead panel, not as a bug worth reporting.
+ */
+static uint32_t s_tint_rgb = 0xFFFFFFu;
 
 /* Latched on a switch, cleared when the telemetry is read. */
 static volatile bool s_face_changed;
@@ -510,6 +525,15 @@ void ui_set_face(int index)
         return;
     }
     s_face_want = index;
+}
+
+void ui_set_orb_color(int index)
+{
+    if (index < 0 || (size_t)index >= orb_colors_count()) {
+        ESP_LOGW(TAG, "EVT setcolor bad-index=%d", index);
+        return;
+    }
+    s_color_want = index;
 }
 
 /*
@@ -903,6 +927,24 @@ static void frame_timer_cb(lv_timer_t *timer)
         }
     }
 
+    /*
+     * And the colour, for the same reason and in the same place: resolved before
+     * anything draws, so a frame is never half one colour and half another.
+     *
+     * No clear needed, unlike a face switch -- every dot is repainted every frame,
+     * so the new colour simply lands on the next one.
+     */
+    int cwant = s_color_want;
+    if (cwant >= 0) {
+        s_color_want = -1;
+        uint32_t rgb = orb_colors_rgb((size_t)cwant);
+        if (rgb != s_tint_rgb) {
+            ESP_LOGI(TAG, "EVT color %s (0x%06" PRIX32 ")",
+                     orb_colors_name((size_t)cwant), rgb);
+            s_tint_rgb = rgb;
+        }
+    }
+
     update_qr();
 
     ui_behaviour_t beh = resolve_behaviour(idle, draw_start_us);
@@ -954,6 +996,9 @@ static void frame_timer_cb(lv_timer_t *timer)
         .band_mid = s_mid,
         .band_high = s_high,
         .behaviour = beh,
+        /* Load-bearing: this initializer is designated, so omitting the field
+         * would silently pass 0 -- black ink, an invisible orb. */
+        .tint_rgb = s_tint_rgb,
     };
 
     update_status_label(idle);

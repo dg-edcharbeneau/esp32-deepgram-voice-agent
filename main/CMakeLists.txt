@@ -15,6 +15,7 @@ idf_component_register(
         session_ctl.c
         voices.c
         faces.c
+        orb_colors.c
     INCLUDE_DIRS .
     REQUIRES
         esp_wifi

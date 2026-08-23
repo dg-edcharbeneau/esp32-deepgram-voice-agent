@@ -13,6 +13,7 @@
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "faces.h"
+#include "orb_colors.h"
 #include "ui.h"
 #include "voices.h"
 
@@ -316,6 +317,45 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+        if (strcmp(name->valuestring, "set_color") == 0) {
+            int index = -1;
+            const char *wanted = NULL;
+            cJSON *cargs = function_args(fn);
+            if (cargs != NULL) {
+                const cJSON *c = cJSON_GetObjectItemCaseSensitive(cargs, "color");
+                if (cJSON_IsString(c)) {
+                    wanted = c->valuestring;
+                    index = orb_colors_find(wanted);
+                }
+            }
+
+            if (index < 0) {
+                ESP_LOGW(TAG, "EVT setcolor req=\"%s\" -> unknown",
+                         (wanted != NULL) ? wanted : "");
+                snprintf(content, sizeof(content),
+                         "The orb has no '%s' colour. Ask which one they want.",
+                         (wanted != NULL) ? wanted : "");
+            } else {
+                /* No reload, like set_face and unlike set_voice: a local display
+                 * setting, in effect by the time this is spoken. */
+                ui_set_orb_color(index);
+                /* The requested string as well as the resolved colour: whether
+                 * the model routes an indirect phrasing here is the thing worth
+                 * testing, and that is only visible in what it actually sent. */
+                ESP_LOGI(TAG, "EVT setcolor req=\"%s\" -> %s", wanted,
+                         orb_colors_name((size_t)index));
+                /* "The orb is", not "the screen is": the colour applies whichever
+                 * face is up, so this stays true while the spectrum is showing. */
+                snprintf(content, sizeof(content),
+                         "The orb is now %s. Say so briefly.",
+                         orb_colors_name((size_t)index));
+            }
+            /* Unlike set_face above, which leaks these -- see the next commit. */
+            cJSON_Delete(cargs);
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
         if (strcmp(name->valuestring, "set_voice") != 0) {
             send_function_response(id->valuestring, name->valuestring, "Unknown function.");
             continue;
@@ -473,6 +513,41 @@ static esp_err_t send_settings(void)
     cJSON *frequired = cJSON_AddArrayToObject(fparams, "required");
     cJSON_AddItemToArray(frequired, cJSON_CreateString("face"));
     cJSON_AddItemToArray(functions, set_face);
+
+    /*
+     * Colour, same shape and the same reasoning as the face above: local to the
+     * device, so not Flux-gated, and the catalog goes in the description because
+     * JSON Schema has nowhere to hang a per-enum-value note.
+     *
+     * The description names the orb explicitly. The spectrum draws its own
+     * palette and ignores the setting, and saying so is what stops the model
+     * offering a colour change as the answer to "the bars look wrong".
+     */
+    char colors[512];
+    orb_colors_describe(colors, sizeof(colors));
+    /* 202 chars of prefix plus a full colors[], so 714 is the worst case; the
+     * three real blurbs come to 388. -Werror=format-truncation checks the worst
+     * case, not the actual, so this has to cover it. */
+    char color_desc[768];
+    snprintf(color_desc, sizeof(color_desc),
+             "Change the colour of the orb on the device's screen. Use when the "
+             "user asks for a different colour, or to go back to normal. Only the "
+             "orb is affected; the spectrum face keeps its own colours. "
+             "Colours: %s.",
+             colors);
+
+    cJSON *set_color = cJSON_CreateObject();
+    cJSON_AddStringToObject(set_color, "name", "set_color");
+    cJSON_AddStringToObject(set_color, "description", color_desc);
+    cJSON *cparams = cJSON_AddObjectToObject(set_color, "parameters");
+    cJSON_AddStringToObject(cparams, "type", "object");
+    cJSON *cprops = cJSON_AddObjectToObject(cparams, "properties");
+    cJSON *color_prop = cJSON_AddObjectToObject(cprops, "color");
+    cJSON_AddStringToObject(color_prop, "type", "string");
+    orb_colors_add_enum(color_prop, "enum");
+    cJSON *crequired = cJSON_AddArrayToObject(cparams, "required");
+    cJSON_AddItemToArray(crequired, cJSON_CreateString("color"));
+    cJSON_AddItemToArray(functions, set_color);
 
 #if CONFIG_SPEECH_STACK_FLUX
     /* The catalog goes in the description because JSON Schema has nowhere to
