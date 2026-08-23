@@ -206,6 +206,60 @@ static volatile int s_color_want = -1;
  */
 static uint32_t s_tint_rgb = 0xFFFFFFu;
 
+/* ---------------- display test ---------------- */
+
+/*
+ * A scripted walk through everything the orb can draw, one step per tap.
+ *
+ * The point is that most of these are otherwise almost impossible to look at:
+ * several last a second or two mid-turn, the connection rungs need a network
+ * failure to provoke, and THINKING cannot occur in a real session at all.
+ *
+ * ONLY ONE MODIFIER GETS A STEP, because only one of the four changes what the
+ * ORB draws. face_orb.c reads frozen and press_active; idle and stopped are the
+ * spectrum's, and on the orb they are already expressed as states -- idle is
+ * step 0 and stopped is what resolve_behaviour() turns into DISCONNECTED at
+ * step 7. Giving them steps of their own would add two poses indistinguishable
+ * from plain listening, which is worse than not covering them.
+ *
+ * press_active has no step either: every tap demonstrates it on the way past.
+ *
+ * So: the eight states, then frozen against LISTENING -- the state whose gesture
+ * responds most visibly to the microphone, which stays live throughout. See
+ * audio_io_capture_set_monitor().
+ */
+typedef struct {
+    ui_behaviour_t behaviour;
+    /* Kept though no step sets them, because they are what the SPECTRUM reads:
+     * if this test ever grows a spectrum leg, the steps are the place for them
+     * and the plumbing below already honours them. */
+    bool idle;
+    bool stopped;
+    bool frozen;
+    const char *label; /* literal: update_status_label() compares by pointer */
+} ui_test_step_t;
+
+static const ui_test_step_t s_test_steps[] = {
+    { UI_BEHAVIOUR_IDLE,         false, false, false, "idle" },
+    { UI_BEHAVIOUR_INITIALIZING, false, false, false, "initializing" },
+    { UI_BEHAVIOUR_LISTENING,    false, false, false, "listening" },
+    { UI_BEHAVIOUR_THINKING,     false, false, false, "thinking" },
+    { UI_BEHAVIOUR_SPEAKING,     false, false, false, "speaking" },
+    { UI_BEHAVIOUR_CONNECTING,   false, false, false, "connecting" },
+    { UI_BEHAVIOUR_BUFFERING,    false, false, false, "buffering" },
+    { UI_BEHAVIOUR_DISCONNECTED, false, false, false, "disconnected" },
+    { UI_BEHAVIOUR_LISTENING,    false, false, true,  "mod: frozen" },
+};
+#define TEST_STEP_COUNT (sizeof(s_test_steps) / sizeof(s_test_steps[0]))
+
+static volatile bool s_test_want;   /* set from the agent task */
+/* Both defined below select_face(), which they use. */
+static void test_enter(void);
+static void test_advance(void);
+static bool s_test_active;          /* LVGL task only, below here */
+static size_t s_test_step;
+static size_t s_test_face_restore;
+
 /* Latched on a switch, cleared when the telemetry is read. */
 static volatile bool s_face_changed;
 
@@ -538,6 +592,11 @@ void ui_set_orb_color(int index)
     s_color_want = index;
 }
 
+void ui_start_display_test(void)
+{
+    s_test_want = true;
+}
+
 /*
  * Decide what the display should be showing.
  *
@@ -549,6 +608,14 @@ void ui_set_orb_color(int index)
  */
 static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
 {
+    /*
+     * FIRST, and it has to be. The session is stopped for the whole test, so the
+     * s_stopped check below would swallow every step into DISCONNECTED.
+     */
+    if (s_test_active) {
+        return s_test_steps[s_test_step].behaviour;
+    }
+
     if (s_stopped) {
         return UI_BEHAVIOUR_DISCONNECTED;
     }
@@ -617,7 +684,11 @@ static void update_status_label(bool idle)
      * and therefore another render pass.
      */
     const char *want;
-    if (!s_session_live) {
+    if (s_test_active) {
+        /* Which state is on screen -- without it the test is a slideshow of
+         * unlabelled poses and you cannot tell a miss from a subtle one. */
+        want = s_test_steps[s_test_step].label;
+    } else if (!s_session_live) {
         want = s_status; /* connecting / error / disconnected */
     } else if (audio_io_playback_active()) {
         want = "speaking";
@@ -937,6 +1008,17 @@ static void frame_timer_cb(lv_timer_t *timer)
      * No clear needed, unlike a face switch -- every dot is repainted every frame,
      * so the new colour simply lands on the next one.
      */
+    /*
+     * The test claims the screen before any of the above matters, and before
+     * anything draws -- same reason the face switch is resolved here.
+     */
+    if (s_test_want) {
+        s_test_want = false;
+        if (!s_test_active) {
+            test_enter();
+        }
+    }
+
     int cwant = s_color_want;
     if (cwant >= 0) {
         s_color_want = -1;
@@ -988,10 +1070,15 @@ static void frame_timer_cb(lv_timer_t *timer)
         .canvas = canvas_obj,
         .frame = s_frame,
         .now_us = draw_start_us,
-        .idle = idle,
+        /*
+         * The modifiers come from the step during the test, not from the session.
+         * amp and the bands deliberately do NOT -- they arrive from the live
+         * microphone, which is the whole reason monitor mode exists.
+         */
+        .idle = s_test_active ? s_test_steps[s_test_step].idle : idle,
         .source = s_source,
-        .stopped = s_stopped,
-        .frozen = s_failed,
+        .stopped = s_test_active ? s_test_steps[s_test_step].stopped : s_stopped,
+        .frozen = s_test_active ? s_test_steps[s_test_step].frozen : s_failed,
         .press_active = s_press_active,
         .amp = update_amp(draw_start_us, idle),
         /* Read after update_amp() has slewed them for this frame. */
@@ -1064,7 +1151,13 @@ static void gesture_event_cb(lv_event_t *e)
         break;
 
     case LV_EVENT_SHORT_CLICKED:
-        if (s_press_in_button && s_gesture_handler) {
+        if (!s_press_in_button) {
+            break;
+        }
+        /* The one mode where a tap does not toggle the session. */
+        if (s_test_active) {
+            test_advance();
+        } else if (s_gesture_handler) {
             s_gesture_handler(UI_TAP);
         }
         break;
@@ -1208,6 +1301,58 @@ static esp_err_t select_face(size_t idx)
     s_face = face;
     s_face_index = idx;
     return ESP_OK;
+}
+
+/* ---------------- display test: enter, advance, leave ---------------- */
+
+/* Find the orb's slot rather than assuming it. faces.c calls the order a
+ * contract, but that contract is between faces.c and the schema; nothing says
+ * this file gets to hardcode which slot the orb is in. */
+static size_t orb_slot(void)
+{
+    for (size_t i = 0; i < FACE_COUNT; i++) {
+        if (s_faces[i] == &ui_face_orb) {
+            return i;
+        }
+    }
+    return s_face_index; /* no orb built in: stay put rather than mis-index */
+}
+
+static void test_enter(void)
+{
+    s_test_face_restore = s_face_index;
+    s_test_step = 0;
+    s_test_active = true;
+
+    size_t orb = orb_slot();
+    if (orb != s_face_index) {
+        select_face(orb);
+    }
+    ESP_LOGI(TAG, "EVT test enter steps=%u face-restore=%s",
+             (unsigned)TEST_STEP_COUNT, s_faces[s_test_face_restore]->name);
+    ESP_LOGI(TAG, "EVT test step=0/%u state=%s", (unsigned)TEST_STEP_COUNT,
+             s_test_steps[0].label);
+}
+
+/* LVGL task, from the touch callback. Advances, or ends the test and hands the
+ * session back to whoever owns it. */
+static void test_advance(void)
+{
+    s_test_step++;
+    if (s_test_step < TEST_STEP_COUNT) {
+        ESP_LOGI(TAG, "EVT test step=%u/%u state=%s", (unsigned)s_test_step,
+                 (unsigned)TEST_STEP_COUNT, s_test_steps[s_test_step].label);
+        return;
+    }
+
+    s_test_active = false;
+    if (s_test_face_restore != s_face_index) {
+        select_face(s_test_face_restore);
+    }
+    ESP_LOGI(TAG, "EVT test done");
+    if (s_gesture_handler) {
+        s_gesture_handler(UI_TEST_DONE);
+    }
 }
 
 static esp_err_t build_ui(void)

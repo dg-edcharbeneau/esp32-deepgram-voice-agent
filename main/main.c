@@ -191,6 +191,17 @@ static void on_gesture(ui_gesture_t gesture)
         ESP_LOGI(TAG, "EVT hold");
         session_ctl_request_restart();
         break;
+
+    case UI_TEST_DONE:
+        /*
+         * Undo the display test's two side effects, in the reverse order they
+         * were applied: the microphone stops feeding the display, and a fresh
+         * session replaces the one the test closed.
+         */
+        ESP_LOGI(TAG, "EVT test-done, restarting session");
+        audio_io_capture_set_monitor(false);
+        session_ctl_request_start();
+        break;
     }
 }
 

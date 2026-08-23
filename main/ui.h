@@ -34,6 +34,13 @@ esp_err_t ui_start(void);
 typedef enum {
     UI_TAP,  /* short press: toggle */
     UI_HOLD, /* long press: force restart */
+
+    /*
+     * The display test reached its last step and has already put the previous
+     * face back. Emitted rather than acted on here so ui.c stays free of any
+     * session header, exactly as tap and hold do.
+     */
+    UI_TEST_DONE,
 } ui_gesture_t;
 
 /*
@@ -142,6 +149,21 @@ void ui_set_face(int index);
  * like the face and unlike the voice.
  */
 void ui_set_orb_color(int index);
+
+/*
+ * Hand the screen over to the display test: every orb state and modifier, one per
+ * tap, and nothing else on screen.
+ *
+ * Taps stop reaching the gesture handler for the duration -- they advance the
+ * sequence instead -- so this is the only mode in which a tap does not toggle the
+ * session. Forces the orb, since the sequence means nothing on the spectrum, and
+ * puts the previous face back at the end.
+ *
+ * The CALLER owns the session and the microphone. This function draws; it does
+ * not stop the session and does not start one at the end. It emits UI_TEST_DONE
+ * and leaves that to whoever owns it.
+ */
+void ui_start_display_test(void);
 
 /*
  * A window of accumulated measurements, for one telemetry line.
