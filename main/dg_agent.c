@@ -12,6 +12,8 @@
 
 #include "audio_io.h"
 #include "dg_agent.h"
+#include "faces.h"
+#include "ui.h"
 #include "voices.h"
 
 static const char *TAG = "dg_agent";
@@ -276,6 +278,44 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+        if (strcmp(name->valuestring, "set_face") == 0) {
+            int index = -1;
+            const char *wanted = NULL;
+            cJSON *fargs = function_args(fn);
+            if (fargs != NULL) {
+                const cJSON *f = cJSON_GetObjectItemCaseSensitive(fargs, "face");
+                if (cJSON_IsString(f)) {
+                    wanted = f->valuestring;
+                    index = faces_find(wanted);
+                }
+            }
+
+            if (index < 0) {
+                ESP_LOGW(TAG, "EVT setface req=\"%s\" -> unknown",
+                         (wanted != NULL) ? wanted : "");
+                snprintf(content, sizeof(content),
+                         "There is no '%s' face. Ask which one they want.",
+                         (wanted != NULL) ? wanted : "");
+            } else {
+                /*
+                 * No reload: the face is a local display setting, already in
+                 * effect by the time this is spoken. Phrased as done, not as
+                 * about to happen -- the opposite of set_voice below.
+                 */
+                ui_set_face(index);
+                /* The requested string, not just the resolved face: whether the
+                 * model picks this function from an indirect phrasing is the
+                 * thing being tested, and that is only visible in what it sent. */
+                ESP_LOGI(TAG, "EVT setface req=\"%s\" -> %s", wanted,
+                         faces_name((size_t)index));
+                snprintf(content, sizeof(content),
+                         "The screen is now showing the %s. Say so briefly.",
+                         faces_name((size_t)index));
+            }
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
         if (strcmp(name->valuestring, "set_voice") != 0) {
             send_function_response(id->valuestring, name->valuestring, "Unknown function.");
             continue;
@@ -406,6 +446,34 @@ static esp_err_t send_settings(void)
     cJSON_AddItemToArray(vrequired, cJSON_CreateString("delta"));
     cJSON_AddItemToArray(functions, adjust_volume);
 
+    /*
+     * Not Flux-gated either: the display is local and works on either speech
+     * stack. The catalog goes in the description for the same reason set_voice
+     * does it -- JSON Schema has nowhere to hang a per-enum-value note, and
+     * without one the model is choosing between two bare nouns.
+     */
+    char faces[512];
+    faces_describe(faces, sizeof(faces));
+    char face_desc[700];
+    snprintf(face_desc, sizeof(face_desc),
+             "Change what the device's screen shows. Use when the user asks for a "
+             "different look, mentions the display, or names one of these. "
+             "Faces: %s.",
+             faces);
+
+    cJSON *set_face = cJSON_CreateObject();
+    cJSON_AddStringToObject(set_face, "name", "set_face");
+    cJSON_AddStringToObject(set_face, "description", face_desc);
+    cJSON *fparams = cJSON_AddObjectToObject(set_face, "parameters");
+    cJSON_AddStringToObject(fparams, "type", "object");
+    cJSON *fprops = cJSON_AddObjectToObject(fparams, "properties");
+    cJSON *face_prop = cJSON_AddObjectToObject(fprops, "face");
+    cJSON_AddStringToObject(face_prop, "type", "string");
+    faces_add_enum(face_prop, "enum");
+    cJSON *frequired = cJSON_AddArrayToObject(fparams, "required");
+    cJSON_AddItemToArray(frequired, cJSON_CreateString("face"));
+    cJSON_AddItemToArray(functions, set_face);
+
 #if CONFIG_SPEECH_STACK_FLUX
     /* The catalog goes in the description because JSON Schema has nowhere to
      * hang a per-enum-value note, and without it the model is choosing from
@@ -519,6 +587,11 @@ static void handle_json(const char *json, int len)
         }
 
     } else if (strcmp(t, "AgentThinking") == 0) {
+        /* No audio accompanies thinking, so this message is the ONLY way the
+         * display can know about it -- see resolve_behaviour() in ui.c. */
+        if (s_cb.on_thinking) {
+            s_cb.on_thinking(s_cb.ctx);
+        }
         ESP_LOGD(TAG, "agent thinking");
 
     } else if (strcmp(t, "AgentAudioDone") == 0) {

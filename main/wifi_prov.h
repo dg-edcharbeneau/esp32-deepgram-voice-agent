@@ -36,7 +36,7 @@
  * The AP's name, e.g. "dg-agent-A1B2" -- derived from the SoftAP MAC, so it is
  * stable for a given board and distinct between two of them on one bench.
  *
- * Static storage, so it is safe to hand to spectrum_ui_set_status(), and usable
+ * Static storage, so it is safe to hand to ui_set_status(), and usable
  * before wifi_prov_start() has run.
  */
 const char *wifi_prov_ap_name(void);

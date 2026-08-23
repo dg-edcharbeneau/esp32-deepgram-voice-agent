@@ -79,6 +79,14 @@ typedef struct {
      */
     void (*on_reload_required)(void *ctx);
 
+    /*
+     * The agent has begun composing a reply. Nothing is spoken and no audio
+     * flows during it, so unlike speaking and listening this cannot be inferred
+     * from the audio path -- if the display is to show it at all, it has to come
+     * from here.
+     */
+    void (*on_thinking)(void *ctx);
+
     void *ctx;
 } dg_agent_callbacks_t;
 

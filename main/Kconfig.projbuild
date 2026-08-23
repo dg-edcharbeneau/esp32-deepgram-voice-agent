@@ -202,4 +202,111 @@ menu "Deepgram Agent Device"
             cost is that barge-in stops working -- you cannot interrupt the
             agent. Turn this off once real echo cancellation is in place.
 
+    config SESSION_IDLE_TIMEOUT_S
+        int "Stop the session after this many idle seconds (0 = never)"
+        default 15
+        range 0 3600
+        help
+            The device uplinks 16 kHz mono for as long as a session is open --
+            roughly 32 kB/s -- and reconnects on its own if the socket drops. A
+            board left powered on a desk therefore streams, and bills,
+            indefinitely. This stops the session once nothing has happened for
+            this long; tapping the screen or the BOOT button starts it again.
+
+            The trade is reconnect latency on the next word. Measured on this
+            board, coming back up takes 1.1-6.0 s of CONNECTING plus 0.5 s of
+            BUFFERING, so a short timeout costs a noticeable wait before the
+            device can hear you.
+
+            Activity means an end-of-turn, Deepgram reporting the user started
+            speaking, or the speaker being busy -- not the local microphone level,
+            which would tie session lifetime to whether the display came up.
+
+            0 disables the timeout and restores the old always-on behaviour.
+
+    config AUDIO_CAPTURE_ALWAYS
+        bool "Keep visualizing the microphone while the session is stopped"
+        default n
+        help
+            BENCH TOOL. Leave this off for anything you intend to use.
+
+            Normally the capture tap is gated with the session, ahead of both the
+            display and the upstream sink, because a display still dancing to
+            background noise reads as broken rather than as stopped.
+
+            Turning it on removes that gate, which is the only practical way to
+            calibrate the microphone: with a live session, speaking makes the
+            agent answer, and CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS then deafens the
+            mic for most of the measurement. In one acoustic session ten of twelve
+            recorded segments were the agent's own voice and only two were the
+            microphone. With this on you can stop the session -- so nothing can
+            talk back -- and still read microphone levels off the telemetry.
+
+    config UI_TELEMETRY_MS
+        int "Telemetry line interval (ms)"
+        default 1000
+        range 200 60000
+        help
+            How often main's loop emits the consolidated TLM line: one
+            machine-parseable key=value record of face, behaviour, audio levels,
+            frame timing and heap.
+
+            It is emitted from the main task rather than the UI on purpose --
+            console writes block, and a 200 byte line at 115200 baud is most of a
+            frame, so logging it from the frame timer would corrupt the timings it
+            reports.
+
+            1000 ms gives several samples inside a spoken word. Raise it to reduce
+            log volume for long unattended runs; note that a window shorter than a
+            frame period will report frames=0.
+
+    choice UI_DEFAULT_FACE_CHOICE
+        prompt "Default display face"
+        default UI_DEFAULT_FACE_ORB
+        help
+            Which visual the device boots with. Either can be switched to at
+            runtime by asking the agent out loud, so this only picks the default.
+
+        config UI_DEFAULT_FACE_ORB
+            bool "Orb -- dotted shell that reacts to the conversation"
+        config UI_DEFAULT_FACE_SPECTRUM
+            bool "Spectrum -- radial FFT analyser"
+    endchoice
+
+    config UI_DEFAULT_FACE
+        int
+        default 0 if UI_DEFAULT_FACE_ORB
+        default 1 if UI_DEFAULT_FACE_SPECTRUM
+        help
+            Index into the face table in ui.c. Set by the choice above.
+
+    config ORB_AMP_GAIN_MIC
+        int "Display level gain, microphone path (percent)"
+        default 600
+        range 50 3000
+        help
+            Scales microphone RMS into the 0-1 level the display animates with.
+            Percent, so 600 means 6.0x.
+
+            SEPARATE from the agent gain below because the two signals are not
+            comparable: measured on this board, conversational speech peaks
+            around 0.095 RMS at the mic while agent playback at full volume
+            reaches 0.31 -- a factor of three. One shared gain either pins the
+            agent at its ceiling or leaves the microphone barely moving.
+
+            Raise this if speaking normally does not fill the display; lower it
+            if room noise animates it while nobody is talking.
+
+    config ORB_AMP_GAIN_AGENT
+        int "Display level gain, agent playback path (percent)"
+        default 200
+        range 50 3000
+        help
+            As above, for audio on its way to the speaker. Lower than the
+            microphone gain because playback is already amplified.
+
+            At the reference's provisional 3.2x this path saturated at 0.994,
+            which pins the speaking gesture at its maximum for entire sentences
+            and throws away every bit of expression it has.
+
 endmenu
