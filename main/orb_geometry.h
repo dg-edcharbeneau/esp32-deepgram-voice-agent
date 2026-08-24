@@ -38,15 +38,16 @@ typedef enum {
     /*
      * NOT FROM THE REFERENCE -- the only behaviour here that is not.
      *
-     * The dim disconnected shell, with light pulses running from the equator out
-     * to both poles, their brightness and swell driven by the level of the audio
-     * being played. It replaced ribbon on SPEAKING, which did not sit with the
-     * rest of the family.
+     * The dim disconnected shell used as a level meter: rings illuminate outward
+     * from the equator to a distance set by the level of the audio playing, with a
+     * brighter cap at the leading edge, and retract as it falls. A spectrum
+     * analyser bar wrapped onto a sphere.
      *
      * It has no upstream, so host/run.sh CANNOT check it -- there is nothing to
-     * diff against. That makes it the one piece of the shell verified by eye.
+     * diff against. It is verified by dumping alpha per ring across level, which
+     * is what caught the two aliasing faults its tuning has already had.
      */
-    ORB_SPEAKING_PULSE = 8,
+    ORB_SPEAKING_FILL = 8,
 
     ORB_BEHAVIOUR_COUNT = 9,
 } orb_behaviour_t;

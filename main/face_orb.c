@@ -91,7 +91,7 @@ static orb_mode_t mode_for(ui_behaviour_t b)
     /*
      * SPEAKING IS BACK ON THE SHELL, and ribbon is detached.
      *
-     * It gets ORB_SPEAKING_PULSE, which is the disconnected shell with light
+     * It gets ORB_SPEAKING_FILL, which is the disconnected shell with light
      * pulses running from the equator out, driven by the playback level. Ribbon
      * did not sit with the rest of the family -- a flat band among dotted shells.
      *
@@ -125,8 +125,8 @@ static orb_behaviour_t to_orb(ui_behaviour_t b)
     case UI_BEHAVIOUR_LISTENING:    return ORB_LISTENING;
     case UI_BEHAVIOUR_THINKING:     return ORB_THINKING;
     /* Not ORB_SPEAKING: that is the reference's outward-wavefront pose, which the
-     * shell keeps and nothing now selects. See ORB_SPEAKING_PULSE. */
-    case UI_BEHAVIOUR_SPEAKING:     return ORB_SPEAKING_PULSE;
+     * shell keeps and nothing now selects. See ORB_SPEAKING_FILL. */
+    case UI_BEHAVIOUR_SPEAKING:     return ORB_SPEAKING_FILL;
     case UI_BEHAVIOUR_CONNECTING:   return ORB_CONNECTING;
     case UI_BEHAVIOUR_BUFFERING:    return ORB_BUFFERING;
     case UI_BEHAVIOUR_DISCONNECTED: return ORB_DISCONNECTED;

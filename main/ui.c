@@ -255,7 +255,7 @@ static const ui_test_step_t s_test_steps[] = {
     { UI_BEHAVIOUR_INITIALIZING, false, false, false, "initializing (shell)" },
     { UI_BEHAVIOUR_LISTENING,    false, false, false, "listening (wave)" },
     { UI_BEHAVIOUR_THINKING,     false, false, false, "thinking (rubik)" },
-    { UI_BEHAVIOUR_SPEAKING,     false, false, false, "speaking (pulse)" },
+    { UI_BEHAVIOUR_SPEAKING,     false, false, false, "speaking (fill)" },
     { UI_BEHAVIOUR_CONNECTING,   false, false, false, "connecting (web)" },
     { UI_BEHAVIOUR_BUFFERING,    false, false, false, "buffering (braid)" },
     { UI_BEHAVIOUR_DISCONNECTED, false, false, false, "disconnected (shell)" },

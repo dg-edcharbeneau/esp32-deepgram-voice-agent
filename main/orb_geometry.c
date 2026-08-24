@@ -312,35 +312,32 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 #define SIGNAL_PERIOD 5.0f
 
 /*
- * The speaking pulse. Spatial frequency in half-shells, rate in pulses a second,
- * and the two gains amplitude drives.
+ * The speaking level meter.
  *
- * PULSE_RATE and PULSE_WAVES are fixed; only the gains see `amp`.
+ * FILL_GAIN maps the audio level to how far out the light reaches, 0 at the
+ * equator and 1 at either pole. Measured agent playback runs a mean near 0.35 and
+ * peaks around 0.65, so 1.5 puts ordinary speech at about half the shell and a
+ * peak at nearly all of it -- a meter with headroom rather than one that pegs.
  *
- * 0.75 WAVES, AND THE RING COUNT IS WHY. There are nine rings between equator and
- * pole, which is the sampling grid -- and spike_pulse is a narrow lobe, sin to the
- * fifth. At two waves the crests fell between rings and the shell aliased into
- * alternating stripes with no travel in them at all; dumped per ring it read
- * `...#...----...#...`. Under one wave there is a single crest in flight per
- * hemisphere, which is what "from the equator out" actually looks like:
+ * EDGE_SOFT is how abruptly the fill ends, in the same units. About one and a
+ * half rings, enough that the boundary is not a hard band.
  *
- *   t=0.00  .....##-..-##.....   born near the equator
- *   t=0.16  ..-##-......-##-..   travelling out
- *   t=0.32  -##............##-   nearing the poles
- *   t=0.48  +................+   fading
- *   t=0.64  .......-##-.......   the next one
+ * TIP_W IS SET BY THE RING SPACING, not by taste. Rings sit 0.118 apart in these
+ * units, and a cap narrower than that falls BETWEEN rings for most fill levels --
+ * at 0.12 the bright edge simply vanished at all but one level. 0.20 always
+ * catches a ring. It is the same aliasing that made the first attempt at this
+ * behaviour, a travelling crest, read as static stripes.
  *
- * Rate follows from that: 0.75/1.2 is a pulse every ~0.6 s, slow enough to follow
- * and quick enough to feel answerable to speech.
- *
- * The alpha gain is large against the 0.14 floor on purpose. Measured agent
- * playback runs a mean near 0.35, so a crest lands around 0.70 -- five times the
- * resting shell, which is what makes this read as light rather than as movement.
+ * The gate exists so silence is the disconnected shell exactly, rather than the
+ * shell plus a permanent glow at the equator where the cap sits at fill zero.
  */
-#define PULSE_WAVES 0.75f
-#define PULSE_RATE 1.2f
-#define PULSE_ALPHA_GAIN 1.6f
-#define PULSE_CREST_GAIN 0.45f
+#define FILL_GAIN 1.5f
+#define EDGE_SOFT 0.18f
+#define TIP_W 0.20f
+#define FILL_ALPHA_GAIN 0.55f
+#define TIP_ALPHA_GAIN 0.40f
+#define FILL_CREST_GAIN 0.40f
+#define FILL_GATE 0.08f
 
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
@@ -490,33 +487,54 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
         return;
     }
 
-    case ORB_SPEAKING_PULSE: {
+    case ORB_SPEAKING_FILL: {
         /*
-         * The agent talking: the disconnected shell lit from within.
+         * The agent talking: the disconnected shell as a level meter.
          *
-         * Built ON disconnected rather than beside it -- same drawn-in radius,
-         * same 0.14 floor -- so a turn ending is the pulses fading out of a shell
-         * that was already there, not one object replacing another.
+         * Rings ILLUMINATE OUTWARD from the equator rather than a crest
+         * travelling through them. How far the light reaches is the audio level,
+         * so it extends while the agent speaks and retracts as it falls -- a
+         * spectrum analyser bar wrapped onto the sphere, with a brighter cap at
+         * the leading edge the way an analyser marks its peak.
          *
-         * PULSES RUN FROM THE EQUATOR OUT. `from_eq` is 0 at the equator and 1 at
-         * either pole, and the phase carries a fixed spatial frequency against
-         * time, so a crest appears at the middle and travels to both ends at
-         * once. Symmetric on purpose: a wave with a direction would imply the
-         * sound came from somewhere, and it comes from the whole object.
+         * Built ON disconnected -- same drawn-in radius, same 0.14 floor -- so a
+         * turn ending is the light withdrawing from a shell that was already
+         * there rather than one object replacing another.
          *
-         * Amplitude scales DEPTH, never rate -- rule 5. So the pulses always run
-         * at the same tempo and simply are not visible when nothing is playing,
-         * which is what leaves the state legible as "quiet" rather than "stopped".
+         * Symmetric about the equator on purpose: a fill with a direction would
+         * imply the sound came from somewhere, and it comes from the whole object.
+         *
+         * A PURE FUNCTION, like every other behaviour here. An analyser's falling
+         * peak marker would need memory across frames, and the shell's contract is
+         * that a dropped frame costs nothing and there is no state to resync. The
+         * retraction comes from ui.c's own fast-attack slow-release on `amp`,
+         * which is where that shaping belongs.
          */
         float from_eq = fabsf(ring_t - 0.5f) * 2.0f;
-        float pulse = spike_pulse(TAU * (from_eq * PULSE_WAVES - t * PULSE_RATE));
 
-        /* The one term that survives silence: the shell has to be there to be lit. */
+        float fill = amp * FILL_GAIN;
+        if (fill > 1.0f) {
+            fill = 1.0f;
+        }
+        /* Off entirely below a whisper, so silence is exactly the dim shell. */
+        float gate = fill / FILL_GATE;
+        if (gate > 1.0f) {
+            gate = 1.0f;
+        }
+
+        float lit = (fill - from_eq) / EDGE_SOFT;
+        if (lit < 0.0f) lit = 0.0f;
+        else if (lit > 1.0f) lit = 1.0f;
+
+        /* The cap: a soft peak sitting exactly at the fill boundary. */
+        float td = (fill - from_eq) / TIP_W;
+        float tip = expf(-td * td);
+
         out[RS_RF] = 0.8f + 0.012f * sinf(t * 0.5f + ri * 0.3f);
         /* Rule 4: a crest makes a dot bigger AND darker at the same instant. */
-        out[RS_CREST] = PULSE_CREST_GAIN * amp * pulse;
+        out[RS_CREST] = FILL_CREST_GAIN * lit * gate;
         out[RS_SHEAR] = 0.0f;
-        float a = 0.14f + PULSE_ALPHA_GAIN * amp * pulse;
+        float a = 0.14f + (FILL_ALPHA_GAIN * lit + TIP_ALPHA_GAIN * tip) * gate;
         out[RS_ALPHA] = (a > 1.0f) ? 1.0f : a;
         return;
     }
