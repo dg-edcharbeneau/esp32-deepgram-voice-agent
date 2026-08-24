@@ -55,18 +55,156 @@ static int64_t s_t0_us;
  * ui_behaviour_t and orb_behaviour_t are separate on purpose: one is the public
  * vocabulary, the other is the shell's. This is the only place they meet.
  *
- * ORB_THINKING has no entry, and that is deliberate. The shell's calm
- * ring-indexed roll is ported and parity-verified, but nothing can select it:
- * AgentThinking never arrived in any logged session, so the UI-level state was
- * removed. The geometry keeps it because it is a faithful port the harness tests
- * -- if the message ever appears, re-wiring is one line here and one in ui.h.
+ * ORB_THINKING is mapped but unreachable in a real session: resolve_behaviour()
+ * never produces UI_BEHAVIOUR_THINKING, because AgentThinking has not arrived in
+ * any logged session. The mapping exists so the display test can show the pose,
+ * which until now was parity-verified geometry nobody had seen render.
  */
+/*
+ * Which ported mode a state uses, or the voice shell.
+ *
+ * The five that map are the states with a distinct thing to say. IDLE,
+ * INITIALIZING and DISCONNECTED stay on the shell: they are the resting and
+ * connecting poses the shell was written for, and its ladder is what makes
+ * session progress legible without a label.
+ *
+ * SPEAKING and LISTENING are not symmetric and must not be confused. SPEAKING is
+ * the AGENT talking -- Deepgram's synthesis coming out of the speaker -- and
+ * LISTENING is the USER talking, with the microphone open for transcription. So
+ * ribbon is driven by playback level and wave by microphone level, which ui.c
+ * already resolves into ctx->amp as whichever direction is live, at its own gain.
+ */
+typedef enum {
+    MODE_SHELL = 0, /* the voice shell, with its own behaviour blending */
+    MODE_WAVE,
+    MODE_RUBIK,
+    MODE_RIBBON,
+    MODE_BRAID,
+    MODE_WEB,
+} orb_mode_t;
+
+static orb_mode_t mode_for(ui_behaviour_t b)
+{
+    switch (b) {
+    case UI_BEHAVIOUR_LISTENING:  return MODE_WAVE;   /* the user talking */
+    case UI_BEHAVIOUR_THINKING:   return MODE_RUBIK;
+    /*
+     * SPEAKING IS BACK ON THE SHELL, and ribbon is detached.
+     *
+     * It gets ORB_SPEAKING_FILL, which is the disconnected shell with light
+     * pulses running from the equator out, driven by the playback level. Ribbon
+     * did not sit with the rest of the family -- a flat band among dotted shells.
+     *
+     * A side benefit of it being a shell behaviour rather than a mode: SPEAKING
+     * regains the 280 ms crossfade, because it now shares a lattice with the
+     * states either side of it. Only the four remaining modes cut.
+     */
+    case UI_BEHAVIOUR_CONNECTING: return MODE_WEB;
+    case UI_BEHAVIOUR_BUFFERING:  return MODE_BRAID;
+    default:                      return MODE_SHELL;
+    }
+}
+
+/* How long a cross-mode fade lasts. The shell's own BLEND_MS for consistency:
+ * a viewer should not be able to tell which kind of transition they are watching. */
+#define MODE_BLEND_MS BLEND_MS
+
+/*
+ * The outgoing animation during a cross-mode fade, and the second frame it needs.
+ *
+ * PSRAM, like the primary frame and for the same reason -- 32 kB of dot list has
+ * no business in internal RAM. Allocated on first use rather than at init, so a
+ * build with the crossfade disabled never pays for it.
+ */
+static orb_frame_t *s_frame_b;
+
+static const char *mode_name(orb_mode_t m)
+{
+    switch (m) {
+    case MODE_WAVE:   return "wave";
+    case MODE_RUBIK:  return "rubik";
+    case MODE_RIBBON: return "ribbon";
+    case MODE_BRAID:  return "braid";
+    case MODE_WEB:    return "web";
+    case MODE_SHELL:
+    default:          return "shell";
+    }
+}
+
+/* Build one animation into `out`. The shell arm takes the behaviour blend; every
+ * mode ignores from/to/mix, having no behaviours to blend. */
+static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
+                       const orb_bands_t *bands,
+                       orb_behaviour_t from, orb_behaviour_t to, float mix)
+{
+    switch (mode) {
+    /* wave takes the microphone level: LISTENING is the user talking. */
+    case MODE_WAVE:
+        orb_build_wave(out, t, amp);
+        orb_wave_ink(out, amp); /* local pass; see orb_geometry.h */
+        break;
+    case MODE_RUBIK:  orb_build_rubik(out, t); break;
+    /*
+     * Kept, and currently unreachable: no state maps to MODE_RIBBON since
+     * SPEAKING moved to the shell's fill. The port stays because it is
+     * parity-verified and cheap to point a state back at.
+     */
+    case MODE_RIBBON: orb_build_ribbon(out, t, amp); break;
+    case MODE_BRAID:  orb_build_braid(out, t); break;
+    case MODE_WEB:    orb_build_web(out, t); break;
+    case MODE_SHELL:
+    default:
+        orb_build(out, t, from, to, mix, amp, bands);
+        break;
+    }
+}
+
+/* Fade a whole animation by scaling every mark's alpha. Lines included: web's
+ * edges have to leave with its nodes, not after them. */
+static void scale_alpha(orb_frame_t *f, float k)
+{
+    for (size_t i = 0; i < f->count; i++) {
+        f->dots[i].a *= k;
+    }
+    for (size_t i = 0; i < f->line_count; i++) {
+        f->lines[i].a *= k;
+    }
+}
+
+/*
+ * Concatenate `b` into `a`, dropping marks the fade has taken below the cull
+ * threshold -- most of a frame, late in a transition, so this is what keeps the
+ * doubled cost from being a doubled cost for the whole 280 ms.
+ *
+ * No re-sort. The rasteriser buckets by row band rather than trusting draw order,
+ * and both halves arrive already sorted, so an interleaved pair is drawn correctly
+ * without paying for a second qsort over 840 dots.
+ */
+static void append_frame(orb_frame_t *a, const orb_frame_t *b)
+{
+    for (size_t i = 0; i < b->count && a->count < ORB_MAX_DOTS; i++) {
+        if (b->dots[i].a < ORB_ALPHA_CULL) {
+            continue;
+        }
+        a->dots[a->count++] = b->dots[i];
+    }
+    for (size_t i = 0; i < b->line_count && a->line_count < ORB_MAX_LINES; i++) {
+        if (b->lines[i].a < ORB_ALPHA_CULL) {
+            continue;
+        }
+        a->lines[a->line_count++] = b->lines[i];
+    }
+}
+
 static orb_behaviour_t to_orb(ui_behaviour_t b)
 {
     switch (b) {
     case UI_BEHAVIOUR_INITIALIZING: return ORB_INITIALIZING;
     case UI_BEHAVIOUR_LISTENING:    return ORB_LISTENING;
-    case UI_BEHAVIOUR_SPEAKING:     return ORB_SPEAKING;
+    case UI_BEHAVIOUR_THINKING:     return ORB_THINKING;
+    /* Not ORB_SPEAKING: that is the reference's outward-wavefront pose, which the
+     * shell keeps and nothing now selects. See ORB_SPEAKING_FILL. */
+    case UI_BEHAVIOUR_SPEAKING:     return ORB_SPEAKING_FILL;
     case UI_BEHAVIOUR_CONNECTING:   return ORB_CONNECTING;
     case UI_BEHAVIOUR_BUFFERING:    return ORB_BUFFERING;
     case UI_BEHAVIOUR_DISCONNECTED: return ORB_DISCONNECTED;
@@ -170,7 +308,77 @@ static void render(const ui_render_ctx_t *ctx)
         .mid = ctx->band_mid,
         .high = ctx->band_high,
     };
-    orb_build(s_frame, t, s_from, s_to, mix, amp, &bands);
+    /* The state picks the mode. Nothing overrides it: the display test scripts
+     * the STATE, which is the same path a session takes. */
+    orb_mode_t mode = mode_for(ctx->behaviour);
+
+    /*
+     * A CHANGE INVOLVING A MODE IS A CUT, not a crossfade.
+     *
+     * orb_build blends two shell behaviours per RING, which works because they
+     * share a lattice and every value they produce is a pose on it. Two different
+     * modes share nothing -- different lattices, different dot counts, and in
+     * web's case lines as well -- so there is no pose between them to interpolate
+     * towards. Blending them would mean building both frames and fading on alpha,
+     * which doubles the geometry for the length of a transition; ribbon is ~15 ms
+     * and web ~25 ms, so that is not obviously affordable.
+     *
+     * Cuts for now, logged once each so what a turn actually looks like is on the
+     * record rather than a matter of opinion. The shell keeps its 280 ms blend
+     * between its own behaviours.
+     */
+    static orb_mode_t s_mode_from = MODE_SHELL, s_mode_to = MODE_SHELL;
+    static int64_t s_mode_blend_us;
+    /* What the outgoing shell was showing, so it can be held while it fades. */
+    static orb_behaviour_t s_mode_from_beh = ORB_DISCONNECTED;
+
+    if (mode != s_mode_to) {
+        /* From where we were HEADING, not from the blend showing right now --
+         * the same choice the shell's own behaviour blend makes above. */
+        s_mode_from = s_mode_to;
+        s_mode_from_beh = s_from;
+        s_mode_to = mode;
+        s_mode_blend_us = ctx->now_us;
+        ESP_LOGI("face_orb", "EVT mode %s->%s", mode_name(s_mode_from),
+                 mode_name(mode));
+    }
+
+    float mode_mix = 1.0f;
+    if (s_mode_from != s_mode_to) {
+        float el_ms = (float)(ctx->now_us - s_mode_blend_us) / 1000.0f;
+        mode_mix = el_ms / MODE_BLEND_MS;
+        if (mode_mix >= 1.0f) {
+            mode_mix = 1.0f;
+            s_mode_from = s_mode_to; /* landed; stop paying for the second build */
+        }
+    }
+
+    if (s_mode_from != s_mode_to && s_frame_b == NULL) {
+        /* First transition of the boot pays for the second frame. */
+        s_frame_b = heap_caps_malloc(sizeof(*s_frame_b), MALLOC_CAP_SPIRAM);
+    }
+
+    build_mode(mode, s_frame, t, amp, &bands, s_from, s_to, mix);
+
+    /*
+     * A cross-mode fade: draw BOTH animations and fade on alpha.
+     *
+     * Two modes cannot be interpolated the way two shell behaviours can -- there
+     * is no pose between a lattice and a braid -- so the frame carries both dot
+     * lists at complementary alpha and the eye does the blending. Costs a second
+     * build for the seven or so frames a transition lasts.
+     *
+     * The outgoing side is built at a FIXED behaviour, captured when the mode
+     * changed. Letting it follow ctx->behaviour would have it animating towards
+     * the state it is being replaced by, which is the one thing it must not do.
+     */
+    if (s_mode_from != s_mode_to && s_frame_b != NULL) {
+        build_mode(s_mode_from, s_frame_b, t, amp, &bands,
+                   s_mode_from_beh, s_mode_from_beh, 1.0f);
+        scale_alpha(s_frame, mode_mix);
+        scale_alpha(s_frame_b, 1.0f - mode_mix);
+        append_frame(s_frame, s_frame_b);
+    }
     int64_t t_rast = esp_timer_get_time();
     /* Colour is the user's, resolved by ui.c. Nothing to latch or reset: it is a
      * pure draw parameter, so a change lands on the next frame by itself -- which
@@ -183,9 +391,9 @@ static void render(const ui_render_ctx_t *ctx)
     geom_sum += t_rast - t_geom;
     rast_sum += t_end - t_rast;
     if (++n >= 60) {
-        ESP_LOGI("face_orb", "geometry %lld us, raster %lld us, %u dots",
+        ESP_LOGI("face_orb", "geometry %lld us, raster %lld us, %u dots, %u lines",
                  (long long)(geom_sum / n), (long long)(rast_sum / n),
-                 (unsigned)s_frame->count);
+                 (unsigned)s_frame->count, (unsigned)s_frame->line_count);
         geom_sum = rast_sum = 0;
         n = 0;
     }

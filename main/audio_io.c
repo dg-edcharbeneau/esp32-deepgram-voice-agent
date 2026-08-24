@@ -88,6 +88,9 @@ static bool s_volume_from_nvs;
 #define NVS_NAMESPACE  "dgagent"
 #define NVS_KEY_VOLUME "out_volume"
 static volatile bool s_capture_enabled = true;
+/* Tap-only override, consulted only while capture is disabled. See
+ * audio_io_capture_set_monitor() in the header for why it exists. */
+static volatile bool s_monitor;
 static int s_rate;
 
 /*
@@ -272,6 +275,17 @@ static void capture_task(void *arg)
          */
 #if !CONFIG_AUDIO_CAPTURE_ALWAYS
         if (!s_capture_enabled) {
+            if (!s_monitor) {
+                continue;
+            }
+            /*
+             * Monitor mode: the display gets levels, the network gets nothing.
+             * The continue is the safety property rather than a shortcut -- it is
+             * what makes writing to a socket that is not there impossible.
+             */
+            if (s_cap_tap != NULL) {
+                s_cap_tap(mono, CAPTURE_FRAMES);
+            }
             continue;
         }
 #else
@@ -606,6 +620,11 @@ void audio_io_flush(void)
 void audio_io_capture_set_enabled(bool enabled)
 {
     s_capture_enabled = enabled;
+}
+
+void audio_io_capture_set_monitor(bool monitor)
+{
+    s_monitor = monitor;
 }
 
 void audio_io_reset(void)

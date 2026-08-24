@@ -136,6 +136,7 @@ typedef struct {
      * destroy information rather than restyle it.
      */
     uint32_t tint_rgb;
+
 } ui_render_ctx_t;
 
 typedef struct {

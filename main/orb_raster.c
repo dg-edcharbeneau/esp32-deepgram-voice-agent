@@ -41,8 +41,21 @@
 
 static const char *TAG = "orb_raster";
 
-/* Widest a dot's footprint can be: radius 4.2 plus a pixel of AA either side. */
-#define SPRITE_MAX 14
+/*
+ * Widest a dot's footprint can be.
+ *
+ * RAISED FROM 14 for wave's swell. The reference's rMul is the only amplitude hook
+ * buildWave has, so listening can only express volume as dot size -- and 14 px
+ * capped that at rMul 1.85, a 60% swell, which was not enough to read. 20 px
+ * carries rMul to about 2.6.
+ *
+ * The cost is stack, not heap: this sizes a float cov[SPRITE_MAX * SPRITE_MAX]
+ * inside blit_dot, so 14 was 784 B and 20 is 1,600 B on the LVGL task -- which has
+ * 8 kB and was using 912 B for this function. Note blit_dot CLIPS a disc that does
+ * not fit rather than overrunning, so exceeding this is a visual fault and never a
+ * memory one.
+ */
+#define SPRITE_MAX 20
 
 static lv_obj_t *s_canvas;
 static uint16_t *s_pixels;
@@ -59,6 +72,18 @@ static int32_t s_w, s_h;
  */
 static int16_t (*s_prev)[4];
 static size_t s_prev_count;
+
+/*
+ * Last frame's strokes, kept whole rather than as boxes.
+ *
+ * A dot is cleared by blacking its bounding box, which is a handful of pixels. A
+ * line's box is not: an edge across the panel spans 200x200, so box-clearing 38
+ * of them would be 1.5M pixel writes a frame against the ~11k the dots cost. So
+ * a stroke is cleared by WALKING IT AGAIN in black -- the same few hundred pixels
+ * it painted, and exactly symmetric with how it was drawn.
+ */
+static orb_line_t *s_prev_lines;
+static size_t s_prev_line_count;
 
 /* Coverage below this contributes less than one 5-bit level, so skip the blend. */
 #define COV_EPS (1.0f / 512.0f)
@@ -84,6 +109,14 @@ esp_err_t orb_raster_init(lv_obj_t *canvas)
             return ESP_ERR_NO_MEM;
         }
     }
+    if (s_prev_lines == NULL) {
+        s_prev_lines = heap_caps_malloc(ORB_MAX_LINES * sizeof(*s_prev_lines),
+                                       MALLOC_CAP_SPIRAM);
+        if (s_prev_lines == NULL) {
+            ESP_LOGE(TAG, "no PSRAM for the stroke list");
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     s_canvas = canvas;
     s_pixels = (uint16_t *)buf->data;
@@ -92,6 +125,7 @@ esp_err_t orb_raster_init(lv_obj_t *canvas)
     s_w = (int32_t)buf->header.w;
     s_h = (int32_t)buf->header.h;
     s_prev_count = 0;
+    s_prev_line_count = 0;
 
     memset(buf->data, 0, buf->data_size);
     lv_obj_invalidate(canvas);
@@ -111,6 +145,7 @@ void orb_raster_clear(void)
         memset(buf->data, 0, buf->data_size);
     }
     s_prev_count = 0;
+    s_prev_line_count = 0;
     lv_obj_invalidate(s_canvas);
 }
 
@@ -262,6 +297,118 @@ static void blit_dot(const orb_dot_t *d, int16_t *box, float tr, float tg, float
     box[3] = (int16_t)y1;
 }
 
+/* One pixel, src-over, or forced to black when clearing. Same 0..256 inverse the
+ * disc blitter uses, so a stroke and a dot lay down identical ink. */
+static inline void blend_px(int32_t x, int32_t y, float cov,
+                            uint32_t sr, uint32_t sg, uint32_t sb, bool clear)
+{
+    uint16_t *px = &s_pixels[y * s_stride_px + x];
+    if (clear) {
+        *px = 0;
+        return;
+    }
+    if (cov < COV_EPS) {
+        return;
+    }
+    uint32_t a = (uint32_t)(cov * 255.0f + 0.5f);
+    if (a > 255) a = 255;
+    uint32_t ia = 256 - a;
+
+    uint16_t dst = *px;
+    uint32_t dr = (dst >> 11) & 0x1F;
+    uint32_t dg = (dst >> 5) & 0x3F;
+    uint32_t db = dst & 0x1F;
+
+    dr = (sr * a + dr * ia) >> 8;
+    dg = (sg * a + dg * ia) >> 8;
+    db = (sb * a + db * ia) >> 8;
+    if (dr > 0x1F) dr = 0x1F;
+    if (dg > 0x3F) dg = 0x3F;
+    if (db > 0x1F) db = 0x1F;
+
+    *px = (uint16_t)((dr << 11) | (dg << 5) | db);
+}
+
+/*
+ * One stroke, anti-aliased, src-over -- or blacked out when `clear` is set.
+ *
+ * Walked along its MAJOR AXIS rather than rasterised by bounding box: `web`'s
+ * edges span most of the panel, so a box would be tens of thousands of pixels
+ * for a stroke about one pixel wide. Stepping the long axis and covering only the
+ * two or three pixels either side of the line keeps a stroke at a few hundred
+ * pixels, the same order as a dot's footprint.
+ *
+ * Coverage is the perpendicular distance, not the axis distance -- the axis
+ * offset is scaled by major/length. Without that a diagonal stroke inks visibly
+ * heavier than an axis-aligned one of the same nominal width, because its pixels
+ * are further from the centreline than their vertical offset suggests.
+ */
+static void stroke_line(const orb_line_t *l, uint32_t sr, uint32_t sg, uint32_t sb,
+                        bool clear)
+{
+    float dx = l->x2 - l->x1;
+    float dy = l->y2 - l->y1;
+    float adx = fabsf(dx), ady = fabsf(dy);
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.001f) {
+        return; /* degenerate: two nodes on top of each other */
+    }
+
+    float half = l->w * 0.5f;
+    if (half < 0.35f) {
+        half = 0.35f; /* a sub-pixel stroke still has to be visible */
+    }
+
+    bool x_major = adx >= ady;
+    int steps = (int)ceilf(x_major ? adx : ady);
+    if (steps < 1) {
+        steps = 1;
+    }
+    /* Axis offset -> perpendicular distance. For an x-major line a pure-y
+     * offset of e sits e*|dx|/len from the centreline. */
+    float perp = (x_major ? adx : ady) / len;
+
+    for (int i = 0; i <= steps; i++) {
+        float f = (float)i / (float)steps;
+        float px = l->x1 + dx * f;
+        float py = l->y1 + dy * f;
+
+        if (x_major) {
+            int32_t x = (int32_t)lroundf(px);
+            if (x < 0 || x >= s_w) {
+                continue;
+            }
+            int32_t y0 = (int32_t)floorf(py - half - 1.0f);
+            int32_t y1 = (int32_t)ceilf(py + half + 1.0f);
+            if (y0 < 0) y0 = 0;
+            if (y1 > s_h - 1) y1 = s_h - 1;
+            for (int32_t y = y0; y <= y1; y++) {
+                float e = fabsf((float)y + 0.5f - py) * perp;
+                float c = half + 0.5f - e;
+                if (c <= 0.0f) continue;
+                if (c > 1.0f) c = 1.0f;
+                blend_px(x, y, c * l->a, sr, sg, sb, clear);
+            }
+        } else {
+            int32_t y = (int32_t)lroundf(py);
+            if (y < 0 || y >= s_h) {
+                continue;
+            }
+            int32_t x0 = (int32_t)floorf(px - half - 1.0f);
+            int32_t x1 = (int32_t)ceilf(px + half + 1.0f);
+            if (x0 < 0) x0 = 0;
+            if (x1 > s_w - 1) x1 = s_w - 1;
+            for (int32_t x = x0; x <= x1; x++) {
+                float e = fabsf((float)x + 0.5f - px) * perp;
+                float c = half + 0.5f - e;
+                if (c <= 0.0f) continue;
+                if (c > 1.0f) c = 1.0f;
+                blend_px(x, y, c * l->a, sr, sg, sb, clear);
+            }
+        }
+    }
+}
+
 void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
 {
     if (s_pixels == NULL) {
@@ -277,6 +424,28 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
      * Seeded from last frame's marks because those have to be cleared. */
     int32_t ux0 = s_w, uy0 = s_h, ux1 = -1, uy1 = -1;
 
+    /*
+     * Last frame's strokes go first, and BEFORE this frame's dots are laid down.
+     * Clearing is a black walk over the same path, so doing it after the dots
+     * were drawn would punch holes through them.
+     */
+    for (size_t i = 0; i < s_prev_line_count; i++) {
+        const orb_line_t *l = &s_prev_lines[i];
+        stroke_line(l, 0, 0, 0, true);
+        int32_t lx0 = (int32_t)floorf(fminf(l->x1, l->x2) - l->w - 2.0f);
+        int32_t ly0 = (int32_t)floorf(fminf(l->y1, l->y2) - l->w - 2.0f);
+        int32_t lx1 = (int32_t)ceilf(fmaxf(l->x1, l->x2) + l->w + 2.0f);
+        int32_t ly1 = (int32_t)ceilf(fmaxf(l->y1, l->y2) + l->w + 2.0f);
+        if (lx0 < 0) lx0 = 0;
+        if (ly0 < 0) ly0 = 0;
+        if (lx1 > s_w - 1) lx1 = s_w - 1;
+        if (ly1 > s_h - 1) ly1 = s_h - 1;
+        if (lx0 < ux0) ux0 = lx0;
+        if (ly0 < uy0) uy0 = ly0;
+        if (lx1 > ux1) ux1 = lx1;
+        if (ly1 > uy1) uy1 = ly1;
+    }
+
     for (size_t i = 0; i < s_prev_count; i++) {
         const int16_t *b = s_prev[i];
         if (b[2] < b[0]) {
@@ -288,6 +457,42 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
         if (b[2] > ux1) ux1 = b[2];
         if (b[3] > uy1) uy1 = b[3];
     }
+
+    /*
+     * This frame's strokes, UNDER the dots -- paintFrame's order, and the reason
+     * a node reads as a node rather than as a thickening of the wire crossing it.
+     */
+    size_t ln = frame->line_count;
+    if (ln > ORB_MAX_LINES) {
+        ln = ORB_MAX_LINES;
+    }
+    for (size_t i = 0; i < ln; i++) {
+        const orb_line_t *l = &frame->lines[i];
+        /* Same ink convention as a dot, so a stroke takes the orb's colour too. */
+        float lw = l->white;
+        if (lw < 0.0f) lw = 0.0f;
+        else if (lw > 1.0f) lw = 1.0f;
+        float lum = (1.0f - lw) * 255.0f;
+        uint32_t lsr = (uint32_t)(lum * tr + 0.5f) >> 3;
+        uint32_t lsg = (uint32_t)(lum * tg + 0.5f) >> 2;
+        uint32_t lsb = (uint32_t)(lum * tb + 0.5f) >> 3;
+        stroke_line(l, lsr, lsg, lsb, false);
+
+        s_prev_lines[i] = *l;
+        int32_t lx0 = (int32_t)floorf(fminf(l->x1, l->x2) - l->w - 2.0f);
+        int32_t ly0 = (int32_t)floorf(fminf(l->y1, l->y2) - l->w - 2.0f);
+        int32_t lx1 = (int32_t)ceilf(fmaxf(l->x1, l->x2) + l->w + 2.0f);
+        int32_t ly1 = (int32_t)ceilf(fmaxf(l->y1, l->y2) + l->w + 2.0f);
+        if (lx0 < 0) lx0 = 0;
+        if (ly0 < 0) ly0 = 0;
+        if (lx1 > s_w - 1) lx1 = s_w - 1;
+        if (ly1 > s_h - 1) ly1 = s_h - 1;
+        if (lx0 < ux0) ux0 = lx0;
+        if (ly0 < uy0) uy0 = ly0;
+        if (lx1 > ux1) ux1 = lx1;
+        if (ly1 > uy1) uy1 = ly1;
+    }
+    s_prev_line_count = ln;
 
     size_t n = frame->count;
     if (n > ORB_MAX_DOTS) {

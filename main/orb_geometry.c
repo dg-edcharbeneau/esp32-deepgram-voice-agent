@@ -70,6 +70,66 @@ static orb_ring_t s_rings[ORB_RING_COUNT];
 static int s_dot_count;
 
 /*
+ * WAVE'S OWN LATTICE. Its profile is rings 15 / lonDensity 40 against the voice
+ * shell's 17 / 42, so it cannot share the tables above -- 384 dots, not 456.
+ *
+ * Worth a second lattice rather than a parameterised one: rubik's profile is
+ * latRings 15 / lonDensity 40 too, so this serves both, and leaving the voice
+ * shell's tables untouched keeps 1,000 lines of parity-verified code out of the
+ * blast radius.
+ */
+#define WAVE_RINGS 15
+#define WAVE_RING_COUNT (WAVE_RINGS + 1)
+#define WAVE_LON_DENSITY 40
+
+static orb_ring_t s_wave_rings[WAVE_RING_COUNT];
+static int s_wave_dot_count;
+static float *s_wave_cos_lon;
+static float *s_wave_sin_lon;
+/*
+ * The same lattice as unit cartesian coordinates, which is what rubik's slab
+ * test needs -- and it must be computed in DOUBLE, as buildLattice does.
+ *
+ * Not a micro-optimisation avoided: rubik decides slab membership with
+ * `coord < lo || coord >= hi` where the bounds are exact multiples of 0.5, so
+ * the SIGN of a coordinate near zero changes which slab a dot turns with.
+ * cos(pi/2) is +6.1e-17 in double and -4.4e-8 in float -- opposite sides of the
+ * 0.0 boundary. Deriving these per frame in float moved 26 of 384 dots.
+ */
+static double *s_wave_unit; /* ux,uy,uz interleaved: 3 doubles a dot */
+
+/*
+ * RIBBON'S TABLES. Nothing lattice-shaped about this mode: a Fibonacci-sphere
+ * ghost shell for depth, and a band of `lanes` parallel tracks each of `segs`
+ * segments, precessing as a plane and undulating along its length.
+ */
+/*
+ * Tuned DOWN from the reference's 150/88. At the defaults ribbon cost ~30 ms a
+ * frame -- 12.9 of geometry, 17.7 of raster -- and dropped the panel from 26 fps
+ * to 19, which is the wrong trade for the state on screen most of a turn. 90/56
+ * is 370 dots against 590, and 280 band dots against 440. The band dots are the
+ * expensive ones: two sinf and a sqrtf each.
+ *
+ * Parity is unaffected. The harness passes the same numbers -- it needs the two
+ * sides to AGREE, not to use defaults.
+ */
+#define RIBBON_GHOSTS 90
+#define RIBBON_SEGS 56
+#define RIBBON_LANES 5
+
+/*
+ * Braid keeps the reference's 150, on its OWN table though it shared ribbon's
+ * until now: fibDir(i, n) depends on n, so a prefix of a 150-ghost table is not a
+ * 90-ghost table. Shrinking ribbon's would have quietly restyled braid.
+ */
+#define BRAID_GHOSTS 150
+
+static float *s_ghost_dx, *s_ghost_dy, *s_ghost_dz;
+static float *s_bghost_dx, *s_bghost_dy, *s_bghost_dz;
+static float *s_seg_a, *s_seg_cos, *s_seg_sin;
+static float *s_lane_off, *s_lane_edge;
+
+/*
  * The per-dot lattice tables, heap allocated as ONE block.
  *
  * Deliberately not static arrays. On the device those land in internal .bss, and
@@ -251,6 +311,56 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 #define BUFFER_PERIOD 2.2f
 #define SIGNAL_PERIOD 5.0f
 
+/*
+ * The speaking level meter.
+ *
+ * FILL_REACH maps the audio level to how far out the light reaches, 0 at the
+ * equator and 1 at either pole. Measured agent playback runs a mean near 0.35 and
+ * peaks around 0.65, so 1.5 puts ordinary speech at about half the shell and a
+ * peak at nearly all of it -- a meter with headroom rather than one that pegs.
+ *
+ * FILL_FADE is how abruptly the fill ends, in the same units. About one and a
+ * half rings, enough that the boundary is not a hard band.
+ *
+ * LEAD_WIDTH IS SET BY THE RING SPACING, not by taste. Rings sit 0.118 apart in these
+ * units, and a cap narrower than that falls BETWEEN rings for most fill levels --
+ * at 0.12 the bright edge simply vanished at all but one level. 0.20 always
+ * catches a ring. It is the same aliasing that made the first attempt at this
+ * behaviour, a travelling crest, read as static stripes.
+ *
+ * The gate exists so silence is the disconnected shell exactly, rather than the
+ * shell plus a permanent glow at the equator where the cap sits at fill zero.
+ */
+/* [1.0..2.0]   how far the light reaches. 1.0 never fills, 2.0 pegs at half
+ *              volume. */
+#define FILL_REACH 1.2f
+/* [0.12..0.35] how gradually the body FADES OUT behind the leading edge, in
+ *              from_eq units where one ring is 0.118. Under ~0.12 it ends in a
+ *              hard band. */
+#define FILL_FADE 0.18f
+/* [0.20..0.35] width of the leading edge. 0.20 IS A FLOOR, not a preference:
+ *              narrower than the 0.118 ring spacing and the edge falls between
+ *              rings and vanishes entirely. */
+#define LEAD_WIDTH 0.20f
+/* [0..0.86]    brightness of the lit BODY trailing the edge, above the 0.14
+ *              floor. LOWER THIS to make the leading edge stand out: the two
+ *              brightnesses share 0.86 of headroom, so raising LEAD_BRIGHT alone
+ *              just flattens both against the clamp. 0.55/0.40 gives the edge a
+ *              1.13x contrast over the body; 0.18/0.68 gives it 2.39x. */
+#define FILL_BRIGHT 0.25f
+/* [0..~0.7]    brightness of the LEADING EDGE itself, on top of the body. The
+ *              ceiling is not fixed -- it is whatever FILL_BRIGHT has left of the
+ *              0.86 headroom at the boundary, so dimming the body raises it. At
+ *              FILL_BRIGHT 0.25 this can reach about 0.7 before clamping; at 0.55
+ *              only about 0.55. Under ~0.22 it stops reading as an edge at all. */
+#define LEAD_BRIGHT 0.58f
+/* [0..0.6]     how much lit dots swell and darken, together. Past ~0.6
+ *              the near side blows out to solid ink. */
+#define FILL_SWELL 0.40f
+/* [0.03..0.15] silence cutoff. Higher means more has to be playing
+ *              before anything lights at all. */
+#define FILL_GATE 0.08f
+
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
 #define R_DEPTH 1.7f
@@ -261,7 +371,7 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 /* Dot radii were tuned for a 300 pt frame; sub-linear scaling keeps a small
  * shell legible. */
 #define R_MIN 0.3f
-#define ALPHA_CULL 0.02f
+#define ALPHA_CULL ORB_ALPHA_CULL /* one source of truth; see orb_geometry.h */
 
 /*
  * The body breath: a scale that only ever draws IN, applied to every behaviour.
@@ -399,6 +509,58 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
         return;
     }
 
+    case ORB_SPEAKING_FILL: {
+        /*
+         * The agent talking: the disconnected shell as a level meter.
+         *
+         * Rings ILLUMINATE OUTWARD from the equator rather than a crest
+         * travelling through them. How far the light reaches is the audio level,
+         * so it extends while the agent speaks and retracts as it falls -- a
+         * spectrum analyser bar wrapped onto the sphere, with a brighter cap at
+         * the leading edge the way an analyser marks its peak.
+         *
+         * Built ON disconnected -- same drawn-in radius, same 0.14 floor -- so a
+         * turn ending is the light withdrawing from a shell that was already
+         * there rather than one object replacing another.
+         *
+         * Symmetric about the equator on purpose: a fill with a direction would
+         * imply the sound came from somewhere, and it comes from the whole object.
+         *
+         * A PURE FUNCTION, like every other behaviour here. An analyser's falling
+         * peak marker would need memory across frames, and the shell's contract is
+         * that a dropped frame costs nothing and there is no state to resync. The
+         * retraction comes from ui.c's own fast-attack slow-release on `amp`,
+         * which is where that shaping belongs.
+         */
+        float from_eq = fabsf(ring_t - 0.5f) * 2.0f;
+
+        float fill = amp * FILL_REACH;
+        if (fill > 1.0f) {
+            fill = 1.0f;
+        }
+        /* Off entirely below a whisper, so silence is exactly the dim shell. */
+        float gate = fill / FILL_GATE;
+        if (gate > 1.0f) {
+            gate = 1.0f;
+        }
+
+        float lit = (fill - from_eq) / FILL_FADE;
+        if (lit < 0.0f) lit = 0.0f;
+        else if (lit > 1.0f) lit = 1.0f;
+
+        /* The cap: a soft peak sitting exactly at the fill boundary. */
+        float td = (fill - from_eq) / LEAD_WIDTH;
+        float tip = expf(-td * td);
+
+        out[RS_RF] = 0.8f + 0.012f * sinf(t * 0.5f + ri * 0.3f);
+        /* Rule 4: a crest makes a dot bigger AND darker at the same instant. */
+        out[RS_CREST] = FILL_SWELL * lit * gate;
+        out[RS_SHEAR] = 0.0f;
+        float a = 0.14f + (FILL_BRIGHT * lit + LEAD_BRIGHT * tip) * gate;
+        out[RS_ALPHA] = (a > 1.0f) ? 1.0f : a;
+        return;
+    }
+
     case ORB_IDLE:
     default: {
         /*
@@ -468,18 +630,53 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
     }
 }
 
+/* Defined with the voice build below; every mode sorts into the same order. */
+static int cmp_draw_order(const void *pa, const void *pb);
+/* Built once by orb_init(), defined with the rubik mode below. */
+static void rubik_make_moves(void);
+
 /* ---------------- setup ---------------- */
 
 bool orb_init(float size)
 {
     if (s_lattice == NULL) {
-        s_lattice = malloc(3 * ORB_MAX_DOTS * sizeof(float));
+        /*
+         * ONE allocation for every table, wave's included. Not tidiness: a
+         * separate 3 kB block for wave's longitudes would sit under
+         * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL and be handed internal RAM, which
+         * is the resource this file has always been careful with. Pooled, the
+         * block clears the threshold and lands in PSRAM.
+         */
+        s_lattice = malloc((3 * ORB_VOICE_DOTS + 2 * ORB_WAVE_DOTS
+                            + 3 * RIBBON_GHOSTS + 3 * RIBBON_SEGS
+                            + 2 * RIBBON_LANES
+                            + 3 * BRAID_GHOSTS) * sizeof(float));
         if (s_lattice == NULL) {
             return false;
         }
-        s_cos_lon = &s_lattice[0];
-        s_sin_lon = &s_lattice[ORB_MAX_DOTS];
-        s_scatter = &s_lattice[2 * ORB_MAX_DOTS];
+        /* Doubles, so a separate block -- 9.2 kB, which clears
+         * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL on its own and lands in PSRAM. */
+        s_wave_unit = malloc(3 * ORB_WAVE_DOTS * sizeof(double));
+        if (s_wave_unit == NULL) {
+            return false;
+        }
+        size_t off = 0;
+        s_cos_lon = &s_lattice[off]; off += ORB_VOICE_DOTS;
+        s_sin_lon = &s_lattice[off]; off += ORB_VOICE_DOTS;
+        s_scatter = &s_lattice[off]; off += ORB_VOICE_DOTS;
+        s_wave_cos_lon = &s_lattice[off]; off += ORB_WAVE_DOTS;
+        s_wave_sin_lon = &s_lattice[off]; off += ORB_WAVE_DOTS;
+        s_ghost_dx = &s_lattice[off]; off += RIBBON_GHOSTS;
+        s_ghost_dy = &s_lattice[off]; off += RIBBON_GHOSTS;
+        s_ghost_dz = &s_lattice[off]; off += RIBBON_GHOSTS;
+        s_seg_a = &s_lattice[off]; off += RIBBON_SEGS;
+        s_seg_cos = &s_lattice[off]; off += RIBBON_SEGS;
+        s_seg_sin = &s_lattice[off]; off += RIBBON_SEGS;
+        s_lane_off = &s_lattice[off]; off += RIBBON_LANES;
+        s_lane_edge = &s_lattice[off]; off += RIBBON_LANES;
+        s_bghost_dx = &s_lattice[off]; off += BRAID_GHOSTS;
+        s_bghost_dy = &s_lattice[off]; off += BRAID_GHOSTS;
+        s_bghost_dz = &s_lattice[off]; off += BRAID_GHOSTS;
     }
 
     s_cx = size / 2.0f;
@@ -516,7 +713,916 @@ bool orb_init(float size)
         /* Inside the shell only -- a scattered dot must not poke past the rim. */
         s_scatter[i] = 0.16f + 0.8f * hash_d((double)i, 3.71);
     }
+
+    /* Wave's lattice: same cosine taper, its own ring count and density. */
+    int wn = 0;
+    for (int ri = 0; ri <= WAVE_RINGS; ri++) {
+        float lat = -(float)M_PI / 2.0f + ((float)ri / (float)WAVE_RINGS) * (float)M_PI;
+        float cos_lat = cosf(lat);
+        float sin_lat = sinf(lat);
+
+        int lon_count = (int)lroundf(fabsf(cos_lat) * (float)WAVE_LON_DENSITY);
+        if (lon_count < 1) {
+            lon_count = 1;
+        }
+
+        s_wave_rings[ri].sin_lat = sin_lat;
+        s_wave_rings[ri].cos_lat = cos_lat;
+        s_wave_rings[ri].lon_count = lon_count;
+        s_wave_rings[ri].base = wn;
+
+        /* Double throughout, matching buildLattice, then narrowed. The cast
+         * keeps the sign of a near-zero cosine, which is the whole point. */
+        double lat_d = -M_PI / 2.0 + ((double)ri / (double)WAVE_RINGS) * M_PI;
+        double cos_lat_d = cos(lat_d);
+        double sin_lat_d = sin(lat_d);
+        for (int lj = 0; lj < lon_count; lj++) {
+            double lon_d = ((double)lj / (double)lon_count) * 2.0 * M_PI;
+            s_wave_cos_lon[wn + lj] = (float)cos(lon_d);
+            s_wave_sin_lon[wn + lj] = (float)sin(lon_d);
+            s_wave_unit[3 * (wn + lj) + 0] = cos_lat_d * cos(lon_d);
+            s_wave_unit[3 * (wn + lj) + 1] = sin_lat_d;
+            s_wave_unit[3 * (wn + lj) + 2] = cos_lat_d * sin(lon_d);
+        }
+        wn += lon_count;
+    }
+    s_wave_dot_count = wn;
+
+    rubik_make_moves();
+
+    /* ribbon's precompute. fibDir's golden angle, verbatim. */
+    const double golden = M_PI * (3.0 - sqrt(5.0));
+    for (int i = 0; i < RIBBON_GHOSTS; i++) {
+        double gy = 1.0 - (2.0 * ((double)i + 0.5)) / (double)RIBBON_GHOSTS;
+        double rad = sqrt(1.0 - gy * gy);
+        double ga = (double)i * golden;
+        s_ghost_dx[i] = (float)(rad * cos(ga));
+        s_ghost_dy[i] = (float)gy;
+        s_ghost_dz[i] = (float)(rad * sin(ga));
+    }
+    for (int i = 0; i < BRAID_GHOSTS; i++) {
+        double gy = 1.0 - (2.0 * ((double)i + 0.5)) / (double)BRAID_GHOSTS;
+        double rad = sqrt(1.0 - gy * gy);
+        double ga = (double)i * golden;
+        s_bghost_dx[i] = (float)(rad * cos(ga));
+        s_bghost_dy[i] = (float)gy;
+        s_bghost_dz[i] = (float)(rad * sin(ga));
+    }
+    for (int k = 0; k < RIBBON_SEGS; k++) {
+        double a = ((double)k / (double)RIBBON_SEGS) * 2.0 * M_PI;
+        s_seg_a[k] = (float)a;
+        s_seg_cos[k] = (float)cos(a);
+        s_seg_sin[k] = (float)sin(a);
+    }
+    for (int w = 0; w < RIBBON_LANES; w++) {
+        double mid = ((double)RIBBON_LANES - 1.0) / 2.0;
+        s_lane_off[w] = (float)(((double)w - mid) * 0.075);
+        double half = (mid > 1.0) ? mid : 1.0;
+        s_lane_edge[w] = (float)(fabs((double)w - mid) / half);
+    }
     return true;
+}
+
+/* ---------------- wave (lattice.ts buildWave) ---------------- */
+
+/*
+ * The playground's `listening` orb: one lat/long shell undulating under two
+ * incommensurate sines. No behaviours, no events, no amplitude -- a wave does
+ * the same thing forever, which is exactly why it reads as attentive.
+ *
+ * Reuses wave_w() above, which the voice shell already carried verbatim, and the
+ * same radius/ink coupling: R_BASE, R_DEPTH, INK_FAR and INK_SPAN are wave's own
+ * defaults, which is where the voice shell got them.
+ */
+/*
+ * How the microphone level reaches wave: it scales every radius, through the
+ * reference's own dyn.rMul.
+ *
+ * NOT AS EXPRESSIVE AS THE SHELL'S LISTENING, and that is inherent rather than a
+ * shortcut. buildWave has no wobMul and no wavefront term -- it undulates the same
+ * way whatever is happening -- so rMul is the only amplitude hook the reference
+ * gives it. The shell's listening pose sent wavefronts travelling inward with
+ * depth set by volume; wave can only swell. Anything more would mean inventing a
+ * parameter upstream does not have, which is exactly what the parity harness
+ * exists to stop.
+ *
+ * SQRT OF THE LEVEL, NOT THE LEVEL. Measured across LISTENING on real speech, amp
+ * spans 0.003 to 0.534 -- a 180x range -- and no linear map serves both ends of
+ * that. A gain set for the quiet end saturates at amp 0.14 and throws away every
+ * dynamic above moderate speech; one set for the loud end barely moves at
+ * conversational volume. The square root compresses the top and opens out the
+ * bottom, so the whole range is usable:
+ *
+ *   amp 0.010  near silence    rMul 1.19
+ *   amp 0.056  typical mean    rMul 1.45
+ *   amp 0.096  typical peak    rMul 1.59
+ *   amp 0.268  loud mean       rMul 1.98
+ *   amp 0.534  loud peak       rMul 2.39, just short of the ceiling
+ *
+ * The earlier linear gain was calibrated against a mean of 0.067 and a peak of
+ * 0.10, taken while LISTENING barely triggered -- so it was measured on the quiet
+ * moments of speech rather than on speech.
+ *
+ * CAPPED AT 1.6 FOR THE RASTERISER, not for taste. blit_dot's footprint buffer is
+ * SPRITE_MAX 14 px square and it CLIPS a disc that does not fit rather than
+ * overrunning. A dot's worst case here is (0.6 + 1.7) * rs * rMul, which at
+ * rs 1.302 reaches a 14 px sprite around rMul 1.85. 1.6 leaves margin.
+ */
+/* [0..~1.9]    sqrt(amp) -> swell. 1.9 puts a loud peak just under the ceiling;
+ *              past that, loud speech saturates and stops registering. */
+#define WAVE_RMUL_GAIN 1.9f
+/* [1.0..2.6]   swell ceiling. A RASTERISER BOUND: blit_dot's footprint buffer is
+ *              SPRITE_MAX px square and CLIPS a disc that does not fit. At
+ *              SPRITE_MAX 20 a wave dot reaches the edge around rMul 2.6. */
+#define WAVE_RMUL_MAX 2.4f
+/* [0..1.0]     sqrt(amp) -> extra brightness, applied by orb_wave_ink() as a
+ *              separate pass. LOCAL, not from the reference: buildWave has no ink
+ *              hook, so this composes over the finished frame the way voice_pass
+ *              does and the harness never sees it. 0.62 gives a 0.15 shift at a
+ *              conversational level, where the old linear 1.2 gave 0.07. */
+#define WAVE_INK_GAIN 0.62f
+/* [0..0.28]    how much DARKER wave sits at rest, before any level brightens it.
+ *              Ink is inverted on a dark ground, so this ADDS to white.
+ *
+ *              Contrast, not taste: the reference's near side rests at grey 230
+ *              of 255, so brightening had 26 levels to work in and the response
+ *              was invisible however hard it was driven. Resting darker gives it
+ *              room -- 0.20 opens the near side to 76 levels and the far side to
+ *              115. Past ~0.28 the far side rests near grey 15 and the shell
+ *              stops reading as a surface at all. */
+#define WAVE_INK_FLOOR 0.20f
+
+void orb_build_wave(orb_frame_t *out, float t, float amp)
+{
+    const float R = s_shell_r;
+
+    if (amp < 0.0f) amp = 0.0f;
+    else if (amp > 1.0f) amp = 1.0f;
+    /* rMul is 1 at rest, which is the reference's default -- so silence is the
+     * unmodified mode rather than a special case. */
+    float r_mul = 1.0f + WAVE_RMUL_GAIN * sqrtf(amp);
+    if (r_mul > WAVE_RMUL_MAX) {
+        r_mul = WAVE_RMUL_MAX;
+    }
+    const float rs = s_rs * r_mul;
+
+    /* buildWave's projection: yaw = t*0.18, pitch = 0.38, no roll, no shear. */
+    const float yaw = t * 0.18f;
+    const float tilt = 0.38f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    size_t count = 0;
+
+    for (int ri = 0; ri < WAVE_RING_COUNT; ri++) {
+        const orb_ring_t *ring = &s_wave_rings[ri];
+        float sin_lat = ring->sin_lat;
+        float cos_lat = ring->cos_lat;
+
+        float w = wave_w(t, ri);
+        /* The undulation pulls the shell in and out around 0.88 of the rim. */
+        float dr = 0.88f + 0.105f * w;
+        float rr = R * dr;
+        float crest = (w > 0.0f) ? w : 0.0f;
+
+        const float *cos_lon = &s_wave_cos_lon[ring->base];
+        const float *sin_lon = &s_wave_sin_lon[ring->base];
+
+        for (int lj = 0; lj < ring->lon_count; lj++) {
+            /* Project the unit vector and scale after: the projection is linear,
+             * so this is identical to projecting the scaled vector. */
+            float ux = cos_lat * cos_lon[lj];
+            float uz = cos_lat * sin_lon[lj];
+
+            float x1 = ux * cyw + uz * sy;
+            float z1 = -ux * sy + uz * cyw;
+            float y1 = sin_lat * ct - z1 * st;
+            float dz = sin_lat * st + z1 * ct;
+
+            /*
+             * DEPTH COMES FROM THE SCALED z, NOT THE UNIT ONE. The reference
+             * reads (z / R + 1) / 2 off a vector of magnitude rr, and rr is not
+             * R here -- it is R * dr. The voice build's (dz + 1) / 2 is only
+             * equivalent because its radius is exactly R.
+             */
+            float depth = (dz * dr + 1.0f) / 2.0f;
+            if (depth < 0.0f) {
+                depth = 0.0f;
+            } else if (depth > 1.0f) {
+                depth = 1.0f;
+            }
+
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1 * rr;
+            /* MINUS: makeProj's py is `cy - yr * scale`. Screen y grows
+             * downward and the shell's y grows up, so the projection flips it.
+             * Everything else here matched the reference to 0.0001 with this
+             * wrong -- a mirrored orb looks perfectly plausible on a round
+             * panel, which is why the harness catches it and an eye would not. */
+            d->y = s_cy - y1 * rr;
+            d->z = dz * rr;
+            d->r = (R_BASE + R_DEPTH * depth) * (1.0f + 0.4f * crest) * rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = INK_FAR - INK_SPAN * depth - 0.1f * crest;
+            d->a = 1.0f; /* wave never signals an event, so never fades */
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+    out->line_count = 0; /* only web emits lines */
+}
+
+/* ---------------- rubik (lattice.ts buildRubik) ---------------- */
+
+/*
+ * The playground's `solving` orb: a dotted sphere whose bands scramble and
+ * unscramble, one quarter-turn at a time, forever.
+ *
+ * Shares wave's lattice -- its profile is latRings 15 / lonDensity 40 too -- but
+ * nothing else. Its own shell radius (0.82, not 0.874), its own ink constants,
+ * and a projection that folds R into makeProj's `scale` rather than scaling
+ * afterwards, which is why depth here comes from an UNSCALED z.
+ */
+#define RUBIK_MOVE_COUNT 14
+#define RUBIK_SLOT_DUR 0.42f
+#define RUBIK_REST 1.2f
+
+typedef struct {
+    int axis;     /* 0 = x, 1 = y, 2 = z */
+    float lo, hi; /* the slab this move turns */
+    double ang;   /* double: see rubik_apply_moves */
+} rubik_move_t;
+
+static rubik_move_t s_rubik_moves[RUBIK_MOVE_COUNT];
+
+/* makeMoves: a fixed, hash-derived scramble. Same every boot on purpose -- the
+ * reference's sequence is part of what the harness diffs. */
+static void rubik_make_moves(void)
+{
+    for (int i = 0; i < RUBIK_MOVE_COUNT; i++) {
+        int axis = (int)floorf(hash_d((double)i, 2.3) * 3.0f);
+        if (axis > 2) {
+            axis = 2;
+        }
+        int step = (int)floorf(hash_d((double)i, 5.9) * 4.0f);
+        if (step > 3) {
+            step = 3;
+        }
+        float dir = (hash_d((double)i, 7.7) < 0.5f) ? 1.0f : -1.0f;
+
+        s_rubik_moves[i].axis = axis;
+        s_rubik_moves[i].lo = -1.0f + 0.5f * (float)step;
+        s_rubik_moves[i].hi = s_rubik_moves[i].lo + 0.5f;
+        s_rubik_moves[i].ang = (double)dir * M_PI / 2.0;
+    }
+}
+
+/*
+ * How far through the scramble-and-solve cycle each move is.
+ *
+ * Moves land one at a time, then unwind in reverse -- so the orb is never
+ * "wrong", it is always mid-procedure. The ease-out is cubic and deliberately
+ * mechanical: it arrives like a machine placing a part, not like something alive.
+ */
+static int rubik_solve_cycle(float t, double amount[RUBIK_MOVE_COUNT])
+{
+    const int count = RUBIK_MOVE_COUNT;
+    for (int i = 0; i < count; i++) {
+        amount[i] = 0.0;
+    }
+
+    float cyc = 2.0f * (float)count * RUBIK_SLOT_DUR + RUBIK_REST;
+    float tc = fmodf(t, cyc);
+    if (tc < 0.0f) {
+        tc += cyc;
+    }
+    if (tc >= 2.0f * (float)count * RUBIK_SLOT_DUR) {
+        return -1; /* the rest between cycles: solved and still */
+    }
+
+    int slot = (int)floorf(tc / RUBIK_SLOT_DUR);
+    /* Double from here down: `ep` becomes a rotation angle whose cosine decides
+     * the next move's slab test, so its last bits are not cosmetic. */
+    double pr = ((double)tc - (double)slot * (double)RUBIK_SLOT_DUR) / (double)RUBIK_SLOT_DUR;
+    double cl = (pr / 0.7 > 1.0) ? 1.0 : (pr / 0.7);
+    double inv = 1.0 - cl;
+    double ep = 1.0 - inv * inv * inv;
+
+    int active;
+    if (slot < count) {
+        for (int i = 0; i < slot; i++) {
+            amount[i] = 1.0;
+        }
+        amount[slot] = ep;
+        active = slot;
+    } else {
+        int u = 2 * count - 1 - slot;
+        for (int i = 0; i < u; i++) {
+            amount[i] = 1.0;
+        }
+        amount[u] = 1.0 - ep;
+        active = u;
+    }
+    return active;
+}
+
+/*
+ * Rotate a dot through every move whose slab contains it. Returns true if the
+ * dot is inside the move currently turning -- the band that inks darker.
+ *
+ * DOUBLE, unlike every other hot path in this file, and not by preference.
+ * Slab membership is tested against the coordinate AS ALREADY ROTATED by earlier
+ * moves, so this is a chain of discontinuous decisions rather than a smooth
+ * function -- and a fully applied move turns by exactly +/-pi/2, where cosf
+ * gives -4.4e-8 and cos gives +6.1e-17. Opposite sides of the 0.0 slab
+ * boundary. In float, 38 of 384 dots turned with the wrong band.
+ *
+ * The trig is per MOVE, not per dot -- hoisted by the caller -- so what this
+ * actually costs is a few double multiplies for the ~25% of dots inside any
+ * given slab.
+ */
+static bool rubik_apply_moves(const double *unit, const double *amount,
+                              const double *ca_tab, const double *sa_tab,
+                              int active, float out[3])
+{
+    double x = unit[0], y = unit[1], z = unit[2];
+    bool in_active = false;
+
+    for (int i = 0; i < RUBIK_MOVE_COUNT; i++) {
+        if (amount[i] <= 0.0) {
+            continue;
+        }
+        const rubik_move_t *mv = &s_rubik_moves[i];
+        double coord = (mv->axis == 0) ? x : (mv->axis == 1) ? y : z;
+        if (coord < (double)mv->lo || coord >= (double)mv->hi) {
+            continue;
+        }
+        if (i == active) {
+            in_active = true;
+        }
+        double ca = ca_tab[i], sa = sa_tab[i];
+        if (mv->axis == 0) {
+            double y2 = y * ca - z * sa;
+            z = y * sa + z * ca;
+            y = y2;
+        } else if (mv->axis == 1) {
+            double x2 = x * ca + z * sa;
+            z = -x * sa + z * ca;
+            x = x2;
+        } else {
+            double x2 = x * ca - y * sa;
+            y = x * sa + y * ca;
+            x = x2;
+        }
+    }
+    out[0] = (float)x;
+    out[1] = (float)y;
+    out[2] = (float)z;
+    return in_active;
+}
+
+#define RUBIK_R_ACTIVE 0.3f
+#define RUBIK_INK_FAR 0.62f
+#define RUBIK_INK_SPAN 0.54f
+
+void orb_build_rubik(orb_frame_t *out, float t)
+{
+    const float R = s_cx * 0.82f; /* rubik's own shell, tighter than wave's */
+
+    /* buildRubik folds R into makeProj's `scale`, so the projection returns
+     * screen pixels directly and an UNSCALED z. */
+    const float yaw = t * 0.55f;
+    const float tilt = 0.35f + 0.1f * sinf(t * 0.9f);
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    double amount[RUBIK_MOVE_COUNT];
+    int active = rubik_solve_cycle(t, amount);
+
+    /* Per move, not per dot: fourteen sin/cos a frame rather than thousands. */
+    double ca_tab[RUBIK_MOVE_COUNT], sa_tab[RUBIK_MOVE_COUNT];
+    for (int i = 0; i < RUBIK_MOVE_COUNT; i++) {
+        double a = s_rubik_moves[i].ang * amount[i];
+        ca_tab[i] = cos(a);
+        sa_tab[i] = sin(a);
+    }
+
+    size_t count = 0;
+
+    for (int ri = 0; ri < WAVE_RING_COUNT; ri++) {
+        const orb_ring_t *ring = &s_wave_rings[ri];
+
+        for (int lj = 0; lj < ring->lon_count; lj++) {
+            size_t k = (size_t)ring->base + (size_t)lj;
+            float m[3];
+            bool in_active = rubik_apply_moves(&s_wave_unit[3 * k], amount,
+                                               ca_tab, sa_tab, active, m);
+
+            float x1 = m[0] * cyw + m[2] * sy;
+            float z1 = -m[0] * sy + m[2] * cyw;
+            float y1 = m[1] * ct - z1 * st;
+            float zr = m[1] * st + z1 * ct;
+
+            /* Unscaled, because R went into the projection's scale. */
+            float depth = (zr + 1.0f) / 2.0f;
+            if (depth < 0.0f) {
+                depth = 0.0f;
+            } else if (depth > 1.0f) {
+                depth = 1.0f;
+            }
+
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1 * R;
+            d->y = s_cy - y1 * R;
+            d->z = zr;
+            d->r = (R_BASE + R_DEPTH * depth + (in_active ? RUBIK_R_ACTIVE : 0.0f)) * s_rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = RUBIK_INK_FAR - RUBIK_INK_SPAN * depth - (in_active ? 0.14f : 0.0f);
+            d->a = 1.0f;
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+    out->line_count = 0; /* only web emits lines */
+}
+
+/* ---------------- ribbon (ribbon.ts buildRibbon) ---------------- */
+
+/*
+ * The playground's `composing` orb: a band that precesses through the sphere,
+ * undulating along its length, over a haze of ghost dots.
+ *
+ * The largest mode at 590 dots, and the only one so far that varies alpha per
+ * dot -- the ghosts sit at 0.1..0.32 so they read as depth rather than as marks.
+ * Its rBase is 1.1, not the 0.6 wave and rubik share: the band is a line the eye
+ * follows, so its dots are fatter.
+ */
+#define RIBBON_R_BASE 1.1f
+#define RIBBON_GHOST_INK 0.78f
+
+/*
+ * How the voice level reaches the band: it scales the undulation's DEPTH.
+ *
+ * The reference exposes this as wobMul, and it is the right hook rather than a
+ * convenient one -- rule 5 of the voice shell is that amplitude scales how deep a
+ * gesture goes and never how fast, because driving rate from level is frequency
+ * modulation and reads as vibration rather than as a voice. The band's tempo is
+ * untouched; only how far it flexes moves.
+ *
+ * TUNED FROM MEASURED PLAYBACK, after a first attempt that "hardly moved".
+ *
+ * The fault was the BASE, not the gain. At 0.35 the band already rippled clearly
+ * in silence, and since tempo is fixed the only thing speech could change was
+ * depth -- so the eye had constant motion to compare against and the modulation
+ * vanished into it. Dropping the base gives it a still reference to see against.
+ *
+ * Against real agent playback, amp runs a mean of 0.26..0.50 and peaks 0.39..0.65,
+ * varying by better than 2x inside a single second. So:
+ *
+ *   silence      amp 0.00 -> 0.08   nearly a clean band
+ *   speech mean  amp 0.35 -> 0.85   clearly flexing
+ *   speech peak  amp 0.65 -> 1.51   deep, past the reference's own default
+ *
+ * A 19x range where the first attempt had 2.7x. Capped, because the offset is
+ * applied before the band is renormalised onto the sphere and very large values
+ * stop reading as a band at all.
+ */
+#define RIBBON_WOB_BASE 0.08f
+#define RIBBON_WOB_GAIN 2.2f
+#define RIBBON_WOB_MAX 1.6f
+
+void orb_build_ribbon(orb_frame_t *out, float t, float amp)
+{
+    const float R = s_cx * 0.78f;
+
+    /* scale = 1, so scaled vectors go in and z comes back scaled. */
+    const float yaw = t * 0.1f;
+    const float tilt = 0.3f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    if (amp < 0.0f) amp = 0.0f;
+    else if (amp > 1.0f) amp = 1.0f;
+    float wob_mul = RIBBON_WOB_BASE + RIBBON_WOB_GAIN * amp;
+    if (wob_mul > RIBBON_WOB_MAX) {
+        wob_mul = RIBBON_WOB_MAX;
+    }
+
+    size_t count = 0;
+
+    /* The ghost shell first, matching the reference's emission order. */
+    const float ghost_r = 0.8f * s_rs;
+    for (int i = 0; i < RIBBON_GHOSTS; i++) {
+        float ux = s_ghost_dx[i], uy = s_ghost_dy[i], uz = s_ghost_dz[i];
+
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        float dz = uy * st + z1 * ct;
+
+        /* The unit vector is scaled by R before projection, so z/R is dz. */
+        float depth = (dz + 1.0f) / 2.0f;
+        if (depth < 0.0f) depth = 0.0f;
+        else if (depth > 1.0f) depth = 1.0f;
+
+        orb_dot_t *d = &out->dots[count++];
+        d->x = s_cx + x1 * R;
+        d->y = s_cy - y1 * R;
+        d->z = dz * R;
+        d->r = ghost_r;
+        if (d->r < R_MIN) {
+            d->r = R_MIN;
+        }
+        d->white = RIBBON_GHOST_INK;
+        d->a = 0.1f + 0.22f * depth;
+    }
+
+    /*
+     * The band's plane, as two orthogonal in-plane vectors and their normal.
+     * Recomputed per frame because it precesses; the reference builds it the same
+     * way, and the cross product is what the lane offset is applied along.
+     */
+    float ya = t * 0.24f;
+    float ta = 0.55f + 0.3f * sinf(t * 0.18f);
+    float bux = cosf(ya), buy = 0.0f, buz = sinf(ya);
+    float bvx = -buz * sinf(ta), bvy = cosf(ta), bvz = bux * sinf(ta);
+    float bnx = buy * bvz - buz * bvy;
+    float bny = buz * bvx - bux * bvz;
+    float bnz = bux * bvy - buy * bvx;
+
+    for (int w = 0; w < RIBBON_LANES; w++) {
+        float lane_off = s_lane_off[w];
+        float edge = s_lane_edge[w];
+        for (int k = 0; k < RIBBON_SEGS; k++) {
+            float a = s_seg_a[k];
+            float ca = s_seg_cos[k];
+            float sa = s_seg_sin[k];
+
+            /* Two travelling waves along the band, phased per lane so the whole
+             * ribbon flexes rather than every lane moving as one. */
+            float wob = (0.16f * sinf(a * 3.0f - t * 1.7f + (float)w * 0.22f) +
+                         0.07f * sinf(a * 5.0f + t * 1.1f)) * wob_mul;
+            float off = lane_off + wob;
+
+            float x = bux * ca + bvx * sa + bnx * off;
+            float y = buy * ca + bvy * sa + bny * off;
+            float z = buz * ca + bvz * sa + bnz * off;
+            float l = sqrtf(x * x + y * y + z * z);
+            /* Back onto the unit sphere: the band rides the surface. */
+            x /= l; y /= l; z /= l;
+
+            float x1 = x * cyw + z * sy;
+            float z1 = -x * sy + z * cyw;
+            float y1 = y * ct - z1 * st;
+            float dz = y * st + z1 * ct;
+
+            float depth = (dz + 1.0f) / 2.0f;
+            if (depth < 0.0f) depth = 0.0f;
+            else if (depth > 1.0f) depth = 1.0f;
+
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1 * R;
+            d->y = s_cy - y1 * R;
+            d->z = dz * R;
+            d->r = (RIBBON_R_BASE + R_DEPTH * depth) * (1.0f - 0.25f * edge) * s_rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = 0.52f - 0.44f * depth + 0.18f * edge;
+            d->a = 0.4f + 0.6f * depth;
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+    out->line_count = 0; /* only web emits lines */
+}
+
+/* ---------------- braid (braid.ts frameBraid) ---------------- */
+
+/*
+ * frac, in DOUBLE, and that matters more than it looks.
+ *
+ * It is discontinuous at every integer, and it is what walks a strand pole to
+ * pole -- so a float rounding that lands on the other side of an integer does not
+ * shift a dot slightly, it teleports it to the opposite pole. Same class of
+ * problem as rubik's slab test: a smooth-looking mode with one discrete decision
+ * buried in it.
+ */
+static double orb_frac(double x)
+{
+    return x - floor(x);
+}
+
+/*
+ * The playground's `weaving` orb: three strands plaiting pole to pole, over the
+ * same Fibonacci ghost shell ribbon uses.
+ *
+ * THE ONLY MODE THAT CULLS. A strand fades to nothing at the poles, so dots fall
+ * below the 0.02 alpha floor and the count varies frame to frame -- which is why
+ * the harness compares counts rather than assuming them.
+ */
+#define BRAID_STRANDS 3
+#define BRAID_STRAND_N 52
+#define BRAID_TURNS 3.0f
+#define BRAID_R_BASE 1.2f
+#define BRAID_R_DEPTH 1.8f
+
+void orb_build_braid(orb_frame_t *out, float t)
+{
+    const float R = s_cx * 0.76f;
+
+    const float yaw = t * 0.4f;
+    const float tilt = 0.3f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    size_t count = 0;
+
+    /* Ghosts: identical to ribbon's but on braid's tighter shell. */
+    const float ghost_r = 0.8f * s_rs;
+    for (int i = 0; i < BRAID_GHOSTS; i++) {
+        float ux = s_bghost_dx[i] * R, uy = s_bghost_dy[i] * R, uz = s_bghost_dz[i] * R;
+
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        float z = uy * st + z1 * ct;
+
+        /* NOT CLAMPED, unlike every other mode here. braid's weave term pushes a
+         * strand past R, so depth legitimately exceeds 1 and the reference lets
+         * it -- radius and alpha run slightly over their nominal range on the
+         * near side. Clamping pinned r to a constant and cost 15 dots. */
+        float depth = (z / R + 1.0f) / 2.0f;
+
+        float alpha = 0.1f + 0.22f * depth;
+        if (alpha < ALPHA_CULL) {
+            continue;
+        }
+        orb_dot_t *d = &out->dots[count++];
+        d->x = s_cx + x1;
+        d->y = s_cy - y1;
+        d->z = z;
+        d->r = (ghost_r < R_MIN) ? R_MIN : ghost_r;
+        d->white = RIBBON_GHOST_INK;
+        d->a = alpha;
+    }
+
+    for (int sn = 0; sn < BRAID_STRANDS; sn++) {
+        float phase = ((float)sn / (float)BRAID_STRANDS) * TAU;
+        for (int i = 0; i < BRAID_STRAND_N; i++) {
+            /* u walks pole to pole; the frac drift slides the whole strand. */
+            float u = (float)((orb_frac((double)i / (double)BRAID_STRAND_N
+                                        + (double)t * 0.045) * 2.0 - 1.0) * 0.96);
+            float s1 = 1.0f - u * u;
+            float surf = sqrtf((s1 > 0.0f) ? s1 : 0.0f);
+            float end_fade = (1.0f - fabsf(u)) / 0.1f;
+            if (end_fade > 1.0f) {
+                end_fade = 1.0f;
+            }
+            float a = u * (float)M_PI * BRAID_TURNS + phase;
+            /* Radial breathing: the strands trade places, which is what reads as
+             * the over-and-under of a plait rather than three separate helices. */
+            float weave = 1.0f + 0.075f * sinf(u * (float)M_PI * BRAID_TURNS * 2.0f
+                                               + phase * 2.0f + t * 0.8f);
+            float rr = surf * R * weave;
+
+            float vx = cosf(a) * rr;
+            float vy = u * R * weave;
+            float vz = sinf(a) * rr;
+
+            float x1 = vx * cyw + vz * sy;
+            float z1 = -vx * sy + vz * cyw;
+            float y1 = vy * ct - z1 * st;
+            float zr = vy * st + z1 * ct;
+
+            float depth = (zr / R + 1.0f) / 2.0f; /* unclamped: see above */
+
+            float alpha = end_fade * (0.45f + 0.55f * depth);
+            if (alpha < ALPHA_CULL) {
+                continue;
+            }
+            orb_dot_t *d = &out->dots[count++];
+            d->x = s_cx + x1;
+            d->y = s_cy - y1;
+            d->z = zr;
+            d->r = (BRAID_R_BASE + BRAID_R_DEPTH * depth) * s_rs;
+            if (d->r < R_MIN) {
+                d->r = R_MIN;
+            }
+            d->white = 0.55f - 0.45f * depth;
+            d->a = alpha;
+        }
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+    out->line_count = 0; /* only web emits lines */
+}
+
+/* ---------------- web (web.ts frameWeb) ---------------- */
+
+/*
+ * Value noise on an integer grid, smoothstepped. In DOUBLE: floor() is
+ * discontinuous, and this is what makes the nodes wander, so a rounding that
+ * crosses a grid line jumps a node rather than nudging it.
+ */
+static double orb_vnoise(double x, double y)
+{
+    double xi = floor(x), yi = floor(y);
+    double fx = x - xi, fy = y - yi;
+    fx = fx * fx * (3.0 - 2.0 * fx);
+    fy = fy * fy * (3.0 - 2.0 * fy);
+    double a = hash_d(xi, yi);
+    double b = hash_d(xi + 1.0, yi);
+    double c = hash_d(xi, yi + 1.0);
+    double d = hash_d(xi + 1.0, yi + 1.0);
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+
+/*
+ * The playground's `connecting` orb: a constellation wiring itself.
+ *
+ * Thirty nodes drift on the sphere, every pair closer than the threshold grows
+ * an edge, and five packets run along pairs re-picked on a coarse clock. The only
+ * mode with lines, and the only one whose node dots carry no alpha of their own --
+ * the reference leaves Dot.a undefined there, which finalizeFrame reads as 1.
+ */
+#define WEB_NODES 30
+#define WEB_SIGNALS 5
+#define WEB_THR 0.72f
+#define WEB_NODE_R 1.4f
+#define WEB_NODE_R_DEPTH 1.8f
+
+void orb_build_web(orb_frame_t *out, float t)
+{
+    const float R = s_cx * 0.8f;
+
+    /* scale = R here, so unit vectors go in and the distances below stay in
+     * unit-sphere space -- which is what the threshold is expressed in. */
+    const float yaw = t * 0.12f;
+    const float tilt = 0.32f;
+    const float sy = sinf(yaw), cyw = cosf(yaw);
+    const float st = sinf(tilt), ct = cosf(tilt);
+
+    /* Nodes: a Fibonacci lattice pushed around by slow noise, back onto the
+     * surface. Doubles, because orb_vnoise's grid is. */
+    double nx[WEB_NODES], ny[WEB_NODES], nz[WEB_NODES];
+    const double golden = M_PI * (3.0 - sqrt(5.0));
+    for (int i = 0; i < WEB_NODES; i++) {
+        double gy = 1.0 - (2.0 * ((double)i + 0.5)) / (double)WEB_NODES;
+        double rad = sqrt(1.0 - gy * gy);
+        double ga = (double)i * golden;
+        double x = rad * cos(ga) + 0.3 * (orb_vnoise((double)i * 0.31 + 9.0, (double)t * 0.24) - 0.5) * 2.0;
+        double y = gy + 0.3 * (orb_vnoise((double)i * 0.53 + 27.0, (double)t * 0.21) - 0.5) * 2.0;
+        double z = rad * sin(ga) + 0.3 * (orb_vnoise((double)i * 0.77 + 55.0, (double)t * 0.27) - 0.5) * 2.0;
+        double l = sqrt(x * x + y * y + z * z);
+        nx[i] = x / l; ny[i] = y / l; nz[i] = z / l;
+    }
+
+    /* Project each node once: both the edges and the node dots need it. */
+    float px[WEB_NODES], py[WEB_NODES], pz[WEB_NODES];
+    for (int i = 0; i < WEB_NODES; i++) {
+        float ux = (float)nx[i], uy = (float)ny[i], uz = (float)nz[i];
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        pz[i] = uy * st + z1 * ct;
+        px[i] = s_cx + x1 * R;
+        py[i] = s_cy - y1 * R;
+    }
+
+    size_t lines = 0;
+    for (int i = 0; i < WEB_NODES; i++) {
+        for (int j = i + 1; j < WEB_NODES; j++) {
+            double dx = nx[i] - nx[j], dy = ny[i] - ny[j], dz = nz[i] - nz[j];
+            double dist = sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist >= (double)WEB_THR) {
+                continue;
+            }
+            float depth = ((pz[i] + pz[j]) / 2.0f + 1.0f) / 2.0f;
+            float alpha = (float)(1.0 - dist / (double)WEB_THR) * (0.3f + 0.55f * depth);
+            if (alpha < ALPHA_CULL || lines >= ORB_MAX_LINES) {
+                continue;
+            }
+            orb_line_t *ln = &out->lines[lines++];
+            ln->x1 = px[i]; ln->y1 = py[i];
+            ln->x2 = px[j]; ln->y2 = py[j];
+            ln->white = 0.42f;
+            ln->a = alpha;
+            ln->w = (0.8f * s_rs < 0.6f) ? 0.6f : (0.8f * s_rs);
+        }
+    }
+
+    size_t count = 0;
+    for (int i = 0; i < WEB_NODES; i++) {
+        float depth = (pz[i] + 1.0f) / 2.0f;
+        float pulse = 1.0f + 0.25f * sinf(t * 1.4f + (float)i * 2.7f);
+        orb_dot_t *d = &out->dots[count++];
+        d->x = px[i];
+        d->y = py[i];
+        d->z = pz[i];
+        d->r = (WEB_NODE_R + WEB_NODE_R_DEPTH * depth) * pulse * s_rs;
+        if (d->r < R_MIN) {
+            d->r = R_MIN;
+        }
+        d->white = 0.55f - 0.45f * depth;
+        d->a = 1.0f; /* the reference leaves Dot.a undefined; finalizeFrame reads 1 */
+    }
+
+    /* Signals: the pair is re-picked on a coarse clock, so a packet finishes its
+     * run and the next one starts somewhere else entirely. */
+    for (int sg = 0; sg < WEB_SIGNALS; sg++) {
+        double phase = (double)t * 0.55 + (double)sg * 7.31;
+        double seg = floor(phase);
+        int ia = (int)floor(hash_d(seg, (double)sg * 3.1 + 1.7) * (double)WEB_NODES);
+        int ib = (int)floor(hash_d(seg, (double)sg * 5.7 + 4.2) * (double)WEB_NODES);
+        if (ia == ib || ia < 0 || ib < 0 || ia >= WEB_NODES || ib >= WEB_NODES) {
+            continue;
+        }
+        double f = orb_frac(phase);
+        double x = nx[ia] + (nx[ib] - nx[ia]) * f;
+        double y = ny[ia] + (ny[ib] - ny[ia]) * f;
+        double z = nz[ia] + (nz[ib] - nz[ia]) * f;
+        double l = sqrt(x * x + y * y + z * z);
+        if (l < 1e-6) {
+            l = 1e-6;
+        }
+        float ux = (float)(x / l), uy = (float)(y / l), uz = (float)(z / l);
+
+        float x1 = ux * cyw + uz * sy;
+        float z1 = -ux * sy + uz * cyw;
+        float y1 = uy * ct - z1 * st;
+        float zr = uy * st + z1 * ct;
+        float depth = (zr + 1.0f) / 2.0f;
+
+        float alpha = 0.5f + 0.5f * depth;
+        if (alpha < ALPHA_CULL) {
+            continue;
+        }
+        orb_dot_t *d = &out->dots[count++];
+        d->x = s_cx + x1 * R;
+        d->y = s_cy - y1 * R;
+        d->z = zr;
+        d->r = (WEB_NODE_R * 1.5f + WEB_NODE_R_DEPTH * depth) * s_rs;
+        if (d->r < R_MIN) {
+            d->r = R_MIN;
+        }
+        d->white = 0.05f;
+        d->a = alpha;
+    }
+
+    qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
+    out->count = count;
+    out->line_count = lines;
+}
+
+/* ---------------- wave's ink pass ---------------- */
+
+/*
+ * Brighten wave's dots with the microphone level.
+ *
+ * SEPARATE FROM orb_build_wave ON PURPOSE, and the separation is the point.
+ * buildWave exposes exactly one dynamic input, dyn.rMul, so radius is the only
+ * thing the reference lets volume touch -- and a 60% swell on its own does not
+ * read as someone talking. Ink does, and ink is ours.
+ *
+ * So this composes over the finished dot list rather than going inside the build,
+ * exactly as voice_pass does and for exactly the same reason: orb_build_wave stays
+ * a faithful transcription the harness can diff, and the thing with no upstream
+ * stays outside it. host/orb_dump.c simply never calls this.
+ *
+ * Ink is inverted on a dark ground -- grey is (1 - white) * 255 -- so brightening
+ * means SUBTRACTING. Alpha is left alone: wave sets it to 1 throughout, so there
+ * is no headroom there and ink is the whole of brightness on this panel.
+ */
+void orb_wave_ink(orb_frame_t *out, float amp)
+{
+    if (amp < 0.0f) {
+        amp = 0.0f;
+    } else if (amp > 1.0f) {
+        amp = 1.0f;
+    }
+    /*
+     * Runs even at silence, unlike before: the floor has to be applied whatever
+     * the level, since resting darker is the whole reason the brightening reads.
+     *
+     * sqrt matches the swell, for the same reason -- a 180x amp range that no
+     * linear map serves at both ends.
+     */
+    float d = WAVE_INK_FLOOR - WAVE_INK_GAIN * sqrtf(amp);
+    for (size_t i = 0; i < out->count; i++) {
+        float w = out->dots[i].white + d;
+        if (w < 0.0f) w = 0.0f;
+        else if (w > 1.0f) w = 1.0f; /* the floor must not push the far side past black */
+        out->dots[i].white = w;
+    }
 }
 
 /* ---------------- the voice pass ---------------- */
@@ -1000,4 +2106,5 @@ void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
 
     qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
     out->count = count;
+    out->line_count = 0; /* only web emits lines */
 }

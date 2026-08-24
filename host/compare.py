@@ -15,19 +15,26 @@ def load(path):
     with open(path) as f:
         for line in f:
             p = line.split()
-            if len(p) != 7:
+            # 7 tokens is a dot (x y z r white a); 8 is a line
+            # (x1 y1 x2 y2 white a w). Lines carry a `~L` label suffix, so the
+            # two never share a case and the width is unambiguous per case.
+            if len(p) not in (7, 8):
                 continue
             by_case[p[0]].append(tuple(float(v) for v in p[1:]))
     return by_case
 
 ref, port = load(sys.argv[1]), load(sys.argv[2])
-FIELDS = ('x', 'y', 'z', 'r', 'white', 'a')
+DOT_FIELDS = ('x', 'y', 'z', 'r', 'white', 'a')
+LINE_FIELDS = ('x1', 'y1', 'x2', 'y2', 'white', 'a', 'w')
 worst_all, failures = 0.0, 0
 
 for case in ref:
     a, b = ref[case], port.get(case, [])
+    is_line = bool(a) and len(a[0]) == 7
+    FIELDS = LINE_FIELDS if is_line else DOT_FIELDS
+    noun = "lines" if is_line else "dots"
     if len(a) != len(b):
-        print(f"FAIL {case:14s} dot count {len(a)} vs {len(b)}")
+        print(f"FAIL {case:14s} {noun} count {len(a)} vs {len(b)}")
         failures += 1
         continue
 
@@ -42,7 +49,7 @@ for case in ref:
 
     worst, where = maxdev(a, b)
     if worst <= TOL:
-        print(f"ok   {case:14s} {len(a):3d} dots, max dev {worst:.6f}")
+        print(f"ok   {case:14s} {len(a):3d} {noun}, max dev {worst:.6f}")
         worst_all = max(worst_all, worst)
         continue
 
@@ -74,7 +81,7 @@ for case in ref:
             unmatched += 1
 
     if unmatched == 0:
-        print(f"ok   {case:14s} {len(a):3d} dots, max dev {worst_m:.6f} "
+        print(f"ok   {case:14s} {len(a):3d} {noun}, max dev {worst_m:.6f} "
               f"(same dots, port's own draw order)")
         worst_all = max(worst_all, worst_m)
     else:

@@ -418,6 +418,39 @@ loud — "lime" against "acid lime" is a coin toss spoken aloud. So its `acid li
 is `lime` here, its `lime` is `green`, its `bright teal` is `teal`, and its muted
 `#80cbc4` teal is dropped.
 
+## Seeing every orb state: the display test
+
+Say **"up up down down left right left right"** and the agent hands the screen
+over. Each tap advances one step; the last one restores the previous face and
+starts a fresh session.
+
+Nine steps — the orb's eight states, then `frozen`. It exists because most of
+these are otherwise nearly impossible to look at: several last a second or two
+mid-turn, the connection rungs need a network failure to provoke, and
+**`THINKING` cannot occur in a real session at all.** `AgentThinking` has never
+arrived from the stack, so until this mode existed that pose was
+parity-verified geometry nobody had ever seen render.
+
+**The microphone stays live; nothing is streamed.** The orb's amplitude scales
+how *deep* each gesture goes, so at zero, `listening`, `speaking` and `idle` are
+nearly the same picture — the test needs real levels to be worth anything. But
+there is no session to stream to, so `audio_io_capture_set_monitor()` feeds the
+display tap with the network sink shut. Its `continue` lands before the sink,
+which is what makes writing to a socket that is not there impossible rather than
+merely unlikely.
+
+Only one of the four modifiers gets a step, which is not obvious: `face_orb.c`
+reads `frozen` and `press_active`, while `idle` and `stopped` belong to the
+spectrum. On the orb those two are already states — `idle` is step 0, and
+`stopped` is what `resolve_behaviour()` turns into `DISCONNECTED` at step 7 — so
+separate steps would only add poses identical to plain `listening`.
+`press_active` needs no step either; every tap shows it on the way past.
+
+The trigger is the fragile part, and deliberately loose. The phrase has to
+survive speech-to-text — it can arrive merged, hyphenated, or with `B A` on the
+end — so the function description matches the *shape* of the utterance, a run of
+repeated directions, rather than any exact string.
+
 ## Stopping when nobody is talking
 
 The device uplinks 16 kHz mono for as long as a session is open — roughly

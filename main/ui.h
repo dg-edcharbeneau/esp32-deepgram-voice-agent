@@ -34,6 +34,13 @@ esp_err_t ui_start(void);
 typedef enum {
     UI_TAP,  /* short press: toggle */
     UI_HOLD, /* long press: force restart */
+
+    /*
+     * The display test reached its last step and has already put the previous
+     * face back. Emitted rather than acted on here so ui.c stays free of any
+     * session header, exactly as tap and hold do.
+     */
+    UI_TEST_DONE,
 } ui_gesture_t;
 
 /*
@@ -46,11 +53,25 @@ typedef enum {
  * ui.c infers the conversational states for itself from the audio path, which is
  * tied to what the speaker and microphone are actually doing. The connection
  * phases are the ones it cannot see and has to be told.
+ *
+ * Nothing indexes an array by these or puts them on the wire, so the order is
+ * free to change; it mirrors orb_behaviour_t's so the two read the same way.
  */
 typedef enum {
     UI_BEHAVIOUR_IDLE = 0,
     UI_BEHAVIOUR_INITIALIZING,
     UI_BEHAVIOUR_LISTENING,
+
+    /*
+     * resolve_behaviour() NEVER RETURNS THIS, and that is not an oversight.
+     * AgentThinking has not arrived in any logged session, so there is nothing to
+     * infer it from. It exists so the display test can render the shell's
+     * thinking pose -- a faithful, parity-verified port that would otherwise be
+     * code nobody has ever seen run -- and so that the day the message does show
+     * up, wiring it is one line in resolve_behaviour() and nothing else.
+     */
+    UI_BEHAVIOUR_THINKING,
+
     UI_BEHAVIOUR_SPEAKING,
     UI_BEHAVIOUR_CONNECTING,
     UI_BEHAVIOUR_BUFFERING,
@@ -128,6 +149,35 @@ void ui_set_face(int index);
  * like the face and unlike the voice.
  */
 void ui_set_orb_color(int index);
+
+/*
+ * Deepgram detected the user starting to speak.
+ *
+ * This is what drives LISTENING. Measured against a local band-energy gate on the
+ * same speech, this separates cleanly -- six events across two speech phases, none
+ * across seventeen seconds of quiet -- where band energy managed at best a 5x
+ * ratio and could not be thresholded without either missing speech or flickering
+ * on room noise.
+ *
+ * Costs a dependency on the session and a network round trip, and it marks only
+ * the START of an utterance, so the display holds LISTENING for a while after.
+ */
+void ui_note_user_speech(void);
+
+/*
+ * Hand the screen over to the display test: every orb state and modifier, one per
+ * tap, and nothing else on screen.
+ *
+ * Taps stop reaching the gesture handler for the duration -- they advance the
+ * sequence instead -- so this is the only mode in which a tap does not toggle the
+ * session. Forces the orb, since the sequence means nothing on the spectrum, and
+ * puts the previous face back at the end.
+ *
+ * The CALLER owns the session and the microphone. This function draws; it does
+ * not stop the session and does not start one at the end. It emits UI_TEST_DONE
+ * and leaves that to whoever owns it.
+ */
+void ui_start_display_test(void);
 
 /*
  * A window of accumulated measurements, for one telemetry line.

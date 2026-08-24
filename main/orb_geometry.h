@@ -34,12 +34,68 @@ typedef enum {
     ORB_CONNECTING = 5,
     ORB_BUFFERING = 6,
     ORB_DISCONNECTED = 7,
-    ORB_BEHAVIOUR_COUNT = 8,
+
+    /*
+     * NOT FROM THE REFERENCE -- the only behaviour here that is not.
+     *
+     * The dim disconnected shell used as a level meter: rings illuminate outward
+     * from the equator to a distance set by the level of the audio playing, with a
+     * brighter cap at the leading edge, and retract as it falls. A spectrum
+     * analyser bar wrapped onto a sphere.
+     *
+     * It has no upstream, so host/run.sh CANNOT check it -- there is nothing to
+     * diff against. It is verified by dumping alpha per ring across level, which
+     * is what caught the two aliasing faults its tuning has already had.
+     */
+    ORB_SPEAKING_FILL = 8,
+
+    ORB_BEHAVIOUR_COUNT = 9,
 } orb_behaviour_t;
 
-/* 18 rings of cosine-tapered longitude counts. Not a 17x42 grid -- see
- * orb_init(). */
-#define ORB_MAX_DOTS 456
+/*
+ * Per-mode dot counts, and the capacity that has to cover all of them.
+ *
+ * A MAX RATHER THAN A LITERAL on purpose. This sizes orb_frame_t, the
+ * rasteriser's dirty list and the lattice tables, and orb_raster_draw() silently
+ * TRUNCATES anything past it -- so a cap that drifts below a mode's real count
+ * drops dots and reads as missing rows in the harness rather than as an error.
+ * Reduce a mode's tuning if a frame is too dear; never reduce the cap.
+ */
+#define ORB_VOICE_DOTS 456  /* 18 rings of cosine-tapered longitude counts */
+#define ORB_WAVE_DOTS 384   /* rings 15 / lonDensity 40; rubik shares it */
+#define ORB_RIBBON_DOTS 370 /* ghostN 90 + lanes 5 * segs 56, tuned down */
+#define ORB_BRAID_DOTS 306  /* ghostN 150 + 3 strands * strandN 52 */
+#define ORB_WEB_DOTS 35     /* nodeN 30 + signals 5 */
+
+#define ORB_MAX2(a, b) ((a) > (b) ? (a) : (b))
+
+/*
+ * Capacity is sized for TWO modes at once, not one.
+ *
+ * A cross-mode transition draws the outgoing and incoming animations together and
+ * fades between them on alpha -- two different lattices cannot be interpolated
+ * ring by ring the way two shell behaviours can, so the frame carries both dot
+ * lists concatenated. The largest pair is the shell against wave or rubik.
+ *
+ * The cost is 9 kB of PSRAM, which is not the resource under pressure here --
+ * internal RAM is, and none of this touches it.
+ */
+#define ORB_ONE_MODE_DOTS                                   \
+    ORB_MAX2(ORB_VOICE_DOTS,                                \
+             ORB_MAX2(ORB_WAVE_DOTS,                        \
+                      ORB_MAX2(ORB_RIBBON_DOTS, ORB_BRAID_DOTS)))
+#define ORB_SECOND_MODE_DOTS ORB_WAVE_DOTS /* the next largest after the shell */
+#define ORB_MAX_DOTS (ORB_ONE_MODE_DOTS + ORB_SECOND_MODE_DOTS)
+
+/*
+ * Marks fainter than this are dropped rather than drawn.
+ *
+ * Part of the frame's contract rather than an implementation detail: it is the
+ * threshold the reference's finalizeFrame uses, so it is what the parity harness
+ * compares against -- and anything composing frames has to cull by the same rule
+ * or it changes the dot count.
+ */
+#define ORB_ALPHA_CULL 0.02f
 
 typedef struct {
     float x, y;  /* screen pixels */
@@ -49,9 +105,30 @@ typedef struct {
     float a;     /* alpha, 0..1 */
 } orb_dot_t;
 
+/*
+ * A stroked edge. Only `web` emits these; every other mode leaves `line_count`
+ * at zero, and a renderer that ignores lines entirely still draws those modes
+ * correctly.
+ */
+typedef struct {
+    float x1, y1, x2, y2; /* screen pixels */
+    float white;          /* ink, same convention as orb_dot_t */
+    float a;              /* alpha, 0..1 */
+    float w;              /* stroke width in pixels */
+} orb_line_t;
+
+/*
+ * web pairs 30 nodes and keeps those closer than the threshold, so the bound is
+ * every pair -- 30*29/2. Typically far fewer survive; the cap is for the frame
+ * buffer, not a prediction.
+ */
+#define ORB_MAX_LINES 435
+
 typedef struct {
     orb_dot_t dots[ORB_MAX_DOTS];
     size_t count;
+    orb_line_t lines[ORB_MAX_LINES];
+    size_t line_count;
 } orb_frame_t;
 
 /*
@@ -70,6 +147,73 @@ typedef struct {
     float mid;  /* travelling ripple   -- "following the words"    */
     float high; /* ink only, no motion -- sibilance as brightness  */
 } orb_bands_t;
+
+/*
+ * Build one frame of `wave` -- the playground's `listening` orb, ported from
+ * lattice.ts buildWave.
+ *
+ * No behaviour, no blend, no amplitude: a wave is a single animation that does
+ * the same thing forever. 384 dots on its own lattice, not the shell's 456.
+ *
+ * `amp` is the MICROPHONE level -- LISTENING is the user talking -- and scales
+ * every radius through the reference's dyn.rMul. See WAVE_RMUL_GAIN for why that
+ * is the only hook available and what it costs in expressiveness.
+ */
+void orb_build_wave(orb_frame_t *out, float t, float amp);
+
+/*
+ * Brighten a built wave frame by the microphone level.
+ *
+ * A SEPARATE call, not folded into orb_build_wave, because buildWave has no ink
+ * hook upstream -- radius is the only thing the reference lets volume touch. This
+ * composes over the finished frame the way the voice band pass does, which keeps
+ * orb_build_wave a transcription the parity harness can check and keeps the part
+ * with no upstream outside it.
+ */
+void orb_wave_ink(orb_frame_t *out, float amp);
+
+/*
+ * Build one frame of `rubik` -- the playground's `solving` orb, ported from
+ * lattice.ts buildRubik. Shares wave's lattice and dot count; everything else,
+ * including the shell radius and the ink constants, is its own.
+ */
+void orb_build_rubik(orb_frame_t *out, float t);
+
+/*
+ * Build one frame of `ribbon` -- the playground's `composing` orb, ported from
+ * ribbon.ts buildRibbon.
+ *
+ * The largest mode at 590 dots: a 150-dot Fibonacci ghost shell plus a five-lane
+ * band of 88 segments that precesses and undulates. Unlike wave and rubik it
+ * varies alpha per dot, so its ghosts read as a haze behind the band.
+ *
+ * `amp` is 0..1 and scales how DEEP the undulation goes, never how fast -- the
+ * band's tempo is fixed. Tuned below the reference's dot counts for frame budget;
+ * see RIBBON_GHOSTS in orb_geometry.c.
+ */
+void orb_build_ribbon(orb_frame_t *out, float t, float amp);
+
+/*
+ * Build one frame of `braid` -- the playground's `weaving` orb, ported from
+ * braid.ts frameBraid.
+ *
+ * Three strands plaiting pole to pole over the same ghost shell ribbon uses. The
+ * only mode so far that CULLS: a strand fades out at the poles, so the dot count
+ * varies from frame to frame.
+ */
+void orb_build_braid(orb_frame_t *out, float t);
+
+/*
+ * Build one frame of `web` -- the playground's `connecting` orb, ported from
+ * web.ts frameWeb.
+ *
+ * THE ONLY MODE THAT EMITS LINES. Thirty nodes drift on the sphere under slow
+ * value noise, every pair closer than the threshold grows an edge, and bright
+ * packets run along re-picked pairs. Sets both `count` and `line_count`; a
+ * renderer with no line support draws the nodes and none of the wiring, which is
+ * most of the point of it missing.
+ */
+void orb_build_web(orb_frame_t *out, float t);
 
 /*
  * Evaluate one frame.

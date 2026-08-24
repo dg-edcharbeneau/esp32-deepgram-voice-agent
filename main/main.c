@@ -78,6 +78,9 @@ static volatile int64_t s_activity_us;
  * land in the window, short enough not to smear the transition. */
 #define TELEMETRY_SWITCH_MS 200
 
+/* While waiting for the speaker to drain before the display test. */
+#define TEST_ENTRY_POLL_MS 100
+
 static void note_activity(void)
 {
     s_activity_us = esp_timer_get_time();
@@ -155,6 +158,9 @@ static void on_user_started_speaking(void *ctx)
     /* Deepgram's own speech detection, which is better evidence than the local
      * level and arrives even when the display is not running. */
     note_activity();
+    /* And it is what puts the orb into LISTENING -- measured to separate speech
+     * from a quiet room cleanly where the local band gate could not. */
+    ui_note_user_speech();
     /* Stop mid-sentence rather than talk over the user. */
     audio_io_flush();
 }
@@ -171,6 +177,49 @@ static void mic_to_agent(const uint8_t *pcm, size_t len)
 static void on_reload_required(void *ctx)
 {
     session_ctl_request_reload();
+}
+
+/*
+ * Set when the agent has asked for the display test, cleared once the speaker has
+ * actually finished the sentence announcing it. See enter_display_test().
+ */
+static bool s_test_entry_pending;
+static int64_t s_test_entry_deadline_us;
+
+/* How long to wait for the speaker to drain before starting anyway. Long enough
+ * for a sentence the agent has already finished sending, short enough that a
+ * playback path stuck busy cannot swallow the feature. */
+#define TEST_ENTRY_WAIT_US (8 * 1000000)
+
+static void enter_display_test(void)
+{
+    /*
+     * ORDER MATTERS. session_ctl's stop path calls
+     * audio_io_capture_set_enabled(false), so the monitor flag has to go up
+     * after the session comes down or the stop clears it -- and then the orb
+     * would sit at zero amplitude for the whole test, which is most of the point
+     * of it gone.
+     */
+    session_ctl_request_stop();
+    audio_io_capture_set_monitor(true);
+    ui_start_display_test();
+}
+
+static void on_display_test_required(void *ctx)
+{
+    /*
+     * AgentAudioDone is NOT the speaker finishing. It means the agent has
+     * finished SENDING, and between that and the last sample leaving the codec
+     * sits the playback ring -- 384 kB, about six seconds of mono. Entering here
+     * stops the session, which drops the queue, and the announcement is cut off
+     * mid-word. Measured on the device, not theorised.
+     *
+     * So this only arms the entry; the main loop below waits for
+     * audio_io_playback_active() to go false, which is tied to what the speaker
+     * is actually doing rather than to what the agent last claimed.
+     */
+    s_test_entry_pending = true;
+    s_test_entry_deadline_us = esp_timer_get_time() + TEST_ENTRY_WAIT_US;
 }
 
 static void on_agent_audio_done(void *ctx)
@@ -191,6 +240,25 @@ static void on_gesture(ui_gesture_t gesture)
         ESP_LOGI(TAG, "EVT hold");
         session_ctl_request_restart();
         break;
+
+    case UI_TEST_DONE:
+        /*
+         * Undo the display test's two side effects, in the reverse order they
+         * were applied: the microphone stops feeding the display, and a fresh
+         * session replaces the one the test closed.
+         */
+        ESP_LOGI(TAG, "EVT test-done, restarting session");
+        audio_io_capture_set_monitor(false);
+        /*
+         * Before the start, not after: the idle clock has been running
+         * untouched for the whole test -- nothing notes activity while the
+         * session is down -- so without this the timeout below sees the test's
+         * own duration as quiet time and stops the session it just started.
+         * Measured: a 41 s test killed the new session 9 s after it went ready.
+         */
+        note_activity();
+        session_ctl_request_start();
+        break;
     }
 }
 
@@ -202,6 +270,7 @@ static const dg_agent_callbacks_t s_callbacks = {
     .on_agent_audio_done = on_agent_audio_done,
     .on_user_started_speaking = on_user_started_speaking,
     .on_reload_required = on_reload_required,
+    .on_display_test_required = on_display_test_required,
 };
 
 /*
@@ -351,6 +420,25 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(wait_ms));
         wait_ms = CONFIG_UI_TELEMETRY_MS;
 
+        /*
+         * Hand over once the speaker is actually done, so the announcement is
+         * not cut off. Polled here rather than in a task of its own, at a
+         * tighter cadence than the telemetry window so the wait is not audible
+         * as a gap -- the same trick the post-face-switch reading uses.
+         */
+        if (s_test_entry_pending) {
+            bool drained = !audio_io_playback_active();
+            bool timed_out = esp_timer_get_time() > s_test_entry_deadline_us;
+            if (drained || timed_out) {
+                s_test_entry_pending = false;
+                ESP_LOGI(TAG, "EVT test entering (%s)",
+                         drained ? "speaker drained" : "wait timed out");
+                enter_display_test();
+            } else {
+                wait_ms = TEST_ENTRY_POLL_MS;
+            }
+        }
+
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
 
@@ -366,8 +454,40 @@ void app_main(void)
         if (audio_io_playback_active()) {
             note_activity();
         }
+        /*
+         * AND IT MUST BE READY, not merely running.
+         *
+         * Nothing notes activity while the socket is down, so a reconnect spends
+         * the whole window accumulating idle time and the timeout fires on a
+         * session that was never given the chance to be busy. Measured: a
+         * transport write error at 78.9 s, the client's own 5 s reconnect, the
+         * timeout at 85.9 s, and the recovered session live at 86.4 s and stopped
+         * 2 ms later by a request issued before it came back.
+         *
+         * Gating the check is only half of it. s_activity_us keeps accumulating
+         * while the socket is down, so a gate alone would not save the session --
+         * it would defer the kill to the exact moment readiness returned, with the
+         * clock already past the limit. Which is the symptom, not a fix.
+         *
+         * So the clock is also RESTARTED on the notready -> ready edge. Coming
+         * back counts as activity, and the recovered session gets a full window to
+         * prove itself idle rather than being judged on the outage.
+         *
+         * An edge rather than stamping while ready, so a session that sits ready
+         * and silent still times out as it should.
+         *
+         * Same fault as the display test's, which I fixed as a symptom rather than
+         * as a pattern -- a clock counting time in which activity was impossible.
+         */
+        bool ready_now = dg_agent_is_ready();
+        static bool was_ready;
+        if (ready_now && !was_ready) {
+            note_activity();
+        }
+        was_ready = ready_now;
+
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
-            s_activity_us != 0) {
+            ready_now && s_activity_us != 0) {
             int64_t quiet_us = esp_timer_get_time() - s_activity_us;
             if (quiet_us > (int64_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000000) {
                 ESP_LOGI(TAG, "EVT idletimeout after=%.1fs",

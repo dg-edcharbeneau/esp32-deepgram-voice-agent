@@ -83,6 +83,22 @@ void audio_io_flush(void);
 void audio_io_capture_set_enabled(bool enabled);
 
 /*
+ * Feed the display tap while keeping the network sink shut.
+ *
+ * A deliberate, temporary exception to the gate above, for the display test:
+ * the orb needs real microphone levels to demonstrate its states -- amplitude
+ * scales how deep each gesture goes, so at zero half of them look identical --
+ * but there is no session to stream to, and writing to a socket that is not
+ * there is how the transport errors in the logs happen.
+ *
+ * Only consulted while capture is DISABLED, so it cannot loosen the gate on a
+ * live session. It is the ordering that matters: session_ctl's stop path calls
+ * audio_io_capture_set_enabled(false), so set the session down first and this
+ * afterwards, or the stop will clear what you just asked for.
+ */
+void audio_io_capture_set_monitor(bool monitor);
+
+/*
  * Clear producer-side state between sessions.
  *
  * audio_io_flush() only empties the ring; it cannot touch the odd-byte carry,
