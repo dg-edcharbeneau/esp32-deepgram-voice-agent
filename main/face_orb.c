@@ -105,6 +105,21 @@ static orb_mode_t mode_for(ui_behaviour_t b)
     }
 }
 
+/* How long a cross-mode fade lasts. The shell's own BLEND_MS for consistency:
+ * a viewer should not be able to tell which kind of transition they are watching. */
+#define MODE_BLEND_MS BLEND_MS
+
+/*
+ * The outgoing animation during a cross-mode fade, and the second frame it needs.
+ *
+ * PSRAM, like the primary frame and for the same reason -- 32 kB of dot list has
+ * no business in internal RAM. Allocated on first use rather than at init, so a
+ * build with the crossfade disabled never pays for it.
+ */
+#if CONFIG_ORB_MODE_CROSSFADE
+static orb_frame_t *s_frame_b;
+#endif
+
 static const char *mode_name(orb_mode_t m)
 {
     switch (m) {
@@ -117,6 +132,70 @@ static const char *mode_name(orb_mode_t m)
     default:          return "shell";
     }
 }
+
+/* Build one animation into `out`. The shell arm takes the behaviour blend; every
+ * mode ignores from/to/mix, having no behaviours to blend. */
+static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
+                       const orb_bands_t *bands,
+                       orb_behaviour_t from, orb_behaviour_t to, float mix)
+{
+    switch (mode) {
+    /* wave takes the microphone level: LISTENING is the user talking. */
+    case MODE_WAVE:   orb_build_wave(out, t, amp); break;
+    case MODE_RUBIK:  orb_build_rubik(out, t); break;
+    /*
+     * Kept, and currently unreachable: no state maps to MODE_RIBBON since
+     * SPEAKING moved to the shell's fill. The port stays because it is
+     * parity-verified and cheap to point a state back at.
+     */
+    case MODE_RIBBON: orb_build_ribbon(out, t, amp); break;
+    case MODE_BRAID:  orb_build_braid(out, t); break;
+    case MODE_WEB:    orb_build_web(out, t); break;
+    case MODE_SHELL:
+    default:
+        orb_build(out, t, from, to, mix, amp, bands);
+        break;
+    }
+}
+
+#if CONFIG_ORB_MODE_CROSSFADE
+/* Fade a whole animation by scaling every mark's alpha. Lines included: web's
+ * edges have to leave with its nodes, not after them. */
+static void scale_alpha(orb_frame_t *f, float k)
+{
+    for (size_t i = 0; i < f->count; i++) {
+        f->dots[i].a *= k;
+    }
+    for (size_t i = 0; i < f->line_count; i++) {
+        f->lines[i].a *= k;
+    }
+}
+
+/*
+ * Concatenate `b` into `a`, dropping marks the fade has taken below the cull
+ * threshold -- most of a frame, late in a transition, so this is what keeps the
+ * doubled cost from being a doubled cost for the whole 280 ms.
+ *
+ * No re-sort. The rasteriser buckets by row band rather than trusting draw order,
+ * and both halves arrive already sorted, so an interleaved pair is drawn correctly
+ * without paying for a second qsort over 840 dots.
+ */
+static void append_frame(orb_frame_t *a, const orb_frame_t *b)
+{
+    for (size_t i = 0; i < b->count && a->count < ORB_MAX_DOTS; i++) {
+        if (b->dots[i].a < ORB_ALPHA_CULL) {
+            continue;
+        }
+        a->dots[a->count++] = b->dots[i];
+    }
+    for (size_t i = 0; i < b->line_count && a->line_count < ORB_MAX_LINES; i++) {
+        if (b->lines[i].a < ORB_ALPHA_CULL) {
+            continue;
+        }
+        a->lines[a->line_count++] = b->lines[i];
+    }
+}
+#endif
 
 static orb_behaviour_t to_orb(ui_behaviour_t b)
 {
@@ -249,29 +328,73 @@ static void render(const ui_render_ctx_t *ctx)
      * record rather than a matter of opinion. The shell keeps its 280 ms blend
      * between its own behaviours.
      */
-    static orb_mode_t s_mode_shown = MODE_SHELL;
-    if (mode != s_mode_shown) {
-        ESP_LOGI("face_orb", "EVT mode %s->%s (cut)",
-                 mode_name(s_mode_shown), mode_name(mode));
-        s_mode_shown = mode;
+    static orb_mode_t s_mode_from = MODE_SHELL, s_mode_to = MODE_SHELL;
+    static int64_t s_mode_blend_us;
+#if CONFIG_ORB_MODE_CROSSFADE
+    /* Only the fade needs to know what the outgoing shell was showing. */
+    static orb_behaviour_t s_mode_from_beh = ORB_DISCONNECTED;
+#endif
+
+    if (mode != s_mode_to) {
+        /* From where we were HEADING, not from the blend showing right now --
+         * the same choice the shell's own behaviour blend makes above. */
+        s_mode_from = s_mode_to;
+#if CONFIG_ORB_MODE_CROSSFADE
+        s_mode_from_beh = s_from; /* what the outgoing shell was showing */
+#endif
+        s_mode_to = mode;
+        s_mode_blend_us = ctx->now_us;
+        ESP_LOGI("face_orb", "EVT mode %s->%s (%s)",
+                 mode_name(s_mode_from), mode_name(mode),
+#if CONFIG_ORB_MODE_CROSSFADE
+                 "fade");
+#else
+                 "cut");
+#endif
     }
 
-    switch (mode) {
-    /* wave takes the microphone level: LISTENING is the user talking. */
-    case MODE_WAVE:   orb_build_wave(s_frame, t, amp); break;
-    case MODE_RUBIK:  orb_build_rubik(s_frame, t); break;
-    /*
-     * Kept, and currently unreachable: no state maps to MODE_RIBBON since
-     * SPEAKING moved to the shell's pulse. The port stays because it is
-     * parity-verified and cheap to point a state back at.
-     */
-    case MODE_RIBBON: orb_build_ribbon(s_frame, t, amp); break;
-    case MODE_BRAID:  orb_build_braid(s_frame, t); break;
-    case MODE_WEB:    orb_build_web(s_frame, t); break;
-    default:
-        orb_build(s_frame, t, s_from, s_to, mix, amp, &bands);
-        break;
+    float mode_mix = 1.0f;
+    if (s_mode_from != s_mode_to) {
+        float el_ms = (float)(ctx->now_us - s_mode_blend_us) / 1000.0f;
+        mode_mix = el_ms / MODE_BLEND_MS;
+        if (mode_mix >= 1.0f) {
+            mode_mix = 1.0f;
+            s_mode_from = s_mode_to; /* landed; stop paying for the second build */
+        }
     }
+
+#if CONFIG_ORB_MODE_CROSSFADE
+    if (s_mode_from != s_mode_to && s_frame_b == NULL) {
+        /* First transition of the boot pays for the second frame. */
+        s_frame_b = heap_caps_malloc(sizeof(*s_frame_b), MALLOC_CAP_SPIRAM);
+    }
+#else
+    (void)mode_mix;
+#endif
+
+    build_mode(mode, s_frame, t, amp, &bands, s_from, s_to, mix);
+
+#if CONFIG_ORB_MODE_CROSSFADE
+    /*
+     * A cross-mode fade: draw BOTH animations and fade on alpha.
+     *
+     * Two modes cannot be interpolated the way two shell behaviours can -- there
+     * is no pose between a lattice and a braid -- so the frame carries both dot
+     * lists at complementary alpha and the eye does the blending. Costs a second
+     * build for the seven or so frames a transition lasts.
+     *
+     * The outgoing side is built at a FIXED behaviour, captured when the mode
+     * changed. Letting it follow ctx->behaviour would have it animating towards
+     * the state it is being replaced by, which is the one thing it must not do.
+     */
+    if (s_mode_from != s_mode_to && s_frame_b != NULL) {
+        build_mode(s_mode_from, s_frame_b, t, amp, &bands,
+                   s_mode_from_beh, s_mode_from_beh, 1.0f);
+        scale_alpha(s_frame, mode_mix);
+        scale_alpha(s_frame_b, 1.0f - mode_mix);
+        append_frame(s_frame, s_frame_b);
+    }
+#endif
     int64_t t_rast = esp_timer_get_time();
     /* Colour is the user's, resolved by ui.c. Nothing to latch or reset: it is a
      * pure draw parameter, so a change lands on the next frame by itself -- which

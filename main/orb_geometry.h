@@ -68,10 +68,36 @@ typedef enum {
 #define ORB_WEB_DOTS 35     /* nodeN 30 + signals 5 */
 
 #define ORB_MAX2(a, b) ((a) > (b) ? (a) : (b))
-#define ORB_MAX_DOTS                                        \
+
+/*
+ * Capacity is sized for TWO modes at once, not one.
+ *
+ * A cross-mode transition draws the outgoing and incoming animations together and
+ * fades between them on alpha -- two different lattices cannot be interpolated
+ * ring by ring the way two shell behaviours can, so the frame carries both dot
+ * lists concatenated. The largest pair is the shell against wave or rubik.
+ *
+ * Sized unconditionally rather than behind the Kconfig switch that turns the
+ * crossfade on: this header is pure maths that also compiles on the host for the
+ * parity harness, where CONFIG_* does not exist. The cost is PSRAM, which is not
+ * the resource under pressure.
+ */
+#define ORB_ONE_MODE_DOTS                                   \
     ORB_MAX2(ORB_VOICE_DOTS,                                \
              ORB_MAX2(ORB_WAVE_DOTS,                        \
                       ORB_MAX2(ORB_RIBBON_DOTS, ORB_BRAID_DOTS)))
+#define ORB_SECOND_MODE_DOTS ORB_WAVE_DOTS /* the next largest after the shell */
+#define ORB_MAX_DOTS (ORB_ONE_MODE_DOTS + ORB_SECOND_MODE_DOTS)
+
+/*
+ * Marks fainter than this are dropped rather than drawn.
+ *
+ * Part of the frame's contract rather than an implementation detail: it is the
+ * threshold the reference's finalizeFrame uses, so it is what the parity harness
+ * compares against -- and anything composing frames has to cull by the same rule
+ * or it changes the dot count.
+ */
+#define ORB_ALPHA_CULL 0.02f
 
 typedef struct {
     float x, y;  /* screen pixels */

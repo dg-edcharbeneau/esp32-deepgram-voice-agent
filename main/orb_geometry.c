@@ -371,7 +371,7 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 /* Dot radii were tuned for a 300 pt frame; sub-linear scaling keeps a small
  * shell legible. */
 #define R_MIN 0.3f
-#define ALPHA_CULL 0.02f
+#define ALPHA_CULL ORB_ALPHA_CULL /* one source of truth; see orb_geometry.h */
 
 /*
  * The body breath: a scale that only ever draws IN, applied to every behaviour.
