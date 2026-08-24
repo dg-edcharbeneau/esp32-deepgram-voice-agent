@@ -360,6 +360,24 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 /* [0.03..0.15] silence cutoff. Higher means more has to be playing
  *              before anything lights at all. */
 #define FILL_GATE 0.08f
+/* [0..~1.4]    sqrt(mic amp) -> how far the LISTENING fill reaches inward from the
+ *              poles. SQRT, and its own constant, because the microphone is
+ *              nothing like playback: measured across LISTENING it runs a mean of
+ *              0.056 and peaks to 0.534, a 180x span, where the speaking fill's
+ *              linear 1.2 would give a fill of 0.07 at conversational volume --
+ *              barely off the poles. 1.4 puts typical speech a third of the way
+ *              in and a loud peak at the equator, where the two fronts meet. */
+#define LISTEN_REACH 1.4f
+/* [0..~0.05]   mic level treated as silence, subtracted BEFORE the sqrt above.
+ *              Not a taste knob -- without it the sqrt defeats FILL_GATE. Taking
+ *              the root compresses the bottom of the range, so a room-noise 0.003
+ *              becomes a fill of 0.077, which clears the 0.08 gate the gate exists
+ *              to stop, and the orb sits with both polar caps lit in silence.
+ *              Subtracting first puts silence, the noise floor and a quiet room at
+ *              exactly zero fill while conversational speech still reaches 0.30.
+ *              RAISE ONLY if a noisy room lights the poles at rest; every 0.01
+ *              here costs a little of the bottom of the speaking range. */
+#define LISTEN_FLOOR 0.010f
 
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
@@ -554,6 +572,61 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
 
         out[RS_RF] = 0.8f + 0.012f * sinf(t * 0.5f + ri * 0.3f);
         /* Rule 4: a crest makes a dot bigger AND darker at the same instant. */
+        out[RS_CREST] = FILL_SWELL * lit * gate;
+        out[RS_SHEAR] = 0.0f;
+        float a = 0.14f + (FILL_BRIGHT * lit + LEAD_BRIGHT * tip) * gate;
+        out[RS_ALPHA] = (a > 1.0f) ? 1.0f : a;
+        return;
+    }
+
+    case ORB_LISTENING_FILL: {
+        /*
+         * The user talking: the speaking fill, inward.
+         *
+         * from_pole is 0 at either pole and 1 at the equator, so the lit band
+         * grows from the ends towards the middle and the two fronts converge when
+         * someone is loud -- the mirror of SPEAKING, which grows outward from the
+         * equator to the ends.
+         *
+         * That mirroring is deliberate and is why this is a separate behaviour
+         * rather than a sign flip on a shared one. The voice shell's vocabulary
+         * had the user's speech travelling inward and the agent's outward; keeping
+         * it means the same object reads as receiving or as producing, rather than
+         * as two animations that happen to share a shell.
+         *
+         * Everything about the LOOK is shared with the speaking fill on purpose --
+         * retuning the brightness retunes both, because they are one language.
+         * Only the direction and the level mapping differ.
+         *
+         * SQRT OF THE LEVEL, unlike SPEAKING. The microphone spans 0.003 to 0.534
+         * across LISTENING and a linear map serves neither end of that; playback
+         * sits in a much narrower band and does not need it. The root is why
+         * LISTEN_FLOOR has to come off first -- see its comment; it is load-bearing,
+         * not a preference.
+         */
+        float from_pole = 1.0f - fabsf(ring_t - 0.5f) * 2.0f;
+
+        float lvl = (amp - LISTEN_FLOOR) / (1.0f - LISTEN_FLOOR);
+        if (lvl < 0.0f) {
+            lvl = 0.0f;
+        }
+        float fill = sqrtf(lvl) * LISTEN_REACH;
+        if (fill > 1.0f) {
+            fill = 1.0f;
+        }
+        float gate = fill / FILL_GATE;
+        if (gate > 1.0f) {
+            gate = 1.0f;
+        }
+
+        float lit = (fill - from_pole) / FILL_FADE;
+        if (lit < 0.0f) lit = 0.0f;
+        else if (lit > 1.0f) lit = 1.0f;
+
+        float td = (fill - from_pole) / LEAD_WIDTH;
+        float tip = expf(-td * td);
+
+        out[RS_RF] = 0.8f + 0.012f * sinf(t * 0.5f + ri * 0.3f);
         out[RS_CREST] = FILL_SWELL * lit * gate;
         out[RS_SHEAR] = 0.0f;
         float a = 0.14f + (FILL_BRIGHT * lit + LEAD_BRIGHT * tip) * gate;

@@ -49,7 +49,24 @@ typedef enum {
      */
     ORB_SPEAKING_FILL = 8,
 
-    ORB_BEHAVIOUR_COUNT = 9,
+    /*
+     * ALSO NOT FROM THE REFERENCE. The speaking fill run backwards: rings
+     * illuminate INWARD from both poles to a distance set by the microphone
+     * level, the two fronts meeting at the equator when someone is loud.
+     *
+     * The direction is the whole point of it existing separately. The voice
+     * shell's own vocabulary had the user's speech travelling INWARD and the
+     * agent's OUTWARD, and that grammar is worth keeping: the same object, filling
+     * one way while listening and the other while speaking, rather than two
+     * unrelated animations.
+     *
+     * Shares the speaking fill's look -- fade, cap width, brightnesses -- and
+     * differs only in direction and in how the level is mapped, because the
+     * microphone's range is nothing like playback's.
+     */
+    ORB_LISTENING_FILL = 9,
+
+    ORB_BEHAVIOUR_COUNT = 10,
 } orb_behaviour_t;
 
 /*
@@ -225,8 +242,14 @@ void orb_build_web(orb_frame_t *out, float t);
  * `to`. Pass from == to (any mix) for a steady state, which skips the second
  * evaluation.
  *
- * `amp` is 0..1 and scales how DEEP a gesture goes, never how fast. It is read
- * only by LISTENING and SPEAKING; every other behaviour ignores it.
+ * `amp` is 0..1 and scales how DEEP a gesture goes, never how fast. Four
+ * behaviours read it and the rest ignore it: LISTENING and SPEAKING deepen a
+ * gesture with it, while the two fills are driven ENTIRELY by it -- at zero they
+ * are the dim disconnected shell and nothing else.
+ *
+ * WHICH LEVEL it is depends on the behaviour, and they are not interchangeable:
+ * the speaking side wants playback, the listening side wants the microphone. See
+ * LISTEN_FLOOR for what the microphone's range costs.
  */
 void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
                orb_behaviour_t to, float mix, float amp,
