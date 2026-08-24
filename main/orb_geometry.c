@@ -331,13 +331,30 @@ static void idle_gesture(float t, int *which, float *env, float *local)
  * The gate exists so silence is the disconnected shell exactly, rather than the
  * shell plus a permanent glow at the equator where the cap sits at fill zero.
  */
-#define FILL_GAIN 1.5f        /* how far the light reaches; 1.0 never fills, 2.0 pegs early */
-#define EDGE_SOFT 0.18f       /* boundary sharpness, in from_eq units; one ring is 0.118 */
-#define TIP_W 0.20f           /* cap width -- A FLOOR: below the ring spacing it aliases away */
-#define FILL_ALPHA_GAIN 0.55f /* brightness of the filled body, above the 0.14 floor */
-#define TIP_ALPHA_GAIN 0.40f  /* extra brightness at the cap; under ~0.22 it stops reading */
-#define FILL_CREST_GAIN 0.40f /* how much lit dots swell and darken, together */
-#define FILL_GATE 0.08f       /* silence cutoff, so nothing lights below a whisper */
+/* [1.0..2.0]   how far the light reaches. 1.0 never fills, 2.0 pegs at half
+ *              volume. */
+#define FILL_GAIN 1.2f
+/* [0.12..0.35] boundary sharpness, in from_eq units where one ring is
+ *              0.118. Under ~0.12 the fill ends in a hard band. */
+#define EDGE_SOFT 0.18f
+/* [0.20..0.35] cap width. 0.20 IS A FLOOR, not a preference: narrower
+ *              than the 0.118 ring spacing and the cap falls between
+ *              rings and vanishes. */
+#define TIP_W 0.20f
+/* [0..0.86]    brightness of the filled body, above the 0.14 floor.
+ *              0.86 is where 0.14 + gain reaches the clamp. */
+#define FILL_ALPHA_GAIN 0.55f
+/* [0..0.55]    extra brightness at the cap. The ceiling is what is left
+ *              of the 0.86 headroom once FILL_ALPHA_GAIN has taken its
+ *              half at the boundary; past it both flatten against the
+ *              clamp. Under ~0.22 it stops reading as a cap at all. */
+#define TIP_ALPHA_GAIN 0.40f
+/* [0..0.6]     how much lit dots swell and darken, together. Past ~0.6
+ *              the near side blows out to solid ink. */
+#define FILL_CREST_GAIN 0.40f
+/* [0.03..0.15] silence cutoff. Higher means more has to be playing
+ *              before anything lights at all. */
+#define FILL_GATE 0.08f
 
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
