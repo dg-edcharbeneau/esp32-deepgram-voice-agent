@@ -816,8 +816,18 @@ bool orb_init(float size)
  * overrunning. A dot's worst case here is (0.6 + 1.7) * rs * rMul, which at
  * rs 1.302 reaches a 14 px sprite around rMul 1.85. 1.6 leaves margin.
  */
-#define WAVE_RMUL_GAIN 5.0f
-#define WAVE_RMUL_MAX 1.6f
+/* [0..~14]     amp -> swell. Above ~14 it saturates below a normal speaking
+ *              level and the orb stops responding at all. */
+#define WAVE_RMUL_GAIN 10.0f
+/* [1.0..2.6]   swell ceiling. A RASTERISER BOUND: blit_dot's footprint buffer is
+ *              SPRITE_MAX px square and CLIPS a disc that does not fit. At
+ *              SPRITE_MAX 20 a wave dot reaches the edge around rMul 2.6. */
+#define WAVE_RMUL_MAX 2.4f
+/* [0..1.0]     amp -> extra brightness, applied by orb_wave_ink() as a separate
+ *              pass. LOCAL, not from the reference: buildWave has no ink hook, so
+ *              this composes over the finished frame the way voice_pass does and
+ *              the harness never sees it. */
+#define WAVE_INK_GAIN 1.2f
 
 void orb_build_wave(orb_frame_t *out, float t, float amp)
 {
@@ -1548,6 +1558,40 @@ void orb_build_web(orb_frame_t *out, float t)
     qsort(out->dots, count, sizeof(out->dots[0]), cmp_draw_order);
     out->count = count;
     out->line_count = lines;
+}
+
+/* ---------------- wave's ink pass ---------------- */
+
+/*
+ * Brighten wave's dots with the microphone level.
+ *
+ * SEPARATE FROM orb_build_wave ON PURPOSE, and the separation is the point.
+ * buildWave exposes exactly one dynamic input, dyn.rMul, so radius is the only
+ * thing the reference lets volume touch -- and a 60% swell on its own does not
+ * read as someone talking. Ink does, and ink is ours.
+ *
+ * So this composes over the finished dot list rather than going inside the build,
+ * exactly as voice_pass does and for exactly the same reason: orb_build_wave stays
+ * a faithful transcription the harness can diff, and the thing with no upstream
+ * stays outside it. host/orb_dump.c simply never calls this.
+ *
+ * Ink is inverted on a dark ground -- grey is (1 - white) * 255 -- so brightening
+ * means SUBTRACTING. Alpha is left alone: wave sets it to 1 throughout, so there
+ * is no headroom there and ink is the whole of brightness on this panel.
+ */
+void orb_wave_ink(orb_frame_t *out, float amp)
+{
+    if (amp <= 0.0f) {
+        return;
+    }
+    if (amp > 1.0f) {
+        amp = 1.0f;
+    }
+    float d = WAVE_INK_GAIN * amp;
+    for (size_t i = 0; i < out->count; i++) {
+        float w = out->dots[i].white - d;
+        out->dots[i].white = (w < 0.0f) ? 0.0f : w;
+    }
 }
 
 /* ---------------- the voice pass ---------------- */

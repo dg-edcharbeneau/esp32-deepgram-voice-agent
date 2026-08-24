@@ -41,8 +41,21 @@
 
 static const char *TAG = "orb_raster";
 
-/* Widest a dot's footprint can be: radius 4.2 plus a pixel of AA either side. */
-#define SPRITE_MAX 14
+/*
+ * Widest a dot's footprint can be.
+ *
+ * RAISED FROM 14 for wave's swell. The reference's rMul is the only amplitude hook
+ * buildWave has, so listening can only express volume as dot size -- and 14 px
+ * capped that at rMul 1.85, a 60% swell, which was not enough to read. 20 px
+ * carries rMul to about 2.6.
+ *
+ * The cost is stack, not heap: this sizes a float cov[SPRITE_MAX * SPRITE_MAX]
+ * inside blit_dot, so 14 was 784 B and 20 is 1,600 B on the LVGL task -- which has
+ * 8 kB and was using 912 B for this function. Note blit_dot CLIPS a disc that does
+ * not fit rather than overrunning, so exceeding this is a visual fault and never a
+ * memory one.
+ */
+#define SPRITE_MAX 20
 
 static lv_obj_t *s_canvas;
 static uint16_t *s_pixels;

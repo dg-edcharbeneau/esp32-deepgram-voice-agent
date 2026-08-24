@@ -162,6 +162,17 @@ typedef struct {
 void orb_build_wave(orb_frame_t *out, float t, float amp);
 
 /*
+ * Brighten a built wave frame by the microphone level.
+ *
+ * A SEPARATE call, not folded into orb_build_wave, because buildWave has no ink
+ * hook upstream -- radius is the only thing the reference lets volume touch. This
+ * composes over the finished frame the way the voice band pass does, which keeps
+ * orb_build_wave a transcription the parity harness can check and keeps the part
+ * with no upstream outside it.
+ */
+void orb_wave_ink(orb_frame_t *out, float amp);
+
+/*
  * Build one frame of `rubik` -- the playground's `solving` orb, ported from
  * lattice.ts buildRubik. Shares wave's lattice and dot count; everything else,
  * including the shell radius and the ink constants, is its own.

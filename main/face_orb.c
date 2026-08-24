@@ -139,7 +139,10 @@ static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
 {
     switch (mode) {
     /* wave takes the microphone level: LISTENING is the user talking. */
-    case MODE_WAVE:   orb_build_wave(out, t, amp); break;
+    case MODE_WAVE:
+        orb_build_wave(out, t, amp);
+        orb_wave_ink(out, amp); /* local pass; see orb_geometry.h */
+        break;
     case MODE_RUBIK:  orb_build_rubik(out, t); break;
     /*
      * Kept, and currently unreachable: no state maps to MODE_RIBBON since

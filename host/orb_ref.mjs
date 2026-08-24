@@ -60,7 +60,7 @@ function waveFrame(t, amp = 0) {
     amp: 0, from: 0, to: 0, mix: 1,
     /* rMul is how the device feeds the microphone level in. Same mapping as
      * orb_build_wave's. */
-    rMul: Math.min(1.6, 1 + 5.0 * amp),
+    rMul: Math.min(2.4, 1 + 10.0 * amp),
     yaw: 0, pitch: 0, roll: 0, orient: undefined,
   });
   const out = [];
