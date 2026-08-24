@@ -377,20 +377,29 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 #define LISTEN_CURVE 0.35f
 /* [1.0..2.5]   how far the fill reaches inward from the poles at full level.
  *              The plain loudness knob -- raise for more fill everywhere. Paired
- *              with LISTEN_CURVE above: 1.7 is what puts a loud peak at the
- *              equator given that curve, so changing one wants the other checked. */
-#define LISTEN_REACH 1.7f
-/* [0.005..0.05] mic level treated as silence, subtracted BEFORE the curve.
- *              Not taste -- without it the curve defeats FILL_GATE. Compressing
- *              the bottom of the range is the whole point of LISTEN_CURVE, and it
- *              lifts room noise along with everything else: at floor 0.010 the
- *              measured 0.014 of a live mic in a quiet room cleared the 0.08 gate
- *              that exists to stop exactly that, and lit both polar caps to alpha
- *              0.62 at rest. It went unseen only because LISTENING is VAD-gated
- *              -- at rest the orb is in IDLE and never draws this behaviour.
- *              SET IT AT MEASURED ROOM NOISE, hence 0.014. Raise if a noisier
- *              room lights the poles; every step costs the quietest speech. */
-#define LISTEN_FLOOR 0.014f
+ *              with LISTEN_CURVE and LISTEN_FLOOR: 1.6 is what puts a loud peak at
+ *              the equator given those, so changing one wants the others checked. */
+#define LISTEN_REACH 1.6f
+/* [0..0.01]    mic level treated as silence, subtracted BEFORE the curve.
+ *              DELIBERATELY BELOW ROOM NOISE, which is the opposite of what it
+ *              looks like it should be. Setting it AT measured room noise (0.014)
+ *              was a real bug on the device: speech is not a plateau, and the
+ *              valleys between words drop straight through a floor sized for a
+ *              quiet room. Captured mid-sentence with beh=LISTENING, amp ran
+ *              0.010, 0.011 and 0.016 -- at or under 0.014 -- so the fill
+ *              collapsed to nothing for a full second at a time while the state
+ *              was still LISTENING and the orb sat bare.
+ *
+ *              Room noise does not need a floor here, because this behaviour is
+ *              VAD-GATED: it is drawn only while Deepgram reports the user
+ *              speaking. At rest the orb is in IDLE and this code never runs, so
+ *              a quiet room never reaches it. Inside LISTENING even a quiet
+ *              measurement IS the user, and deserves some fill rather than none.
+ *              0.004 keeps true silence at zero and nothing else.
+ *
+ *              RAISE ONLY if silence itself lights the poles. Raising it to
+ *              suppress a noisy room breaks mid-sentence instead. */
+#define LISTEN_FLOOR 0.004f
 
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
@@ -1844,6 +1853,31 @@ static int cmp_draw_order(const void *a, const void *b)
         return (ba < bb) ? -1 : 1;
     }
     return (da->z < db->z) ? -1 : ((da->z > db->z) ? 1 : 0);
+}
+
+void orb_rotate(orb_frame_t *f, float degrees)
+{
+    if (degrees == 0.0f) {
+        return;
+    }
+    const float rad = degrees * (3.14159265358979f / 180.0f);
+    const float c = cosf(rad), s = sinf(rad);
+    /* Screen y grows downward, so this turns clockwise as seen. */
+    for (size_t i = 0; i < f->count; i++) {
+        const float dx = f->dots[i].x - s_cx, dy = f->dots[i].y - s_cy;
+        f->dots[i].x = s_cx + dx * c - dy * s;
+        f->dots[i].y = s_cy + dx * s + dy * c;
+    }
+    /* Both endpoints, or web's edges detach from the nodes they connect. */
+    for (size_t i = 0; i < f->line_count; i++) {
+        orb_line_t *l = &f->lines[i];
+        const float ax = l->x1 - s_cx, ay = l->y1 - s_cy;
+        const float bx = l->x2 - s_cx, by = l->y2 - s_cy;
+        l->x1 = s_cx + ax * c - ay * s;
+        l->y1 = s_cy + ax * s + ay * c;
+        l->x2 = s_cx + bx * c - by * s;
+        l->y2 = s_cy + bx * s + by * c;
+    }
 }
 
 void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,

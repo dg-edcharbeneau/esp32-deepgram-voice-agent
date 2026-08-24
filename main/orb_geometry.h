@@ -233,6 +233,20 @@ void orb_build_braid(orb_frame_t *out, float t);
 void orb_build_web(orb_frame_t *out, float t);
 
 /*
+ * Turn a finished frame about the canvas centre, degrees clockwise on screen.
+ *
+ * This is a true rotation of the object about the VIEW axis, not a cheat: z is
+ * untouched, so depth order stays correct, and radii and the cull threshold are
+ * unaffected. The dot lattice turns with the light, which is what rotating the
+ * orb means -- a 90 puts the poles left and right and the rings read vertical.
+ *
+ * A LOCAL POST-PASS with no upstream, like orb_wave_ink, so host/run.sh cannot
+ * check it. Keeping it out of the build calls is what leaves those transcriptions
+ * diffable. Zero returns immediately, so an unrotated behaviour pays nothing.
+ */
+void orb_rotate(orb_frame_t *f, float degrees);
+
+/*
  * Evaluate one frame.
  *
  * `t` is seconds; everything here is a pure function of it, so a dropped frame

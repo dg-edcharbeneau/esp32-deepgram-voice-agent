@@ -298,8 +298,40 @@ static ui_source_t s_source;
  * One writer only -- ui_feed_mic() defers to the agent -- so the read-modify
  * -write below needs no lock. The reader's exchange can at worst let one stale
  * block's peak survive an extra frame, which is invisible in a level meter.
+ *
+ * ONE SLOT PER SOURCE, which is what keeps the level describing the behaviour on
+ * screen. A single shared slot made the level whichever source spoke last, so the
+ * opening buffer of a reply retargeted it while the state was still LISTENING and
+ * the fill collapsed to the agent's near-silence mid-sentence. Separate slots also
+ * mean the two writers no longer share a word at all.
  */
-static volatile uint32_t s_level_peak;
+static volatile uint32_t s_level_peak[2]; /* [0] agent, [1] mic */
+
+/*
+ * Channel indices for every per-source array here. Same order as s_band, so one
+ * index reads across all of them.
+ */
+#define LVL_AGENT 0
+#define LVL_MIC 1
+
+/*
+ * When each source last delivered a block, as opposed to when ANY source did.
+ *
+ * Per-source because the channels have to release independently: the microphone
+ * stops feeding entirely while the agent speaks (ui_feed_mic defers, and the
+ * capture task is gated outright), so a shared stamp would hold the mic channel
+ * frozen at its last speech level for the whole reply instead of letting it fall.
+ */
+static int64_t s_feed_us[2];
+
+/*
+ * The smoothed levels a face reads, one set per source.
+ *
+ * Up here with the other level state rather than next to the accumulator that
+ * samples it, because resolve_behaviour()'s local speech gate reads the
+ * microphone channel and sits well above that.
+ */
+static float s_amp[2], s_low[2], s_mid[2], s_high[2];
 
 /*
  * Crossover state, one set per source.
@@ -327,7 +359,23 @@ static bool s_vad_open;
  * cleanly: a quiet room reads amp 0.11 through the full-band path while all three
  * bands sit at 0.00.
  */
-static volatile int64_t s_speech_us;
+/*
+ * MILLISECONDS IN 32 BITS, not microseconds in 64, and two variables rather than
+ * one. Both for the same reason: this is now written from two tasks.
+ *
+ * s_speech_ms is Deepgram's, stamped by ui_note_user_speech() on the WebSocket
+ * task. s_local_ms is the display's own -- the noise gate and the handoff below
+ * -- and is touched only by the LVGL task. When they shared one variable there
+ * were two writers on a 64-bit value that a 32-bit CPU stores in two halves, so a
+ * read could land mid-write and see a timestamp that never existed. A 32-bit
+ * store is indivisible here, and with one writer each there is nothing to tear.
+ *
+ * Elapsed time is computed per variable and the SMALLER taken, rather than taking
+ * the later timestamp: unsigned subtraction is correct across the 49-day wrap,
+ * comparing the stamps themselves is not.
+ */
+static volatile uint32_t s_speech_ms;
+static uint32_t s_local_ms;
 
 /*
  * How long LISTENING outlives the gate closing.
@@ -350,7 +398,36 @@ static volatile int64_t s_speech_us;
  * listening. Nor does it delay the reply, because resolve_behaviour() tests
  * playback BEFORE this -- the moment the agent speaks, SPEAKING wins outright.
  */
-#define LISTEN_HOLD_US 5000000
+#define LISTEN_HOLD_MS 5000u
+
+/*
+ * Local speech gate: the microphone's own evidence that someone is talking,
+ * opening at MIC_SPEECH_OPEN and closing at MIC_SPEECH_CLOSE.
+ *
+ * WHY THIS EXISTS. LISTENING used to be reachable only through Deepgram's
+ * UserStartedSpeaking, which is better evidence but arrives late -- measured at
+ * 1.77 s after the agent stopped and the user had already begun. For that whole
+ * second and a half the resolver fell through to IDLE while the level sat at
+ * 0.09, so the orb went blank in the middle of someone speaking. The device
+ * already knows; this lets it say so and lets the VAD confirm behind it.
+ *
+ * HYSTERESIS, and thresholds from measurement rather than feel. A plain "a block
+ * arrived" test was tried before and pinned this permanently in LISTENING -- IDLE
+ * was never drawn at all. Measured on device: a live-mic quiet room smooths to
+ * 0.009-0.014, a normal voice to 0.031-0.093, peaks well past 0.3. Opening at
+ * 0.030 clears the room with margin; closing at 0.020 stays above it so a pause
+ * between words does not chatter the gate shut.
+ *
+ * Deliberately conservative: a false NEGATIVE just falls back to waiting for the
+ * VAD, which is what used to happen anyway. A false positive brings back the
+ * never-idle bug, which is worse. Very quiet speech is left to the VAD.
+ *
+ * Self-triggering is not a risk. The microphone delivers nothing at all while the
+ * agent speaks -- the capture task is gated, and ui_feed_mic() defers regardless
+ * -- so the agent's own voice cannot open this.
+ */
+#define MIC_SPEECH_OPEN 0.030f
+#define MIC_SPEECH_CLOSE 0.020f
 
 /*
  * Minimum time on screen for the connection rungs.
@@ -523,19 +600,22 @@ static void publish_level(const int16_t *mono, size_t samples, ui_source_t src)
      * Peak-hold all four in one word, then a single store. One writer only, so
      * the read-modify-write needs no lock; the reader clears with an exchange.
      */
-    uint32_t prev = s_level_peak;
+    volatile uint32_t *slot = &s_level_peak[(src == UI_SRC_MIC) ? LVL_MIC : LVL_AGENT];
+    uint32_t prev = *slot;
     uint32_t b0 = prev & 0xFF, b1 = (prev >> 8) & 0xFF;
     uint32_t b2 = (prev >> 16) & 0xFF, b3 = (prev >> 24) & 0xFF;
-    s_level_peak = ((q_amp > b0 ? q_amp : b0)) |
-                   ((q_low > b1 ? q_low : b1) << 8) |
-                   ((q_mid > b2 ? q_mid : b2) << 16) |
-                   ((q_high > b3 ? q_high : b3) << 24);
+    *slot = ((q_amp > b0 ? q_amp : b0)) |
+            ((q_low > b1 ? q_low : b1) << 8) |
+            ((q_mid > b2 ? q_mid : b2) << 16) |
+            ((q_high > b3 ? q_high : b3) << 24);
 }
 
 static void feed(const int16_t *mono, size_t samples, ui_source_t src)
 {
     s_source = src;
-    s_last_feed_us = esp_timer_get_time();
+    int64_t now = esp_timer_get_time();
+    s_last_feed_us = now;
+    s_feed_us[(src == UI_SRC_MIC) ? LVL_MIC : LVL_AGENT] = now;
 
     publish_level(mono, samples, src);
 
@@ -617,7 +697,7 @@ void ui_set_orb_color(int index)
 
 void ui_note_user_speech(void)
 {
-    s_speech_us = esp_timer_get_time();
+    s_speech_ms = (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 void ui_start_display_test(void)
@@ -636,6 +716,17 @@ void ui_start_display_test(void)
  */
 static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
 {
+    /*
+     * BEFORE EVERY EARLY RETURN below, because this is an edge and an edge cannot
+     * be sampled only on the frames we happen to reach. Left below the guards, a
+     * session that stopped mid-reply kept was_speaking true and the next session's
+     * first silent frame invented a handoff that never happened.
+     */
+    const bool speaking_now = audio_io_playback_active();
+    static bool was_speaking;
+    const bool handoff = (was_speaking && !speaking_now);
+    was_speaking = speaking_now;
+
     /*
      * FIRST, and it has to be. The session is stopped for the whole test, so the
      * s_stopped check below would swallow every step into DISCONNECTED.
@@ -670,7 +761,7 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
      * agent last claimed. Trusting the claim would leave the shell radiating at a
      * silent speaker for the rest of a turn after an interruption.
      */
-    if (audio_io_playback_active()) {
+    if (speaking_now) {
         return UI_BEHAVIOUR_SPEAKING;
     }
 
@@ -681,10 +772,45 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
     }
 
     /*
-     * Speech, not merely data. See s_speech_us -- testing "a block arrived"
-     * instead kept this permanently in LISTENING and IDLE was never once drawn.
+     * Speech, not merely data -- testing "a block arrived" instead kept this
+     * permanently in LISTENING and IDLE was never once drawn.
+     *
+     * Two ways in. Deepgram's UserStartedSpeaking stamps s_speech_ms and is the
+     * better evidence; the local gate below is the faster one, and covers the
+     * second-and-a-half before the message arrives. Either opens the same 5 s
+     * hold, so a pause mid-sentence is bridged the same way whichever noticed.
+     *
+     * Reading last frame's smoothed level: resolve_behaviour runs before
+     * update_amp for this frame. One frame of lag on a 5 s hold is nothing.
      */
-    if ((now_us - s_speech_us) < LISTEN_HOLD_US) {
+    const uint32_t now_ms = (uint32_t)(now_us / 1000);
+    /*
+     * THE HANDOFF. The moment the agent stops talking, the device is listening --
+     * the microphone is open and streaming to Deepgram, and a reply is what it is
+     * waiting for. IDLE claims nothing is happening, which is the wrong answer and
+     * a jarring one: measured at 1.78 s of dead orb between the agent finishing
+     * and the user starting, which reads as a fault rather than as a pause.
+     *
+     * Stamping the same clock the gate and the VAD use, so the turn opens with a
+     * full LISTENING hold that real speech then extends. A long silence still
+     * falls through to IDLE once the hold runs out, which is what IDLE is for.
+     */
+    if (handoff) {
+        s_local_ms = now_ms;
+    }
+
+    static bool gate_open;
+    float mic = s_amp[LVL_MIC];
+    gate_open = gate_open ? (mic > MIC_SPEECH_CLOSE) : (mic > MIC_SPEECH_OPEN);
+    if (gate_open) {
+        s_local_ms = now_ms;
+    }
+
+    /* Per-variable elapsed, smaller wins. Wrap-safe; comparing stamps is not. */
+    const uint32_t since_vad = now_ms - s_speech_ms;
+    const uint32_t since_local = now_ms - s_local_ms;
+    const uint32_t since = (since_vad < since_local) ? since_vad : since_local;
+    if (since < LISTEN_HOLD_MS) {
         return UI_BEHAVIOUR_LISTENING;
     }
 
@@ -704,7 +830,7 @@ void ui_set_failed(bool failed)
 
 /* ---------------- frame ---------------- */
 
-static void update_status_label(bool idle)
+static void update_status_label(ui_behaviour_t beh)
 {
     /*
      * All candidates are string literals, so the "has it changed" test is a
@@ -718,13 +844,22 @@ static void update_status_label(bool idle)
         want = s_test_steps[s_test_step].label;
     } else if (!s_session_live) {
         want = s_status; /* connecting / error / disconnected */
-    } else if (audio_io_playback_active()) {
+    } else if (beh == UI_BEHAVIOUR_SPEAKING) {
         want = "speaking";
-    } else if (!idle && s_source == UI_SRC_MIC) {
+    } else if (beh == UI_BEHAVIOUR_LISTENING) {
         want = "listening";
     } else {
         want = s_status; /* "ready" */
     }
+    /*
+     * DERIVED FROM THE RESOLVED BEHAVIOUR, not from a rule of its own.
+     *
+     * This used to test playback and `!idle && s_source == UI_SRC_MIC`
+     * independently of resolve_behaviour, so the label and the orb could disagree
+     * by construction -- and did: the screen read "ready" while the orb drew IDLE
+     * mid-conversation, because s_source is only ever "whichever tap fired last".
+     * One state, one answer, and the label cannot drift from the picture again.
+     */
 
     static const char *shown;
     if (want != shown) {
@@ -802,9 +937,45 @@ static void update_qr(void)
  * about 21.7 ms of bus time the callback never sees. A small draw next to a large
  * period means the panel is the limit and optimising the drawing buys nothing.
  */
-/* The smoothed levels a face reads. Declared here because the accumulator below
- * samples them once per frame. */
-static float s_amp, s_low, s_mid, s_high;
+
+/* Which channel the behaviour on screen selected this frame; for telemetry, so
+ * the reported src and amp always describe the same signal. */
+static ui_source_t s_level_sel = UI_SRC_MIC;
+
+/*
+ * Which audio the behaviour on screen is ABOUT.
+ *
+ * LISTENING is the user talking, so it reads the microphone; SPEAKING is the agent
+ * talking, so it reads playback. Neither follows s_source, which is only ever
+ * "whichever tap fired last" -- and that was the bug: the first playback buffer of
+ * a reply retargeted the level while the state was still LISTENING, so the fill
+ * dropped to the agent's opening near-silence in the middle of a sentence.
+ *
+ * The rest have no opinion, and keep the old behaviour of following the live
+ * source. They either ignore amp or are not about either party's voice.
+ */
+static ui_source_t source_for(ui_behaviour_t b)
+{
+    switch (b) {
+    case UI_BEHAVIOUR_LISTENING: return UI_SRC_MIC;
+    case UI_BEHAVIOUR_SPEAKING:  return UI_SRC_AGENT;
+    /*
+     * Passing s_source straight through, UI_SRC_NONE included: before any audio
+     * has ever arrived there is genuinely no source, and reporting one would be a
+     * worse answer than admitting it. The channel below resolves NONE to the
+     * playback side, which is silent then anyway.
+     */
+    default:                     return s_source;
+    }
+}
+
+/* The array index for a source. NONE has no channel of its own; it resolves to
+ * the playback side, which is silent whenever NONE is true. */
+static int level_channel(ui_source_t src)
+{
+    return (src == UI_SRC_MIC) ? LVL_MIC : LVL_AGENT;
+}
+
 
 static struct {
     int64_t last_us;      /* previous frame's start, for the period */
@@ -840,14 +1011,17 @@ static void tlm_accumulate_frame(int64_t draw_start_us)
 
 static void tlm_accumulate_audio(void)
 {
-    s_tlm.amp_sum += s_amp;
-    s_tlm.low_sum += s_low;
-    s_tlm.mid_sum += s_mid;
-    s_tlm.high_sum += s_high;
-    if (s_amp > s_tlm.amp_max) s_tlm.amp_max = s_amp;
-    if (s_low > s_tlm.low_max) s_tlm.low_max = s_low;
-    if (s_mid > s_tlm.mid_max) s_tlm.mid_max = s_mid;
-    if (s_high > s_tlm.high_max) s_tlm.high_max = s_high;
+    /* The SELECTED channel, so amp= in the telemetry line is the number the orb
+     * actually reacted to rather than a mix of two signals. */
+    const int c = level_channel(s_level_sel);
+    s_tlm.amp_sum += s_amp[c];
+    s_tlm.low_sum += s_low[c];
+    s_tlm.mid_sum += s_mid[c];
+    s_tlm.high_sum += s_high[c];
+    if (s_amp[c] > s_tlm.amp_max) s_tlm.amp_max = s_amp[c];
+    if (s_low[c] > s_tlm.low_max) s_tlm.low_max = s_low[c];
+    if (s_mid[c] > s_tlm.mid_max) s_tlm.mid_max = s_mid[c];
+    if (s_high[c] > s_tlm.high_max) s_tlm.high_max = s_high[c];
 }
 
 /*
@@ -869,37 +1043,50 @@ static void slew(float *cur, float target, float dt_ms)
     *cur += (target - *cur) * (1.0f - expf(-dt_ms / tau));
 }
 
-static float update_amp(int64_t now_us, bool idle)
+/*
+ * `sel` is the channel the caller wants back. BOTH are slewed regardless, so the
+ * one not on screen keeps releasing towards zero and is already correct whenever
+ * the behaviour switches to it -- rather than resuming from a value frozen when it
+ * was last looked at.
+ */
+static float update_amp(int64_t now_us, bool idle, int sel)
 {
     static int64_t last_us;
-
-    uint32_t q = __atomic_exchange_n(&s_level_peak, 0, __ATOMIC_ACQ_REL);
-
-    float t_amp, t_low, t_mid, t_high;
-    if (q > 0) {
-        t_amp = (float)(q & 0xFF) / 255.0f;
-        t_low = (float)((q >> 8) & 0xFF) / 255.0f;
-        t_mid = (float)((q >> 16) & 0xFF) / 255.0f;
-        t_high = (float)((q >> 24) & 0xFF) / 255.0f;
-    } else if (idle) {
-        t_amp = t_low = t_mid = t_high = 0.0f;
-    } else {
-        /* Nothing new, but audio is still flowing -- the source is simply
-         * slower than the frame timer. Hold, do not dip. */
-        t_amp = s_amp;
-        t_low = s_low;
-        t_mid = s_mid;
-        t_high = s_high;
-    }
 
     float dt_ms = (last_us != 0) ? (float)(now_us - last_us) / 1000.0f : 0.0f;
     last_us = now_us;
 
-    slew(&s_amp, t_amp, dt_ms);
-    slew(&s_low, t_low, dt_ms);
-    slew(&s_mid, t_mid, dt_ms);
-    slew(&s_high, t_high, dt_ms);
-    float amp = s_amp;
+    for (int ch = 0; ch < 2; ch++) {
+        uint32_t q = __atomic_exchange_n(&s_level_peak[ch], 0, __ATOMIC_ACQ_REL);
+
+        /* Per channel: the mic delivers nothing at all while the agent speaks, so
+         * a shared idle would read as "still flowing" and hold it up there. */
+        bool ch_idle = idle || (now_us - s_feed_us[ch]) > IDLE_US;
+
+        float t_amp, t_low, t_mid, t_high;
+        if (q > 0) {
+            t_amp = (float)(q & 0xFF) / 255.0f;
+            t_low = (float)((q >> 8) & 0xFF) / 255.0f;
+            t_mid = (float)((q >> 16) & 0xFF) / 255.0f;
+            t_high = (float)((q >> 24) & 0xFF) / 255.0f;
+        } else if (ch_idle) {
+            t_amp = t_low = t_mid = t_high = 0.0f;
+        } else {
+            /* Nothing new, but audio is still flowing -- the source is simply
+             * slower than the frame timer. Hold, do not dip. */
+            t_amp = s_amp[ch];
+            t_low = s_low[ch];
+            t_mid = s_mid[ch];
+            t_high = s_high[ch];
+        }
+
+        slew(&s_amp[ch], t_amp, dt_ms);
+        slew(&s_low[ch], t_low, dt_ms);
+        slew(&s_mid[ch], t_mid, dt_ms);
+        slew(&s_high[ch], t_high, dt_ms);
+    }
+
+    float amp = s_amp[sel];
 
     /*
      * High-water marks, per source, never reset.
@@ -913,7 +1100,9 @@ static float update_amp(int64_t now_us, bool idle)
      * smoothed value is what a face actually reacts to.
      */
     if (!idle) {
-        if (s_source == UI_SRC_MIC) {
+        /* Keyed on the channel returned, not on the last tap, so a calibration
+         * peak cannot be filed against the source that did not produce it. */
+        if (sel == LVL_MIC) {
             if (amp > s_amp_peak_mic) {
                 s_amp_peak_mic = amp;
             }
@@ -981,7 +1170,8 @@ void ui_get_telemetry(ui_telemetry_t *out)
     out->face_changed = s_face_changed;
     s_face_changed = false;
     out->behaviour = behaviour_name(s_behaviour_now);
-    out->source = source_name(s_source);
+    /* What was selected, matching amp= on the same line. */
+    out->source = source_name(s_level_sel);
 
     if (frames > 0) {
         out->draw_avg_ms = (float)s_tlm.draw_sum / (float)frames / 1000.0f;
@@ -1094,6 +1284,23 @@ static void frame_timer_cb(lv_timer_t *timer)
         s_behaviour_now = beh;
     }
 
+    /*
+     * Pick the channel, then slew, THEN build the context.
+     *
+     * Hoisted out of the initializer on purpose: the bands used to be read in the
+     * same initializer that called update_amp(), which relies on an evaluation
+     * order C does not specify. It happened to work; it was not guaranteed to.
+     *
+     * The display test forces the MICROPHONE for every step, whatever the step
+     * depicts. That is the whole point of monitor mode -- the agent is
+     * disconnected there, so the playback channel is silent and a SPEAKING step
+     * keyed to it would sit dead while you talk at it.
+     */
+    const ui_source_t src_now = s_test_active ? UI_SRC_MIC : source_for(beh);
+    const int lvl = level_channel(src_now);
+    s_level_sel = src_now; /* before update_amp: tlm_accumulate_audio reads it */
+    const float amp_now = update_amp(draw_start_us, idle, lvl);
+
     const ui_render_ctx_t ctx = {
         .canvas = canvas_obj,
         .frame = s_frame,
@@ -1104,22 +1311,23 @@ static void frame_timer_cb(lv_timer_t *timer)
          * microphone, which is the whole reason monitor mode exists.
          */
         .idle = s_test_active ? s_test_steps[s_test_step].idle : idle,
-        .source = s_source,
+        /* What is actually driving the frame, not the last tap to fire, so this
+         * and .amp can never describe different signals. */
+        .source = src_now,
         .stopped = s_test_active ? s_test_steps[s_test_step].stopped : s_stopped,
         .frozen = s_test_active ? s_test_steps[s_test_step].frozen : s_failed,
         .press_active = s_press_active,
-        .amp = update_amp(draw_start_us, idle),
-        /* Read after update_amp() has slewed them for this frame. */
-        .band_low = s_low,
-        .band_mid = s_mid,
-        .band_high = s_high,
+        .amp = amp_now,
+        .band_low = s_low[lvl],
+        .band_mid = s_mid[lvl],
+        .band_high = s_high[lvl],
         .behaviour = beh,
         /* Load-bearing: this initializer is designated, so omitting the field
          * would silently pass 0 -- black ink, an invisible orb. */
         .tint_rgb = s_tint_rgb,
     };
 
-    update_status_label(idle);
+    update_status_label(beh);
 
     if (s_face != NULL) {
         s_face->render(&ctx);
