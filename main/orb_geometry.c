@@ -841,6 +841,16 @@ bool orb_init(float size)
  *              does and the harness never sees it. 0.62 gives a 0.15 shift at a
  *              conversational level, where the old linear 1.2 gave 0.07. */
 #define WAVE_INK_GAIN 0.62f
+/* [0..0.28]    how much DARKER wave sits at rest, before any level brightens it.
+ *              Ink is inverted on a dark ground, so this ADDS to white.
+ *
+ *              Contrast, not taste: the reference's near side rests at grey 230
+ *              of 255, so brightening had 26 levels to work in and the response
+ *              was invisible however hard it was driven. Resting darker gives it
+ *              room -- 0.20 opens the near side to 76 levels and the far side to
+ *              115. Past ~0.28 the far side rests near grey 15 and the shell
+ *              stops reading as a surface at all. */
+#define WAVE_INK_FLOOR 0.20f
 
 void orb_build_wave(orb_frame_t *out, float t, float amp)
 {
@@ -1594,17 +1604,24 @@ void orb_build_web(orb_frame_t *out, float t)
  */
 void orb_wave_ink(orb_frame_t *out, float amp)
 {
-    if (amp <= 0.0f) {
-        return;
-    }
-    if (amp > 1.0f) {
+    if (amp < 0.0f) {
+        amp = 0.0f;
+    } else if (amp > 1.0f) {
         amp = 1.0f;
     }
-    /* sqrt, matching the swell: the same 180x amp range, the same reason. */
-    float d = WAVE_INK_GAIN * sqrtf(amp);
+    /*
+     * Runs even at silence, unlike before: the floor has to be applied whatever
+     * the level, since resting darker is the whole reason the brightening reads.
+     *
+     * sqrt matches the swell, for the same reason -- a 180x amp range that no
+     * linear map serves at both ends.
+     */
+    float d = WAVE_INK_FLOOR - WAVE_INK_GAIN * sqrtf(amp);
     for (size_t i = 0; i < out->count; i++) {
-        float w = out->dots[i].white - d;
-        out->dots[i].white = (w < 0.0f) ? 0.0f : w;
+        float w = out->dots[i].white + d;
+        if (w < 0.0f) w = 0.0f;
+        else if (w > 1.0f) w = 1.0f; /* the floor must not push the far side past black */
+        out->dots[i].white = w;
     }
 }
 
