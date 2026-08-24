@@ -88,7 +88,17 @@ static orb_mode_t mode_for(ui_behaviour_t b)
     switch (b) {
     case UI_BEHAVIOUR_LISTENING:  return MODE_WAVE;   /* the user talking */
     case UI_BEHAVIOUR_THINKING:   return MODE_RUBIK;
-    case UI_BEHAVIOUR_SPEAKING:   return MODE_RIBBON; /* the agent talking */
+    /*
+     * SPEAKING IS BACK ON THE SHELL, and ribbon is detached.
+     *
+     * It gets ORB_SPEAKING_PULSE, which is the disconnected shell with light
+     * pulses running from the equator out, driven by the playback level. Ribbon
+     * did not sit with the rest of the family -- a flat band among dotted shells.
+     *
+     * A side benefit of it being a shell behaviour rather than a mode: SPEAKING
+     * regains the 280 ms crossfade, because it now shares a lattice with the
+     * states either side of it. Only the four remaining modes cut.
+     */
     case UI_BEHAVIOUR_CONNECTING: return MODE_WEB;
     case UI_BEHAVIOUR_BUFFERING:  return MODE_BRAID;
     default:                      return MODE_SHELL;
@@ -114,7 +124,9 @@ static orb_behaviour_t to_orb(ui_behaviour_t b)
     case UI_BEHAVIOUR_INITIALIZING: return ORB_INITIALIZING;
     case UI_BEHAVIOUR_LISTENING:    return ORB_LISTENING;
     case UI_BEHAVIOUR_THINKING:     return ORB_THINKING;
-    case UI_BEHAVIOUR_SPEAKING:     return ORB_SPEAKING;
+    /* Not ORB_SPEAKING: that is the reference's outward-wavefront pose, which the
+     * shell keeps and nothing now selects. See ORB_SPEAKING_PULSE. */
+    case UI_BEHAVIOUR_SPEAKING:     return ORB_SPEAKING_PULSE;
     case UI_BEHAVIOUR_CONNECTING:   return ORB_CONNECTING;
     case UI_BEHAVIOUR_BUFFERING:    return ORB_BUFFERING;
     case UI_BEHAVIOUR_DISCONNECTED: return ORB_DISCONNECTED;
@@ -248,7 +260,11 @@ static void render(const ui_render_ctx_t *ctx)
     /* wave takes the microphone level: LISTENING is the user talking. */
     case MODE_WAVE:   orb_build_wave(s_frame, t, amp); break;
     case MODE_RUBIK:  orb_build_rubik(s_frame, t); break;
-    /* ribbon takes the playback level: SPEAKING is the agent talking. */
+    /*
+     * Kept, and currently unreachable: no state maps to MODE_RIBBON since
+     * SPEAKING moved to the shell's pulse. The port stays because it is
+     * parity-verified and cheap to point a state back at.
+     */
     case MODE_RIBBON: orb_build_ribbon(s_frame, t, amp); break;
     case MODE_BRAID:  orb_build_braid(s_frame, t); break;
     case MODE_WEB:    orb_build_web(s_frame, t); break;

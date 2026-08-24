@@ -34,7 +34,21 @@ typedef enum {
     ORB_CONNECTING = 5,
     ORB_BUFFERING = 6,
     ORB_DISCONNECTED = 7,
-    ORB_BEHAVIOUR_COUNT = 8,
+
+    /*
+     * NOT FROM THE REFERENCE -- the only behaviour here that is not.
+     *
+     * The dim disconnected shell, with light pulses running from the equator out
+     * to both poles, their brightness and swell driven by the level of the audio
+     * being played. It replaced ribbon on SPEAKING, which did not sit with the
+     * rest of the family.
+     *
+     * It has no upstream, so host/run.sh CANNOT check it -- there is nothing to
+     * diff against. That makes it the one piece of the shell verified by eye.
+     */
+    ORB_SPEAKING_PULSE = 8,
+
+    ORB_BEHAVIOUR_COUNT = 9,
 } orb_behaviour_t;
 
 /*

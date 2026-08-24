@@ -311,6 +311,37 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 #define BUFFER_PERIOD 2.2f
 #define SIGNAL_PERIOD 5.0f
 
+/*
+ * The speaking pulse. Spatial frequency in half-shells, rate in pulses a second,
+ * and the two gains amplitude drives.
+ *
+ * PULSE_RATE and PULSE_WAVES are fixed; only the gains see `amp`.
+ *
+ * 0.75 WAVES, AND THE RING COUNT IS WHY. There are nine rings between equator and
+ * pole, which is the sampling grid -- and spike_pulse is a narrow lobe, sin to the
+ * fifth. At two waves the crests fell between rings and the shell aliased into
+ * alternating stripes with no travel in them at all; dumped per ring it read
+ * `...#...----...#...`. Under one wave there is a single crest in flight per
+ * hemisphere, which is what "from the equator out" actually looks like:
+ *
+ *   t=0.00  .....##-..-##.....   born near the equator
+ *   t=0.16  ..-##-......-##-..   travelling out
+ *   t=0.32  -##............##-   nearing the poles
+ *   t=0.48  +................+   fading
+ *   t=0.64  .......-##-.......   the next one
+ *
+ * Rate follows from that: 0.75/1.2 is a pulse every ~0.6 s, slow enough to follow
+ * and quick enough to feel answerable to speech.
+ *
+ * The alpha gain is large against the 0.14 floor on purpose. Measured agent
+ * playback runs a mean near 0.35, so a crest lands around 0.70 -- five times the
+ * resting shell, which is what makes this read as light rather than as movement.
+ */
+#define PULSE_WAVES 0.75f
+#define PULSE_RATE 1.2f
+#define PULSE_ALPHA_GAIN 1.6f
+#define PULSE_CREST_GAIN 0.45f
+
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
 #define R_DEPTH 1.7f
@@ -456,6 +487,37 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
         out[RS_CREST] = 0.3f * ping;
         out[RS_SHEAR] = 0.0f;
         out[RS_ALPHA] = 0.14f + 0.4f * ping;
+        return;
+    }
+
+    case ORB_SPEAKING_PULSE: {
+        /*
+         * The agent talking: the disconnected shell lit from within.
+         *
+         * Built ON disconnected rather than beside it -- same drawn-in radius,
+         * same 0.14 floor -- so a turn ending is the pulses fading out of a shell
+         * that was already there, not one object replacing another.
+         *
+         * PULSES RUN FROM THE EQUATOR OUT. `from_eq` is 0 at the equator and 1 at
+         * either pole, and the phase carries a fixed spatial frequency against
+         * time, so a crest appears at the middle and travels to both ends at
+         * once. Symmetric on purpose: a wave with a direction would imply the
+         * sound came from somewhere, and it comes from the whole object.
+         *
+         * Amplitude scales DEPTH, never rate -- rule 5. So the pulses always run
+         * at the same tempo and simply are not visible when nothing is playing,
+         * which is what leaves the state legible as "quiet" rather than "stopped".
+         */
+        float from_eq = fabsf(ring_t - 0.5f) * 2.0f;
+        float pulse = spike_pulse(TAU * (from_eq * PULSE_WAVES - t * PULSE_RATE));
+
+        /* The one term that survives silence: the shell has to be there to be lit. */
+        out[RS_RF] = 0.8f + 0.012f * sinf(t * 0.5f + ri * 0.3f);
+        /* Rule 4: a crest makes a dot bigger AND darker at the same instant. */
+        out[RS_CREST] = PULSE_CREST_GAIN * amp * pulse;
+        out[RS_SHEAR] = 0.0f;
+        float a = 0.14f + PULSE_ALPHA_GAIN * amp * pulse;
+        out[RS_ALPHA] = (a > 1.0f) ? 1.0f : a;
         return;
     }
 
