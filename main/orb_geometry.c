@@ -347,12 +347,13 @@ static void idle_gesture(float t, int *which, float *env, float *local)
  *              brightnesses share 0.86 of headroom, so raising LEAD_BRIGHT alone
  *              just flattens both against the clamp. 0.55/0.40 gives the edge a
  *              1.13x contrast over the body; 0.18/0.68 gives it 2.39x. */
-#define FILL_BRIGHT 0.55f
-/* [0..0.55]    brightness of the LEADING EDGE itself, on top of the body. The
- *              ceiling is whatever FILL_BRIGHT has left of the 0.86 headroom at
- *              the boundary; past it both flatten against the clamp. Under ~0.22
- *              it stops reading as an edge at all. */
-#define LEAD_BRIGHT 0.40f
+#define FILL_BRIGHT 0.25f
+/* [0..~0.7]    brightness of the LEADING EDGE itself, on top of the body. The
+ *              ceiling is not fixed -- it is whatever FILL_BRIGHT has left of the
+ *              0.86 headroom at the boundary, so dimming the body raises it. At
+ *              FILL_BRIGHT 0.25 this can reach about 0.7 before clamping; at 0.55
+ *              only about 0.55. Under ~0.22 it stops reading as an edge at all. */
+#define LEAD_BRIGHT 0.58f
 /* [0..0.6]     how much lit dots swell and darken, together. Past ~0.6
  *              the near side blows out to solid ink. */
 #define FILL_SWELL 0.40f
