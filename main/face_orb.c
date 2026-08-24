@@ -61,7 +61,7 @@ static int64_t s_t0_us;
  * which until now was parity-verified geometry nobody had seen render.
  */
 /*
- * Which ported mode a state uses, or UI_ORB_MODE_NONE for the voice shell.
+ * Which ported mode a state uses, or the voice shell.
  *
  * The five that map are the states with a distinct thing to say. IDLE,
  * INITIALIZING and DISCONNECTED stay on the shell: they are the resting and
@@ -74,15 +74,37 @@ static int64_t s_t0_us;
  * ribbon is driven by playback level and wave by microphone level, which ui.c
  * already resolves into ctx->amp as whichever direction is live, at its own gain.
  */
-static int mode_for(ui_behaviour_t b)
+typedef enum {
+    MODE_SHELL = 0, /* the voice shell, with its own behaviour blending */
+    MODE_WAVE,
+    MODE_RUBIK,
+    MODE_RIBBON,
+    MODE_BRAID,
+    MODE_WEB,
+} orb_mode_t;
+
+static orb_mode_t mode_for(ui_behaviour_t b)
 {
     switch (b) {
-    case UI_BEHAVIOUR_LISTENING:  return UI_ORB_MODE_WAVE;   /* the user talking */
-    case UI_BEHAVIOUR_THINKING:   return UI_ORB_MODE_RUBIK;
-    case UI_BEHAVIOUR_SPEAKING:   return UI_ORB_MODE_RIBBON; /* the agent talking */
-    case UI_BEHAVIOUR_CONNECTING: return UI_ORB_MODE_WEB;
-    case UI_BEHAVIOUR_BUFFERING:  return UI_ORB_MODE_BRAID;
-    default:                      return UI_ORB_MODE_NONE;
+    case UI_BEHAVIOUR_LISTENING:  return MODE_WAVE;   /* the user talking */
+    case UI_BEHAVIOUR_THINKING:   return MODE_RUBIK;
+    case UI_BEHAVIOUR_SPEAKING:   return MODE_RIBBON; /* the agent talking */
+    case UI_BEHAVIOUR_CONNECTING: return MODE_WEB;
+    case UI_BEHAVIOUR_BUFFERING:  return MODE_BRAID;
+    default:                      return MODE_SHELL;
+    }
+}
+
+static const char *mode_name(orb_mode_t m)
+{
+    switch (m) {
+    case MODE_WAVE:   return "wave";
+    case MODE_RUBIK:  return "rubik";
+    case MODE_RIBBON: return "ribbon";
+    case MODE_BRAID:  return "braid";
+    case MODE_WEB:    return "web";
+    case MODE_SHELL:
+    default:          return "shell";
     }
 }
 
@@ -196,11 +218,9 @@ static void render(const ui_render_ctx_t *ctx)
         .mid = ctx->band_mid,
         .high = ctx->band_high,
     };
-    /*
-     * A display-test step overrides; otherwise the state picks the mode.
-     */
-    int mode = (ctx->orb_mode != UI_ORB_MODE_NONE) ? ctx->orb_mode
-                                                   : mode_for(ctx->behaviour);
+    /* The state picks the mode. Nothing overrides it: the display test scripts
+     * the STATE, which is the same path a session takes. */
+    orb_mode_t mode = mode_for(ctx->behaviour);
 
     /*
      * A CHANGE INVOLVING A MODE IS A CUT, not a crossfade.
@@ -217,20 +237,21 @@ static void render(const ui_render_ctx_t *ctx)
      * record rather than a matter of opinion. The shell keeps its 280 ms blend
      * between its own behaviours.
      */
-    static int s_mode_shown = UI_ORB_MODE_NONE;
+    static orb_mode_t s_mode_shown = MODE_SHELL;
     if (mode != s_mode_shown) {
-        ESP_LOGI("face_orb", "EVT mode %d->%d (cut)", s_mode_shown, mode);
+        ESP_LOGI("face_orb", "EVT mode %s->%s (cut)",
+                 mode_name(s_mode_shown), mode_name(mode));
         s_mode_shown = mode;
     }
 
     switch (mode) {
     /* wave takes the microphone level: LISTENING is the user talking. */
-    case UI_ORB_MODE_WAVE:   orb_build_wave(s_frame, t, amp); break;
-    case UI_ORB_MODE_RUBIK:  orb_build_rubik(s_frame, t); break;
+    case MODE_WAVE:   orb_build_wave(s_frame, t, amp); break;
+    case MODE_RUBIK:  orb_build_rubik(s_frame, t); break;
     /* ribbon takes the playback level: SPEAKING is the agent talking. */
-    case UI_ORB_MODE_RIBBON: orb_build_ribbon(s_frame, t, amp); break;
-    case UI_ORB_MODE_BRAID:  orb_build_braid(s_frame, t); break;
-    case UI_ORB_MODE_WEB:    orb_build_web(s_frame, t); break;
+    case MODE_RIBBON: orb_build_ribbon(s_frame, t, amp); break;
+    case MODE_BRAID:  orb_build_braid(s_frame, t); break;
+    case MODE_WEB:    orb_build_web(s_frame, t); break;
     default:
         orb_build(s_frame, t, s_from, s_to, mix, amp, &bands);
         break;

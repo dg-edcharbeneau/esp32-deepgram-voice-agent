@@ -137,32 +137,7 @@ typedef struct {
      */
     uint32_t tint_rgb;
 
-    /*
-     * Which ported reference mode to draw instead of the voice shell, or
-     * UI_ORB_MODE_NONE for the shell.
-     *
-     * Only the display test sets this. The modes are dormant in normal operation
-     * because a shell behaviour and a foreign mode share no lattice to blend
-     * across -- but the test cuts between steps rather than crossfading, so it can
-     * show them without that question being settled.
-     */
-    int orb_mode;
 } ui_render_ctx_t;
-
-/*
- * Which ported reference mode the display test is showing.
- *
- * Deliberately NOT orb_behaviour_t values and not in orb_geometry.h: these name
- * whole animations from thinking-orbs' registry, siblings of the voice shell
- * rather than states within it. ui.c must be able to script them without
- * including an orb header, which is why they live here with the face vtable.
- */
-#define UI_ORB_MODE_NONE   (-1) /* the voice shell */
-#define UI_ORB_MODE_WAVE   0
-#define UI_ORB_MODE_RUBIK  1
-#define UI_ORB_MODE_RIBBON 2
-#define UI_ORB_MODE_BRAID  3
-#define UI_ORB_MODE_WEB    4
 
 typedef struct {
     /* Also the enum value the agent's set_face function uses, so it has to be

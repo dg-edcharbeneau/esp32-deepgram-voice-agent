@@ -236,37 +236,32 @@ typedef struct {
     bool idle;
     bool stopped;
     bool frozen;
-    /* A ported reference mode, or UI_ORB_MODE_NONE for the voice shell. The
-     * behaviour field is ignored when this is set. */
-    int mode;
     const char *label; /* literal: update_status_label() compares by pointer */
 } ui_test_step_t;
 
-#define S UI_ORB_MODE_NONE
+/*
+ * ONE STEP PER STATE, and the label names the animation it now draws.
+ *
+ * The five modes had their own steps while they were dormant. They do not need
+ * them any more: a state selects its mode in face_orb.c, so scripting the STATE
+ * exercises exactly the path a real session takes -- and separate mode steps
+ * became exact duplicates of the state steps once the wiring landed.
+ *
+ * Only three states still draw the shell. Its other five behaviours are now
+ * unreachable in service, though the harness still diffs all eight.
+ */
 static const ui_test_step_t s_test_steps[] = {
-    /* The voice shell's eight behaviours, then its one orb-visible modifier. */
-    { UI_BEHAVIOUR_IDLE,         false, false, false, S, "idle" },
-    { UI_BEHAVIOUR_INITIALIZING, false, false, false, S, "initializing" },
-    { UI_BEHAVIOUR_LISTENING,    false, false, false, S, "listening" },
-    { UI_BEHAVIOUR_THINKING,     false, false, false, S, "thinking" },
-    { UI_BEHAVIOUR_SPEAKING,     false, false, false, S, "speaking" },
-    { UI_BEHAVIOUR_CONNECTING,   false, false, false, S, "connecting" },
-    { UI_BEHAVIOUR_BUFFERING,    false, false, false, S, "buffering" },
-    { UI_BEHAVIOUR_DISCONNECTED, false, false, false, S, "disconnected" },
-    { UI_BEHAVIOUR_LISTENING,    false, false, true,  S, "mod: frozen" },
-
-    /*
-     * Then the five ported modes, each labelled with the state it is CANDIDATE
-     * for -- the point of these steps is deciding whether the pairing is right,
-     * so the label has to name the pairing rather than just the mode.
-     */
-    { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_WAVE,   "wave: listening?" },
-    { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_RUBIK,  "rubik: thinking?" },
-    { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_RIBBON, "ribbon: speaking?" },
-    { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_BRAID,  "braid: buffering?" },
-    { UI_BEHAVIOUR_IDLE, false, false, false, UI_ORB_MODE_WEB,    "web: connecting?" },
+    { UI_BEHAVIOUR_IDLE,         false, false, false, "idle (shell)" },
+    { UI_BEHAVIOUR_INITIALIZING, false, false, false, "initializing (shell)" },
+    { UI_BEHAVIOUR_LISTENING,    false, false, false, "listening (wave)" },
+    { UI_BEHAVIOUR_THINKING,     false, false, false, "thinking (rubik)" },
+    { UI_BEHAVIOUR_SPEAKING,     false, false, false, "speaking (ribbon)" },
+    { UI_BEHAVIOUR_CONNECTING,   false, false, false, "connecting (web)" },
+    { UI_BEHAVIOUR_BUFFERING,    false, false, false, "buffering (braid)" },
+    { UI_BEHAVIOUR_DISCONNECTED, false, false, false, "disconnected (shell)" },
+    /* frozen holds the clock, which is orb-wide, so the shell shows it clearest. */
+    { UI_BEHAVIOUR_IDLE,         false, false, true,  "mod: frozen" },
 };
-#undef S
 #define TEST_STEP_COUNT (sizeof(s_test_steps) / sizeof(s_test_steps[0]))
 
 static volatile bool s_test_want;   /* set from the agent task */
@@ -1106,7 +1101,6 @@ static void frame_timer_cb(lv_timer_t *timer)
         /* Load-bearing: this initializer is designated, so omitting the field
          * would silently pass 0 -- black ink, an invisible orb. */
         .tint_rgb = s_tint_rgb,
-        .orb_mode = s_test_active ? s_test_steps[s_test_step].mode : UI_ORB_MODE_NONE,
     };
 
     update_status_label(idle);
