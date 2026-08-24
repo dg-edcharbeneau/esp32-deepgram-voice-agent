@@ -454,8 +454,40 @@ void app_main(void)
         if (audio_io_playback_active()) {
             note_activity();
         }
+        /*
+         * AND IT MUST BE READY, not merely running.
+         *
+         * Nothing notes activity while the socket is down, so a reconnect spends
+         * the whole window accumulating idle time and the timeout fires on a
+         * session that was never given the chance to be busy. Measured: a
+         * transport write error at 78.9 s, the client's own 5 s reconnect, the
+         * timeout at 85.9 s, and the recovered session live at 86.4 s and stopped
+         * 2 ms later by a request issued before it came back.
+         *
+         * Gating the check is only half of it. s_activity_us keeps accumulating
+         * while the socket is down, so a gate alone would not save the session --
+         * it would defer the kill to the exact moment readiness returned, with the
+         * clock already past the limit. Which is the symptom, not a fix.
+         *
+         * So the clock is also RESTARTED on the notready -> ready edge. Coming
+         * back counts as activity, and the recovered session gets a full window to
+         * prove itself idle rather than being judged on the outage.
+         *
+         * An edge rather than stamping while ready, so a session that sits ready
+         * and silent still times out as it should.
+         *
+         * Same fault as the display test's, which I fixed as a symptom rather than
+         * as a pattern -- a clock counting time in which activity was impossible.
+         */
+        bool ready_now = dg_agent_is_ready();
+        static bool was_ready;
+        if (ready_now && !was_ready) {
+            note_activity();
+        }
+        was_ready = ready_now;
+
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
-            s_activity_us != 0) {
+            ready_now && s_activity_us != 0) {
             int64_t quiet_us = esp_timer_get_time() - s_activity_us;
             if (quiet_us > (int64_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000000) {
                 ESP_LOGI(TAG, "EVT idletimeout after=%.1fs",
