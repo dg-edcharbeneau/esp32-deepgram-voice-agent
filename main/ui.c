@@ -359,7 +359,23 @@ static bool s_vad_open;
  * cleanly: a quiet room reads amp 0.11 through the full-band path while all three
  * bands sit at 0.00.
  */
-static volatile int64_t s_speech_us;
+/*
+ * MILLISECONDS IN 32 BITS, not microseconds in 64, and two variables rather than
+ * one. Both for the same reason: this is now written from two tasks.
+ *
+ * s_speech_ms is Deepgram's, stamped by ui_note_user_speech() on the WebSocket
+ * task. s_local_ms is the display's own -- the noise gate and the handoff below
+ * -- and is touched only by the LVGL task. When they shared one variable there
+ * were two writers on a 64-bit value that a 32-bit CPU stores in two halves, so a
+ * read could land mid-write and see a timestamp that never existed. A 32-bit
+ * store is indivisible here, and with one writer each there is nothing to tear.
+ *
+ * Elapsed time is computed per variable and the SMALLER taken, rather than taking
+ * the later timestamp: unsigned subtraction is correct across the 49-day wrap,
+ * comparing the stamps themselves is not.
+ */
+static volatile uint32_t s_speech_ms;
+static uint32_t s_local_ms;
 
 /*
  * How long LISTENING outlives the gate closing.
@@ -382,7 +398,7 @@ static volatile int64_t s_speech_us;
  * listening. Nor does it delay the reply, because resolve_behaviour() tests
  * playback BEFORE this -- the moment the agent speaks, SPEAKING wins outright.
  */
-#define LISTEN_HOLD_US 5000000
+#define LISTEN_HOLD_MS 5000u
 
 /*
  * Local speech gate: the microphone's own evidence that someone is talking,
@@ -681,7 +697,7 @@ void ui_set_orb_color(int index)
 
 void ui_note_user_speech(void)
 {
-    s_speech_us = esp_timer_get_time();
+    s_speech_ms = (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 void ui_start_display_test(void)
@@ -700,6 +716,17 @@ void ui_start_display_test(void)
  */
 static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
 {
+    /*
+     * BEFORE EVERY EARLY RETURN below, because this is an edge and an edge cannot
+     * be sampled only on the frames we happen to reach. Left below the guards, a
+     * session that stopped mid-reply kept was_speaking true and the next session's
+     * first silent frame invented a handoff that never happened.
+     */
+    const bool speaking_now = audio_io_playback_active();
+    static bool was_speaking;
+    const bool handoff = (was_speaking && !speaking_now);
+    was_speaking = speaking_now;
+
     /*
      * FIRST, and it has to be. The session is stopped for the whole test, so the
      * s_stopped check below would swallow every step into DISCONNECTED.
@@ -734,15 +761,6 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
      * agent last claimed. Trusting the claim would leave the shell radiating at a
      * silent speaker for the rest of a turn after an interruption.
      */
-    /*
-     * Tracked across frames, not just tested, because the FALLING edge matters as
-     * much as the state: see the handoff stamp further down.
-     */
-    bool speaking_now = audio_io_playback_active();
-    static bool was_speaking;
-    bool handoff = (was_speaking && !speaking_now);
-    was_speaking = speaking_now;
-
     if (speaking_now) {
         return UI_BEHAVIOUR_SPEAKING;
     }
@@ -754,17 +772,18 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
     }
 
     /*
-     * Speech, not merely data. See s_speech_us -- testing "a block arrived"
-     * instead kept this permanently in LISTENING and IDLE was never once drawn.
+     * Speech, not merely data -- testing "a block arrived" instead kept this
+     * permanently in LISTENING and IDLE was never once drawn.
      *
-     * Two ways in now. Deepgram's UserStartedSpeaking stamps s_speech_us and is
-     * the better evidence; the local gate below is the faster one, and covers the
+     * Two ways in. Deepgram's UserStartedSpeaking stamps s_speech_ms and is the
+     * better evidence; the local gate below is the faster one, and covers the
      * second-and-a-half before the message arrives. Either opens the same 5 s
      * hold, so a pause mid-sentence is bridged the same way whichever noticed.
      *
      * Reading last frame's smoothed level: resolve_behaviour runs before
      * update_amp for this frame. One frame of lag on a 5 s hold is nothing.
      */
+    const uint32_t now_ms = (uint32_t)(now_us / 1000);
     /*
      * THE HANDOFF. The moment the agent stops talking, the device is listening --
      * the microphone is open and streaming to Deepgram, and a reply is what it is
@@ -777,17 +796,21 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
      * falls through to IDLE once the hold runs out, which is what IDLE is for.
      */
     if (handoff) {
-        s_speech_us = now_us;
+        s_local_ms = now_ms;
     }
 
     static bool gate_open;
     float mic = s_amp[LVL_MIC];
     gate_open = gate_open ? (mic > MIC_SPEECH_CLOSE) : (mic > MIC_SPEECH_OPEN);
     if (gate_open) {
-        s_speech_us = now_us;
+        s_local_ms = now_ms;
     }
 
-    if ((now_us - s_speech_us) < LISTEN_HOLD_US) {
+    /* Per-variable elapsed, smaller wins. Wrap-safe; comparing stamps is not. */
+    const uint32_t since_vad = now_ms - s_speech_ms;
+    const uint32_t since_local = now_ms - s_local_ms;
+    const uint32_t since = (since_vad < since_local) ? since_vad : since_local;
+    if (since < LISTEN_HOLD_MS) {
         return UI_BEHAVIOUR_LISTENING;
     }
 
