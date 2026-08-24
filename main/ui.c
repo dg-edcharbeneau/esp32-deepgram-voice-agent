@@ -488,6 +488,23 @@ static void publish_level(const int16_t *mono, size_t samples, ui_source_t src)
     float r_high = sqrtf(s_high * inv_n) * BAND_GAIN_HIGH * src_norm;
 
     float raw = (r_low + r_mid + r_high) / 3.0f;
+
+    /*
+     * TEMPORARY INSTRUMENTATION -- remove once VAD_OPEN is set from measurement.
+     *
+     * The published bands cannot answer whether the gate should have opened: they
+     * are zeroed BY the gate, so reading them is circular. This logs the gate's
+     * actual input on the microphone path, ~4 times a second, so a quiet room and
+     * ordinary speech can be compared against VAD_OPEN directly.
+     */
+    if (src == UI_SRC_MIC) {
+        static uint32_t vlog;
+        if ((++vlog % 3) == 0) {
+            ESP_LOGI(TAG, "VAD raw=%.4f (open>%.3f close>%.3f) low=%.4f mid=%.4f high=%.4f",
+                     raw, VAD_OPEN, VAD_CLOSE, r_low, r_mid, r_high);
+        }
+    }
+
     s_vad_open = s_vad_open ? (raw > VAD_CLOSE) : (raw > VAD_OPEN);
     if (s_vad_open && src == UI_SRC_MIC) {
         s_speech_us = esp_timer_get_time();
