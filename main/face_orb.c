@@ -86,7 +86,15 @@ typedef enum {
 static orb_mode_t mode_for(ui_behaviour_t b)
 {
     switch (b) {
-    case UI_BEHAVIOUR_LISTENING:  return MODE_WAVE;   /* the user talking */
+    /*
+     * LISTENING is on the shell too, and wave is detached -- the same move
+     * SPEAKING made below, for the same reason. See ORB_LISTENING_FILL.
+     *
+     * Worth noting what falls out of both of them being shell behaviours: the
+     * conversational core -- listening, thinking, speaking -- now shares one
+     * lattice, so the transitions a caller sees most often all crossfade. Only
+     * the four foreign modes still cut.
+     */
     case UI_BEHAVIOUR_THINKING:   return MODE_RUBIK;
     /*
      * SPEAKING IS BACK ON THE SHELL, and ribbon is detached.
@@ -138,7 +146,11 @@ static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
                        orb_behaviour_t from, orb_behaviour_t to, float mix)
 {
     switch (mode) {
-    /* wave takes the microphone level: LISTENING is the user talking. */
+    /*
+     * Kept, and currently unreachable: no state maps to MODE_WAVE since LISTENING
+     * moved to the shell's inward fill. Parity-verified, and one line from being
+     * pointed at a state again -- as ribbon already is.
+     */
     case MODE_WAVE:
         orb_build_wave(out, t, amp);
         orb_wave_ink(out, amp); /* local pass; see orb_geometry.h */
@@ -200,7 +212,9 @@ static orb_behaviour_t to_orb(ui_behaviour_t b)
 {
     switch (b) {
     case UI_BEHAVIOUR_INITIALIZING: return ORB_INITIALIZING;
-    case UI_BEHAVIOUR_LISTENING:    return ORB_LISTENING;
+    /* Not ORB_LISTENING: that is the reference's inward-wavefront pose, which the
+     * shell keeps and nothing now selects. See ORB_LISTENING_FILL. */
+    case UI_BEHAVIOUR_LISTENING:    return ORB_LISTENING_FILL;
     case UI_BEHAVIOUR_THINKING:     return ORB_THINKING;
     /* Not ORB_SPEAKING: that is the reference's outward-wavefront pose, which the
      * shell keeps and nothing now selects. See ORB_SPEAKING_FILL. */
