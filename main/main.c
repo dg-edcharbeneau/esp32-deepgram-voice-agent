@@ -158,6 +158,9 @@ static void on_user_started_speaking(void *ctx)
     /* Deepgram's own speech detection, which is better evidence than the local
      * level and arrives even when the display is not running. */
     note_activity();
+    /* And it is what puts the orb into LISTENING -- measured to separate speech
+     * from a quiet room cleanly where the local band gate could not. */
+    ui_note_user_speech();
     /* Stop mid-sentence rather than talk over the user. */
     audio_io_flush();
 }

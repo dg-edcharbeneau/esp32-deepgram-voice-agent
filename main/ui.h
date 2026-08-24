@@ -151,6 +151,20 @@ void ui_set_face(int index);
 void ui_set_orb_color(int index);
 
 /*
+ * Deepgram detected the user starting to speak.
+ *
+ * This is what drives LISTENING. Measured against a local band-energy gate on the
+ * same speech, this separates cleanly -- six events across two speech phases, none
+ * across seventeen seconds of quiet -- where band energy managed at best a 5x
+ * ratio and could not be thresholded without either missing speech or flickering
+ * on room noise.
+ *
+ * Costs a dependency on the session and a network round trip, and it marks only
+ * the START of an utterance, so the display holds LISTENING for a while after.
+ */
+void ui_note_user_speech(void);
+
+/*
  * Hand the screen over to the display test: every orb state and modifier, one per
  * tap, and nothing else on screen.
  *

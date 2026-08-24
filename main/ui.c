@@ -337,7 +337,20 @@ static volatile int64_t s_speech_us;
  * between listening and idle several times per sentence. Comfortably longer than
  * a within-sentence pause, comfortably shorter than a turn.
  */
-#define LISTEN_HOLD_US 700000
+/*
+ * How long LISTENING outlives the last speech event.
+ *
+ * WAS 700 ms, for a local gate that fired on every block it opened on. Deepgram's
+ * detector marks the START of an utterance and nothing else, and measured on real
+ * speech its events came 0.2 s, 3.8 s and 2.0 s apart -- so a 700 ms hold dropped
+ * out of LISTENING mid-sentence, repeatedly.
+ *
+ * 5 s covers the observed gaps with margin, and lingering is not the fault it
+ * would be elsewhere: after the user stops, the device genuinely is still
+ * listening. Nor does it delay the reply, because resolve_behaviour() tests
+ * playback BEFORE this -- the moment the agent speaks, SPEAKING wins outright.
+ */
+#define LISTEN_HOLD_US 5000000
 
 /*
  * Minimum time on screen for the connection rungs.
@@ -489,26 +502,7 @@ static void publish_level(const int16_t *mono, size_t samples, ui_source_t src)
 
     float raw = (r_low + r_mid + r_high) / 3.0f;
 
-    /*
-     * TEMPORARY INSTRUMENTATION -- remove once VAD_OPEN is set from measurement.
-     *
-     * The published bands cannot answer whether the gate should have opened: they
-     * are zeroed BY the gate, so reading them is circular. This logs the gate's
-     * actual input on the microphone path, ~4 times a second, so a quiet room and
-     * ordinary speech can be compared against VAD_OPEN directly.
-     */
-    if (src == UI_SRC_MIC) {
-        static uint32_t vlog;
-        if ((++vlog % 3) == 0) {
-            ESP_LOGI(TAG, "VAD raw=%.4f (open>%.3f close>%.3f) low=%.4f mid=%.4f high=%.4f",
-                     raw, VAD_OPEN, VAD_CLOSE, r_low, r_mid, r_high);
-        }
-    }
-
     s_vad_open = s_vad_open ? (raw > VAD_CLOSE) : (raw > VAD_OPEN);
-    if (s_vad_open && src == UI_SRC_MIC) {
-        s_speech_us = esp_timer_get_time();
-    }
 
     /*
      * The full-band amplitude keeps its own calibrated gain and is deliberately
@@ -619,6 +613,11 @@ void ui_set_orb_color(int index)
         return;
     }
     s_color_want = index;
+}
+
+void ui_note_user_speech(void)
+{
+    s_speech_us = esp_timer_get_time();
 }
 
 void ui_start_display_test(void)
