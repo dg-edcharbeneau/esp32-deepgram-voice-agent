@@ -331,13 +331,13 @@ static void idle_gesture(float t, int *which, float *env, float *local)
  * The gate exists so silence is the disconnected shell exactly, rather than the
  * shell plus a permanent glow at the equator where the cap sits at fill zero.
  */
-#define FILL_GAIN 1.5f
-#define EDGE_SOFT 0.18f
-#define TIP_W 0.20f
-#define FILL_ALPHA_GAIN 0.55f
-#define TIP_ALPHA_GAIN 0.40f
-#define FILL_CREST_GAIN 0.40f
-#define FILL_GATE 0.08f
+#define FILL_GAIN 1.5f        /* how far the light reaches; 1.0 never fills, 2.0 pegs early */
+#define EDGE_SOFT 0.18f       /* boundary sharpness, in from_eq units; one ring is 0.118 */
+#define TIP_W 0.20f           /* cap width -- A FLOOR: below the ring spacing it aliases away */
+#define FILL_ALPHA_GAIN 0.55f /* brightness of the filled body, above the 0.14 floor */
+#define TIP_ALPHA_GAIN 0.40f  /* extra brightness at the cap; under ~0.22 it stops reading */
+#define FILL_CREST_GAIN 0.40f /* how much lit dots swell and darken, together */
+#define FILL_GATE 0.08f       /* silence cutoff, so nothing lights below a whisper */
 
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
