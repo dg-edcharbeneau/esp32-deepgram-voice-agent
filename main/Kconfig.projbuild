@@ -350,31 +350,6 @@ menu "Deepgram Agent Device"
             Index into the colour table in orb_colors.c. Set by the choice above,
             and ORDER IS THE CONTRACT -- these have to match that table.
 
-    config ORB_MODE_CROSSFADE
-        bool "Cross-fade between orb animations"
-        default y
-        help
-            Fade between the orb's animations on a state change, rather than
-            cutting.
-
-            The shell's own behaviours blend ring by ring, because they are poses
-            on one lattice. The ported modes are not -- wave, rubik, braid and web
-            have different lattices, dot counts and in web's case lines -- so there
-            is no intermediate pose, and the only blend available is drawing both
-            and fading on alpha.
-
-            That costs a doubled build for the ~7 frames a transition lasts:
-            roughly 35 ms a frame against 17, so the frame rate halves briefly and
-            recovers. Cheap because it is transient.
-
-            TURN IT OFF IF IT LOOKS WORSE THAN A CUT. Two structurally different
-            dot clouds at partial alpha can read as two ghosts rather than as one
-            object changing -- most likely where the pair differ in density, such
-            as web's 35 nodes against braid's 306 strand dots.
-
-            The frame buffer is sized for a pair either way, so this only changes
-            behaviour, never memory.
-
     config ORB_AMP_GAIN_MIC
         int "Display level gain, microphone path (percent)"
         default 600

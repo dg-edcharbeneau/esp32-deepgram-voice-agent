@@ -116,9 +116,7 @@ static orb_mode_t mode_for(ui_behaviour_t b)
  * no business in internal RAM. Allocated on first use rather than at init, so a
  * build with the crossfade disabled never pays for it.
  */
-#if CONFIG_ORB_MODE_CROSSFADE
 static orb_frame_t *s_frame_b;
-#endif
 
 static const char *mode_name(orb_mode_t m)
 {
@@ -158,7 +156,6 @@ static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
     }
 }
 
-#if CONFIG_ORB_MODE_CROSSFADE
 /* Fade a whole animation by scaling every mark's alpha. Lines included: web's
  * edges have to leave with its nodes, not after them. */
 static void scale_alpha(orb_frame_t *f, float k)
@@ -195,7 +192,6 @@ static void append_frame(orb_frame_t *a, const orb_frame_t *b)
         a->lines[a->line_count++] = b->lines[i];
     }
 }
-#endif
 
 static orb_behaviour_t to_orb(ui_behaviour_t b)
 {
@@ -330,27 +326,18 @@ static void render(const ui_render_ctx_t *ctx)
      */
     static orb_mode_t s_mode_from = MODE_SHELL, s_mode_to = MODE_SHELL;
     static int64_t s_mode_blend_us;
-#if CONFIG_ORB_MODE_CROSSFADE
-    /* Only the fade needs to know what the outgoing shell was showing. */
+    /* What the outgoing shell was showing, so it can be held while it fades. */
     static orb_behaviour_t s_mode_from_beh = ORB_DISCONNECTED;
-#endif
 
     if (mode != s_mode_to) {
         /* From where we were HEADING, not from the blend showing right now --
          * the same choice the shell's own behaviour blend makes above. */
         s_mode_from = s_mode_to;
-#if CONFIG_ORB_MODE_CROSSFADE
-        s_mode_from_beh = s_from; /* what the outgoing shell was showing */
-#endif
+        s_mode_from_beh = s_from;
         s_mode_to = mode;
         s_mode_blend_us = ctx->now_us;
-        ESP_LOGI("face_orb", "EVT mode %s->%s (%s)",
-                 mode_name(s_mode_from), mode_name(mode),
-#if CONFIG_ORB_MODE_CROSSFADE
-                 "fade");
-#else
-                 "cut");
-#endif
+        ESP_LOGI("face_orb", "EVT mode %s->%s", mode_name(s_mode_from),
+                 mode_name(mode));
     }
 
     float mode_mix = 1.0f;
@@ -363,18 +350,13 @@ static void render(const ui_render_ctx_t *ctx)
         }
     }
 
-#if CONFIG_ORB_MODE_CROSSFADE
     if (s_mode_from != s_mode_to && s_frame_b == NULL) {
         /* First transition of the boot pays for the second frame. */
         s_frame_b = heap_caps_malloc(sizeof(*s_frame_b), MALLOC_CAP_SPIRAM);
     }
-#else
-    (void)mode_mix;
-#endif
 
     build_mode(mode, s_frame, t, amp, &bands, s_from, s_to, mix);
 
-#if CONFIG_ORB_MODE_CROSSFADE
     /*
      * A cross-mode fade: draw BOTH animations and fade on alpha.
      *
@@ -394,7 +376,6 @@ static void render(const ui_render_ctx_t *ctx)
         scale_alpha(s_frame_b, 1.0f - mode_mix);
         append_frame(s_frame, s_frame_b);
     }
-#endif
     int64_t t_rast = esp_timer_get_time();
     /* Colour is the user's, resolved by ui.c. Nothing to latch or reset: it is a
      * pure draw parameter, so a change lands on the next frame by itself -- which

@@ -77,10 +77,8 @@ typedef enum {
  * ring by ring the way two shell behaviours can, so the frame carries both dot
  * lists concatenated. The largest pair is the shell against wave or rubik.
  *
- * Sized unconditionally rather than behind the Kconfig switch that turns the
- * crossfade on: this header is pure maths that also compiles on the host for the
- * parity harness, where CONFIG_* does not exist. The cost is PSRAM, which is not
- * the resource under pressure.
+ * The cost is 9 kB of PSRAM, which is not the resource under pressure here --
+ * internal RAM is, and none of this touches it.
  */
 #define ORB_ONE_MODE_DOTS                                   \
     ORB_MAX2(ORB_VOICE_DOTS,                                \
