@@ -1846,6 +1846,31 @@ static int cmp_draw_order(const void *a, const void *b)
     return (da->z < db->z) ? -1 : ((da->z > db->z) ? 1 : 0);
 }
 
+void orb_rotate(orb_frame_t *f, float degrees)
+{
+    if (degrees == 0.0f) {
+        return;
+    }
+    const float rad = degrees * (3.14159265358979f / 180.0f);
+    const float c = cosf(rad), s = sinf(rad);
+    /* Screen y grows downward, so this turns clockwise as seen. */
+    for (size_t i = 0; i < f->count; i++) {
+        const float dx = f->dots[i].x - s_cx, dy = f->dots[i].y - s_cy;
+        f->dots[i].x = s_cx + dx * c - dy * s;
+        f->dots[i].y = s_cy + dx * s + dy * c;
+    }
+    /* Both endpoints, or web's edges detach from the nodes they connect. */
+    for (size_t i = 0; i < f->line_count; i++) {
+        orb_line_t *l = &f->lines[i];
+        const float ax = l->x1 - s_cx, ay = l->y1 - s_cy;
+        const float bx = l->x2 - s_cx, by = l->y2 - s_cy;
+        l->x1 = s_cx + ax * c - ay * s;
+        l->y1 = s_cy + ax * s + ay * c;
+        l->x2 = s_cx + bx * c - by * s;
+        l->y2 = s_cy + bx * s + by * c;
+    }
+}
+
 void orb_build(orb_frame_t *out, float t, orb_behaviour_t from,
                orb_behaviour_t to, float mix, float amp,
                const orb_bands_t *bands)

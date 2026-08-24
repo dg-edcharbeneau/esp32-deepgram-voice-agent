@@ -139,6 +139,24 @@ static const char *mode_name(orb_mode_t m)
     }
 }
 
+/*
+ * [0..360] How far the LISTENING fill turns the orb, degrees clockwise.
+ *
+ * The fill grows out of the poles, and the poles sit top and bottom, so 90 moves
+ * them to the sides and the light closes in horizontally instead of vertically.
+ * It turns the dot lattice with it, so the rings read vertical while listening --
+ * that is what rotating the object means, as opposed to just redirecting the
+ * light. Set 0 to stand it back up.
+ */
+#define LISTEN_ROTATE_DEG 90.0f
+
+/* Every behaviour is upright but the listening fill. Kept as a function rather
+ * than folded into build_mode because the two ends of a blend need it separately. */
+static float rotate_for(orb_behaviour_t b)
+{
+    return (b == ORB_LISTENING_FILL) ? LISTEN_ROTATE_DEG : 0.0f;
+}
+
 /* Build one animation into `out`. The shell arm takes the behaviour blend; every
  * mode ignores from/to/mix, having no behaviours to blend. */
 static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
@@ -167,6 +185,16 @@ static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
     case MODE_SHELL:
     default:
         orb_build(out, t, from, to, mix, amp, bands);
+        /*
+         * INTERPOLATED across the blend, not switched at the end of it, so
+         * entering and leaving LISTENING turns the orb through the 280 ms rather
+         * than snapping it upright on the last frame. Both ends are 0 for every
+         * other pair, where orb_rotate returns immediately and this costs nothing.
+         */
+        {
+            const float a0 = rotate_for(from), a1 = rotate_for(to);
+            orb_rotate(out, a0 + (a1 - a0) * mix);
+        }
         break;
     }
 }
