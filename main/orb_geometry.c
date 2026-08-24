@@ -314,15 +314,15 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 /*
  * The speaking level meter.
  *
- * FILL_GAIN maps the audio level to how far out the light reaches, 0 at the
+ * FILL_REACH maps the audio level to how far out the light reaches, 0 at the
  * equator and 1 at either pole. Measured agent playback runs a mean near 0.35 and
  * peaks around 0.65, so 1.5 puts ordinary speech at about half the shell and a
  * peak at nearly all of it -- a meter with headroom rather than one that pegs.
  *
- * EDGE_SOFT is how abruptly the fill ends, in the same units. About one and a
+ * FILL_FADE is how abruptly the fill ends, in the same units. About one and a
  * half rings, enough that the boundary is not a hard band.
  *
- * TIP_W IS SET BY THE RING SPACING, not by taste. Rings sit 0.118 apart in these
+ * LEAD_WIDTH IS SET BY THE RING SPACING, not by taste. Rings sit 0.118 apart in these
  * units, and a cap narrower than that falls BETWEEN rings for most fill levels --
  * at 0.12 the bright edge simply vanished at all but one level. 0.20 always
  * catches a ring. It is the same aliasing that made the first attempt at this
@@ -333,25 +333,29 @@ static void idle_gesture(float t, int *which, float *env, float *local)
  */
 /* [1.0..2.0]   how far the light reaches. 1.0 never fills, 2.0 pegs at half
  *              volume. */
-#define FILL_GAIN 1.2f
-/* [0.12..0.35] boundary sharpness, in from_eq units where one ring is
- *              0.118. Under ~0.12 the fill ends in a hard band. */
-#define EDGE_SOFT 0.18f
-/* [0.20..0.35] cap width. 0.20 IS A FLOOR, not a preference: narrower
- *              than the 0.118 ring spacing and the cap falls between
- *              rings and vanishes. */
-#define TIP_W 0.20f
-/* [0..0.86]    brightness of the filled body, above the 0.14 floor.
- *              0.86 is where 0.14 + gain reaches the clamp. */
-#define FILL_ALPHA_GAIN 0.55f
-/* [0..0.55]    extra brightness at the cap. The ceiling is what is left
- *              of the 0.86 headroom once FILL_ALPHA_GAIN has taken its
- *              half at the boundary; past it both flatten against the
- *              clamp. Under ~0.22 it stops reading as a cap at all. */
-#define TIP_ALPHA_GAIN 0.40f
+#define FILL_REACH 1.2f
+/* [0.12..0.35] how gradually the body FADES OUT behind the leading edge, in
+ *              from_eq units where one ring is 0.118. Under ~0.12 it ends in a
+ *              hard band. */
+#define FILL_FADE 0.18f
+/* [0.20..0.35] width of the leading edge. 0.20 IS A FLOOR, not a preference:
+ *              narrower than the 0.118 ring spacing and the edge falls between
+ *              rings and vanishes entirely. */
+#define LEAD_WIDTH 0.20f
+/* [0..0.86]    brightness of the lit BODY trailing the edge, above the 0.14
+ *              floor. LOWER THIS to make the leading edge stand out: the two
+ *              brightnesses share 0.86 of headroom, so raising LEAD_BRIGHT alone
+ *              just flattens both against the clamp. 0.55/0.40 gives the edge a
+ *              1.13x contrast over the body; 0.18/0.68 gives it 2.39x. */
+#define FILL_BRIGHT 0.55f
+/* [0..0.55]    brightness of the LEADING EDGE itself, on top of the body. The
+ *              ceiling is whatever FILL_BRIGHT has left of the 0.86 headroom at
+ *              the boundary; past it both flatten against the clamp. Under ~0.22
+ *              it stops reading as an edge at all. */
+#define LEAD_BRIGHT 0.40f
 /* [0..0.6]     how much lit dots swell and darken, together. Past ~0.6
  *              the near side blows out to solid ink. */
-#define FILL_CREST_GAIN 0.40f
+#define FILL_SWELL 0.40f
 /* [0.03..0.15] silence cutoff. Higher means more has to be playing
  *              before anything lights at all. */
 #define FILL_GATE 0.08f
@@ -529,7 +533,7 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
          */
         float from_eq = fabsf(ring_t - 0.5f) * 2.0f;
 
-        float fill = amp * FILL_GAIN;
+        float fill = amp * FILL_REACH;
         if (fill > 1.0f) {
             fill = 1.0f;
         }
@@ -539,19 +543,19 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
             gate = 1.0f;
         }
 
-        float lit = (fill - from_eq) / EDGE_SOFT;
+        float lit = (fill - from_eq) / FILL_FADE;
         if (lit < 0.0f) lit = 0.0f;
         else if (lit > 1.0f) lit = 1.0f;
 
         /* The cap: a soft peak sitting exactly at the fill boundary. */
-        float td = (fill - from_eq) / TIP_W;
+        float td = (fill - from_eq) / LEAD_WIDTH;
         float tip = expf(-td * td);
 
         out[RS_RF] = 0.8f + 0.012f * sinf(t * 0.5f + ri * 0.3f);
         /* Rule 4: a crest makes a dot bigger AND darker at the same instant. */
-        out[RS_CREST] = FILL_CREST_GAIN * lit * gate;
+        out[RS_CREST] = FILL_SWELL * lit * gate;
         out[RS_SHEAR] = 0.0f;
-        float a = 0.14f + (FILL_ALPHA_GAIN * lit + TIP_ALPHA_GAIN * tip) * gate;
+        float a = 0.14f + (FILL_BRIGHT * lit + LEAD_BRIGHT * tip) * gate;
         out[RS_ALPHA] = (a > 1.0f) ? 1.0f : a;
         return;
     }
