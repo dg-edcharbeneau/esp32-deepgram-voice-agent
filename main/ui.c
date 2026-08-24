@@ -325,6 +325,15 @@ static volatile uint32_t s_level_peak[2]; /* [0] agent, [1] mic */
 static int64_t s_feed_us[2];
 
 /*
+ * The smoothed levels a face reads, one set per source.
+ *
+ * Up here with the other level state rather than next to the accumulator that
+ * samples it, because resolve_behaviour()'s local speech gate reads the
+ * microphone channel and sits well above that.
+ */
+static float s_amp[2], s_low[2], s_mid[2], s_high[2];
+
+/*
  * Crossover state, one set per source.
  *
  * Separate because the mic and the agent are unrelated signals: carrying the
@@ -374,6 +383,35 @@ static volatile int64_t s_speech_us;
  * playback BEFORE this -- the moment the agent speaks, SPEAKING wins outright.
  */
 #define LISTEN_HOLD_US 5000000
+
+/*
+ * Local speech gate: the microphone's own evidence that someone is talking,
+ * opening at MIC_SPEECH_OPEN and closing at MIC_SPEECH_CLOSE.
+ *
+ * WHY THIS EXISTS. LISTENING used to be reachable only through Deepgram's
+ * UserStartedSpeaking, which is better evidence but arrives late -- measured at
+ * 1.77 s after the agent stopped and the user had already begun. For that whole
+ * second and a half the resolver fell through to IDLE while the level sat at
+ * 0.09, so the orb went blank in the middle of someone speaking. The device
+ * already knows; this lets it say so and lets the VAD confirm behind it.
+ *
+ * HYSTERESIS, and thresholds from measurement rather than feel. A plain "a block
+ * arrived" test was tried before and pinned this permanently in LISTENING -- IDLE
+ * was never drawn at all. Measured on device: a live-mic quiet room smooths to
+ * 0.009-0.014, a normal voice to 0.031-0.093, peaks well past 0.3. Opening at
+ * 0.030 clears the room with margin; closing at 0.020 stays above it so a pause
+ * between words does not chatter the gate shut.
+ *
+ * Deliberately conservative: a false NEGATIVE just falls back to waiting for the
+ * VAD, which is what used to happen anyway. A false positive brings back the
+ * never-idle bug, which is worse. Very quiet speech is left to the VAD.
+ *
+ * Self-triggering is not a risk. The microphone delivers nothing at all while the
+ * agent speaks -- the capture task is gated, and ui_feed_mic() defers regardless
+ * -- so the agent's own voice cannot open this.
+ */
+#define MIC_SPEECH_OPEN 0.030f
+#define MIC_SPEECH_CLOSE 0.020f
 
 /*
  * Minimum time on screen for the connection rungs.
@@ -696,7 +734,16 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
      * agent last claimed. Trusting the claim would leave the shell radiating at a
      * silent speaker for the rest of a turn after an interruption.
      */
-    if (audio_io_playback_active()) {
+    /*
+     * Tracked across frames, not just tested, because the FALLING edge matters as
+     * much as the state: see the handoff stamp further down.
+     */
+    bool speaking_now = audio_io_playback_active();
+    static bool was_speaking;
+    bool handoff = (was_speaking && !speaking_now);
+    was_speaking = speaking_now;
+
+    if (speaking_now) {
         return UI_BEHAVIOUR_SPEAKING;
     }
 
@@ -709,7 +756,37 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
     /*
      * Speech, not merely data. See s_speech_us -- testing "a block arrived"
      * instead kept this permanently in LISTENING and IDLE was never once drawn.
+     *
+     * Two ways in now. Deepgram's UserStartedSpeaking stamps s_speech_us and is
+     * the better evidence; the local gate below is the faster one, and covers the
+     * second-and-a-half before the message arrives. Either opens the same 5 s
+     * hold, so a pause mid-sentence is bridged the same way whichever noticed.
+     *
+     * Reading last frame's smoothed level: resolve_behaviour runs before
+     * update_amp for this frame. One frame of lag on a 5 s hold is nothing.
      */
+    /*
+     * THE HANDOFF. The moment the agent stops talking, the device is listening --
+     * the microphone is open and streaming to Deepgram, and a reply is what it is
+     * waiting for. IDLE claims nothing is happening, which is the wrong answer and
+     * a jarring one: measured at 1.78 s of dead orb between the agent finishing
+     * and the user starting, which reads as a fault rather than as a pause.
+     *
+     * Stamping the same clock the gate and the VAD use, so the turn opens with a
+     * full LISTENING hold that real speech then extends. A long silence still
+     * falls through to IDLE once the hold runs out, which is what IDLE is for.
+     */
+    if (handoff) {
+        s_speech_us = now_us;
+    }
+
+    static bool gate_open;
+    float mic = s_amp[LVL_MIC];
+    gate_open = gate_open ? (mic > MIC_SPEECH_CLOSE) : (mic > MIC_SPEECH_OPEN);
+    if (gate_open) {
+        s_speech_us = now_us;
+    }
+
     if ((now_us - s_speech_us) < LISTEN_HOLD_US) {
         return UI_BEHAVIOUR_LISTENING;
     }
@@ -730,7 +807,7 @@ void ui_set_failed(bool failed)
 
 /* ---------------- frame ---------------- */
 
-static void update_status_label(bool idle)
+static void update_status_label(ui_behaviour_t beh)
 {
     /*
      * All candidates are string literals, so the "has it changed" test is a
@@ -744,13 +821,22 @@ static void update_status_label(bool idle)
         want = s_test_steps[s_test_step].label;
     } else if (!s_session_live) {
         want = s_status; /* connecting / error / disconnected */
-    } else if (audio_io_playback_active()) {
+    } else if (beh == UI_BEHAVIOUR_SPEAKING) {
         want = "speaking";
-    } else if (!idle && s_source == UI_SRC_MIC) {
+    } else if (beh == UI_BEHAVIOUR_LISTENING) {
         want = "listening";
     } else {
         want = s_status; /* "ready" */
     }
+    /*
+     * DERIVED FROM THE RESOLVED BEHAVIOUR, not from a rule of its own.
+     *
+     * This used to test playback and `!idle && s_source == UI_SRC_MIC`
+     * independently of resolve_behaviour, so the label and the orb could disagree
+     * by construction -- and did: the screen read "ready" while the orb drew IDLE
+     * mid-conversation, because s_source is only ever "whichever tap fired last".
+     * One state, one answer, and the label cannot drift from the picture again.
+     */
 
     static const char *shown;
     if (want != shown) {
@@ -828,9 +914,6 @@ static void update_qr(void)
  * about 21.7 ms of bus time the callback never sees. A small draw next to a large
  * period means the panel is the limit and optimising the drawing buys nothing.
  */
-/* The smoothed levels a face reads. Declared here because the accumulator below
- * samples them once per frame. */
-static float s_amp[2], s_low[2], s_mid[2], s_high[2];
 
 /* Which channel the behaviour on screen selected this frame; for telemetry, so
  * the reported src and amp always describe the same signal. */
@@ -1221,7 +1304,7 @@ static void frame_timer_cb(lv_timer_t *timer)
         .tint_rgb = s_tint_rgb,
     };
 
-    update_status_label(idle);
+    update_status_label(beh);
 
     if (s_face != NULL) {
         s_face->render(&ctx);
