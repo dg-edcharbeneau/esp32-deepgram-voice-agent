@@ -360,24 +360,37 @@ static void idle_gesture(float t, int *which, float *env, float *local)
 /* [0.03..0.15] silence cutoff. Higher means more has to be playing
  *              before anything lights at all. */
 #define FILL_GATE 0.08f
-/* [0..~1.4]    sqrt(mic amp) -> how far the LISTENING fill reaches inward from the
- *              poles. SQRT, and its own constant, because the microphone is
- *              nothing like playback: measured across LISTENING it runs a mean of
- *              0.056 and peaks to 0.534, a 180x span, where the speaking fill's
- *              linear 1.2 would give a fill of 0.07 at conversational volume --
- *              barely off the poles. 1.4 puts typical speech a third of the way
- *              in and a loud peak at the equator, where the two fronts meet. */
-#define LISTEN_REACH 1.4f
-/* [0..~0.05]   mic level treated as silence, subtracted BEFORE the sqrt above.
- *              Not a taste knob -- without it the sqrt defeats FILL_GATE. Taking
- *              the root compresses the bottom of the range, so a room-noise 0.003
- *              becomes a fill of 0.077, which clears the 0.08 gate the gate exists
- *              to stop, and the orb sits with both polar caps lit in silence.
- *              Subtracting first puts silence, the noise floor and a quiet room at
- *              exactly zero fill while conversational speech still reaches 0.30.
- *              RAISE ONLY if a noisy room lights the poles at rest; every 0.01
- *              here costs a little of the bottom of the speaking range. */
-#define LISTEN_FLOOR 0.010f
+/* [0.2..1.0]   the LISTENING fill's response curve: fill = level^CURVE * REACH.
+ *              1.0 is linear, 0.5 a square root; LOWER compresses harder, lifting
+ *              quiet speech without pushing loud speech off the top.
+ *
+ *              MEASURED, not chosen by feel. On device across beh=LISTENING a
+ *              normal speaking voice runs amp 0.032 average / 0.087 peak and a
+ *              raised one 0.144 / 0.227 -- a spread of only 4.5x, sitting just
+ *              above a live-mic room noise of 0.014. That range is too narrow for
+ *              a square root: any reach that fills normal speech also pins BOTH
+ *              loud levels at 1.0, so shouting and talking look identical. 0.35
+ *              puts normal speech at 0.42-0.68 and a loud peak at 0.99 -- the
+ *              equator, reached but not clipped, so the top still has somewhere
+ *              to go. Re-measure before changing it; a different mic or gain
+ *              moves every number here. */
+#define LISTEN_CURVE 0.35f
+/* [1.0..2.5]   how far the fill reaches inward from the poles at full level.
+ *              The plain loudness knob -- raise for more fill everywhere. Paired
+ *              with LISTEN_CURVE above: 1.7 is what puts a loud peak at the
+ *              equator given that curve, so changing one wants the other checked. */
+#define LISTEN_REACH 1.7f
+/* [0.005..0.05] mic level treated as silence, subtracted BEFORE the curve.
+ *              Not taste -- without it the curve defeats FILL_GATE. Compressing
+ *              the bottom of the range is the whole point of LISTEN_CURVE, and it
+ *              lifts room noise along with everything else: at floor 0.010 the
+ *              measured 0.014 of a live mic in a quiet room cleared the 0.08 gate
+ *              that exists to stop exactly that, and lit both polar caps to alpha
+ *              0.62 at rest. It went unseen only because LISTENING is VAD-gated
+ *              -- at rest the orb is in IDLE and never draws this behaviour.
+ *              SET IT AT MEASURED ROOM NOISE, hence 0.014. Raise if a noisier
+ *              room lights the poles; every step costs the quietest speech. */
+#define LISTEN_FLOOR 0.014f
 
 /* Depth mapping. Radius and ink are both derived from it, which is rule 4. */
 #define R_BASE 0.6f
@@ -598,11 +611,12 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
          * retuning the brightness retunes both, because they are one language.
          * Only the direction and the level mapping differ.
          *
-         * SQRT OF THE LEVEL, unlike SPEAKING. The microphone spans 0.003 to 0.534
-         * across LISTENING and a linear map serves neither end of that; playback
-         * sits in a much narrower band and does not need it. The root is why
-         * LISTEN_FLOOR has to come off first -- see its comment; it is load-bearing,
-         * not a preference.
+         * A COMPRESSED CURVE, unlike SPEAKING's linear map. Measured across
+         * LISTENING, the microphone spans a live-mic room noise of 0.014 to a loud
+         * peak of 0.227 -- a 4.5x window sitting close to the noise, where playback
+         * gets a wide and predictable one. See LISTEN_CURVE for why a square root
+         * is not enough, and LISTEN_FLOOR for why compressing means a floor has to
+         * come off first. The floor is load-bearing, not a preference.
          */
         float from_pole = 1.0f - fabsf(ring_t - 0.5f) * 2.0f;
 
@@ -610,7 +624,7 @@ static void ring_state(orb_behaviour_t b, int ri, float ring_t, float sin_lat,
         if (lvl < 0.0f) {
             lvl = 0.0f;
         }
-        float fill = sqrtf(lvl) * LISTEN_REACH;
+        float fill = powf(lvl, LISTEN_CURVE) * LISTEN_REACH;
         if (fill > 1.0f) {
             fill = 1.0f;
         }
