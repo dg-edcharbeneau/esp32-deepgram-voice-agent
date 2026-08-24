@@ -806,28 +806,41 @@ bool orb_init(float size)
  * parameter upstream does not have, which is exactly what the parity harness
  * exists to stop.
  *
- * Gain set from measured microphone level, which runs a mean near 0.067 and peaks
- * near 0.1 in ordinary speech -- far lower than the playback path even after the
- * 600% microphone gain ui.c applies. So a swell of ~1.34 at a normal talking
- * volume and ~1.5 at a peak.
+ * SQRT OF THE LEVEL, NOT THE LEVEL. Measured across LISTENING on real speech, amp
+ * spans 0.003 to 0.534 -- a 180x range -- and no linear map serves both ends of
+ * that. A gain set for the quiet end saturates at amp 0.14 and throws away every
+ * dynamic above moderate speech; one set for the loud end barely moves at
+ * conversational volume. The square root compresses the top and opens out the
+ * bottom, so the whole range is usable:
+ *
+ *   amp 0.010  near silence    rMul 1.19
+ *   amp 0.056  typical mean    rMul 1.45
+ *   amp 0.096  typical peak    rMul 1.59
+ *   amp 0.268  loud mean       rMul 1.98
+ *   amp 0.534  loud peak       rMul 2.39, just short of the ceiling
+ *
+ * The earlier linear gain was calibrated against a mean of 0.067 and a peak of
+ * 0.10, taken while LISTENING barely triggered -- so it was measured on the quiet
+ * moments of speech rather than on speech.
  *
  * CAPPED AT 1.6 FOR THE RASTERISER, not for taste. blit_dot's footprint buffer is
  * SPRITE_MAX 14 px square and it CLIPS a disc that does not fit rather than
  * overrunning. A dot's worst case here is (0.6 + 1.7) * rs * rMul, which at
  * rs 1.302 reaches a 14 px sprite around rMul 1.85. 1.6 leaves margin.
  */
-/* [0..~14]     amp -> swell. Above ~14 it saturates below a normal speaking
- *              level and the orb stops responding at all. */
-#define WAVE_RMUL_GAIN 10.0f
+/* [0..~1.9]    sqrt(amp) -> swell. 1.9 puts a loud peak just under the ceiling;
+ *              past that, loud speech saturates and stops registering. */
+#define WAVE_RMUL_GAIN 1.9f
 /* [1.0..2.6]   swell ceiling. A RASTERISER BOUND: blit_dot's footprint buffer is
  *              SPRITE_MAX px square and CLIPS a disc that does not fit. At
  *              SPRITE_MAX 20 a wave dot reaches the edge around rMul 2.6. */
 #define WAVE_RMUL_MAX 2.4f
-/* [0..1.0]     amp -> extra brightness, applied by orb_wave_ink() as a separate
- *              pass. LOCAL, not from the reference: buildWave has no ink hook, so
- *              this composes over the finished frame the way voice_pass does and
- *              the harness never sees it. */
-#define WAVE_INK_GAIN 1.2f
+/* [0..1.0]     sqrt(amp) -> extra brightness, applied by orb_wave_ink() as a
+ *              separate pass. LOCAL, not from the reference: buildWave has no ink
+ *              hook, so this composes over the finished frame the way voice_pass
+ *              does and the harness never sees it. 0.62 gives a 0.15 shift at a
+ *              conversational level, where the old linear 1.2 gave 0.07. */
+#define WAVE_INK_GAIN 0.62f
 
 void orb_build_wave(orb_frame_t *out, float t, float amp)
 {
@@ -837,7 +850,7 @@ void orb_build_wave(orb_frame_t *out, float t, float amp)
     else if (amp > 1.0f) amp = 1.0f;
     /* rMul is 1 at rest, which is the reference's default -- so silence is the
      * unmodified mode rather than a special case. */
-    float r_mul = 1.0f + WAVE_RMUL_GAIN * amp;
+    float r_mul = 1.0f + WAVE_RMUL_GAIN * sqrtf(amp);
     if (r_mul > WAVE_RMUL_MAX) {
         r_mul = WAVE_RMUL_MAX;
     }
@@ -1587,7 +1600,8 @@ void orb_wave_ink(orb_frame_t *out, float amp)
     if (amp > 1.0f) {
         amp = 1.0f;
     }
-    float d = WAVE_INK_GAIN * amp;
+    /* sqrt, matching the swell: the same 180x amp range, the same reason. */
+    float d = WAVE_INK_GAIN * sqrtf(amp);
     for (size_t i = 0; i < out->count; i++) {
         float w = out->dots[i].white - d;
         out->dots[i].white = (w < 0.0f) ? 0.0f : w;
