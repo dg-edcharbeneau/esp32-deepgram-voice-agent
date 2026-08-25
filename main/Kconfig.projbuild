@@ -124,11 +124,26 @@ menu "Deepgram Agent Device"
 
     config DEEPGRAM_AGENT_GREETING
         string "Agent greeting"
-        default "Hi! I am running on an ESP32. Say something and I will answer."
+        default "I'm here... just talk to me like a person."
         help
             Spoken by the agent as soon as the session starts. Because the greeting
             needs no microphone input, hearing audio frames arrive is the quickest
             proof that the whole pipeline is connected.
+
+            IT IS ALSO THE PERSONA'S COLD OPEN, and the only line in this build
+            the model does not write. main/prompt/ spends two thousand words on
+            not sounding like a product, so a greeting that announces the hardware
+            undoes the first impression before the first reply. Keep it in voice:
+            short, low-key, no pitch, no feature list.
+
+            Spoken-safe, like everything else the device says -- no markdown, no
+            brackets, and no dashes, which are read out. "..." is the pause.
+
+            SHORT IS NOT A STYLE CHOICE HERE. There is no barge-in on this board,
+            so every second of greeting is a second the listener cannot interrupt.
+
+            Sent only when there is no history to replay, so a session reopened by
+            a voice change does not greet again.
 
     config AUDIO_OUT_VOLUME
         int "Speaker volume (0-100)"
