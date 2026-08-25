@@ -26,6 +26,7 @@
  */
 
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
@@ -187,6 +188,38 @@ static void on_reload_required(void *ctx)
 static bool s_test_entry_pending;
 static int64_t s_test_entry_deadline_us;
 
+/*
+ * An interrupted turn's mute, and the deadline that guarantees it ends.
+ *
+ * 32-bit ms rather than the int64_t microseconds used elsewhere in this file,
+ * because three tasks touch it -- the LVGL task sets it, the WebSocket task
+ * clears it on AgentAudioDone, this loop clears it on the deadline -- and a
+ * 32-bit store is indivisible where a 64-bit one is two halves. Same reasoning
+ * as the split in audio_io.c. The clear/set race between them is benign: the
+ * worst outcome is a mute that lasts until the deadline.
+ *
+ * The deadline exists because AgentAudioDone is not guaranteed. A turn that
+ * never reports done would otherwise leave the device permanently silent with no
+ * symptom other than a device that has stopped talking.
+ */
+#define MUTE_MAX_MS 30000
+static volatile uint32_t s_mute_deadline_ms;
+
+static inline uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static void end_interrupt(const char *why)
+{
+    if (s_mute_deadline_ms == 0) {
+        return;
+    }
+    s_mute_deadline_ms = 0;
+    audio_io_mute_playback(false);
+    ESP_LOGI(TAG, "EVT interrupt-end (%s)", why);
+}
+
 /* How long to wait for the speaker to drain before starting anyway. Long enough
  * for a sentence the agent has already finished sending, short enough that a
  * playback path stuck busy cannot swallow the feature. */
@@ -226,6 +259,8 @@ static void on_display_test_required(void *ctx)
 static void on_agent_audio_done(void *ctx)
 {
     note_activity();
+    /* The turn is over, so whatever was being discarded has stopped arriving. */
+    end_interrupt("turn done");
     ESP_LOGI(TAG, "turn complete, %" PRIu32 " audio bytes received", s_audio_bytes);
 }
 
@@ -240,6 +275,30 @@ static void on_gesture(ui_gesture_t gesture)
     case UI_HOLD:
         ESP_LOGI(TAG, "EVT hold");
         session_ctl_request_restart();
+        break;
+
+    case UI_INTERRUPT:
+        /*
+         * Both halves, or neither works: the flush silences the ring, the mute
+         * stops Deepgram's remaining audio refilling it. Deliberately NOT routed
+         * through session_ctl -- request() drops anything arriving while busy or
+         * inside COOLDOWN_MS, which is exactly when someone interrupts, and both
+         * calls here are a single flag store so they are safe on the LVGL task.
+         *
+         * With the mic gate on, the reward is immediate: playback goes inactive,
+         * capture reopens within PLAYBACK_TAIL_MS, and the user can just talk.
+         */
+        if (audio_io_playback_active()) {
+            ESP_LOGI(TAG, "EVT interrupt");
+            audio_io_flush();
+            audio_io_mute_playback(true);
+            s_mute_deadline_ms = now_ms() + MUTE_MAX_MS;
+            note_activity();
+        } else {
+            /* Nothing to stop. Logged because a ring tap that appears to do
+             * nothing is otherwise indistinguishable from a dead touch panel. */
+            ESP_LOGI(TAG, "EVT interrupt (nothing playing)");
+        }
         break;
 
     case UI_TEST_DONE:
@@ -439,6 +498,12 @@ void app_main(void)
             } else {
                 wait_ms = TEST_ENTRY_POLL_MS;
             }
+        }
+
+        /* Unsigned compare, so it is correct across the 49-day wrap. */
+        if (s_mute_deadline_ms != 0 &&
+            (now_ms() - s_mute_deadline_ms) < (UINT32_MAX / 2)) {
+            end_interrupt("deadline");
         }
 
         uint32_t played, dropped, captured;

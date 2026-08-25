@@ -1387,14 +1387,22 @@ static void gesture_event_cb(lv_event_t *e)
         break;
 
     case LV_EVENT_SHORT_CLICKED:
-        if (!s_press_in_button) {
-            break;
-        }
         /* The one mode where a tap does not toggle the session. */
         if (s_test_active) {
-            test_advance();
-        } else if (s_gesture_handler) {
-            s_gesture_handler(UI_TAP);
+            if (s_press_in_button) {
+                test_advance();
+            }
+            break;
+        }
+        if (s_gesture_handler) {
+            /*
+             * Two targets on one screen, split by radius. The centre keeps the
+             * session toggle it has always had; the ring, dead until now, stops
+             * the agent mid-reply. Nothing here asks whether the agent is
+             * actually speaking -- that is main.c's call, and it keeps this file
+             * free of any notion of a turn.
+             */
+            s_gesture_handler(s_press_in_button ? UI_TAP : UI_INTERRUPT);
         }
         break;
 

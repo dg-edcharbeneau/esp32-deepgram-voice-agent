@@ -41,6 +41,17 @@ typedef enum {
      * session header, exactly as tap and hold do.
      */
     UI_TEST_DONE,
+
+    /*
+     * A tap on the ring OUTSIDE the centre button, which was previously dead.
+     * Kept off the centre deliberately: that toggles the session, and an
+     * accidental ring touch should cost one sentence where an accidental centre
+     * touch costs the whole conversation.
+     *
+     * Emitted whatever the device is doing; main.c decides whether there is
+     * anything to interrupt.
+     */
+    UI_INTERRUPT,
 } ui_gesture_t;
 
 /*
