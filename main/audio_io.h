@@ -68,6 +68,14 @@ void audio_io_set_playback_tap(audio_io_tap_t tap);
  * sent upstream, including nothing at all while capture is gated. */
 void audio_io_set_capture_tap(audio_io_tap_t tap);
 
+/*
+ * Last capture block's peak on each lane, for telemetry and for the linearity
+ * work. `dead` is the control: ES7210 MIC4 is AC-coupled to AGND on this board,
+ * so it reads the noise floor always. If it ever moves, the TDM slot order has
+ * shifted and the other two are not what they claim to be.
+ */
+void audio_io_lane_peaks(uint32_t *mic, uint32_t *ref, uint32_t *dead);
+
 /* Drop everything queued -- used for barge-in. */
 void audio_io_flush(void);
 

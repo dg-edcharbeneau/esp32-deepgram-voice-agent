@@ -237,6 +237,68 @@ menu "Deepgram Agent Device"
             combined meter would just look quiet instead of showing which
             channel is live.
 
+    config AEC_REF_GAIN_DB
+        int "Echo-reference lane gain (dB)"
+        default 12
+        range 0 37
+        help
+            Gain on ES7210 MIC3, the echo-reference lane. SEPARATE FROM
+            MIC_IN_GAIN, which is device-wide and would otherwise apply here too.
+
+            This is a level-scaling choice with two failure modes, and both were
+            measured on this board at CONFIG_AUDIO_OUT_VOLUME=100:
+
+              0 dB  -> reference peaks about 181 against microphones at 3260.
+                       That is -45 dBFS, roughly seven and a half bits of the
+                       ADC, and it throws away signal-to-noise a canceller needs.
+             24 dB  -> reference peaks 13541 against microphones at 11358, i.e.
+                       -7.7 dBFS. Well scaled, but only 7.7 dB of headroom before
+                       clipping -- and a clipped reference is a nonlinearity in
+                       the one signal that has to stay linear.
+
+            12 dB splits them: about -19 dBFS with ~19 dB of headroom. It is a
+            reasonable default and NOT a measured optimum. The linearity sweep
+            (see AEC-FINDINGS.md) is what should set it, which is why it is a
+            build option rather than a constant.
+
+            Applied AFTER esp_codec_dev_open(), because open() replays the
+            device-wide gain over every channel and silently undoes anything set
+            before it.
+
+    config AEC_DOUBLETALK_LOG
+        bool "Log double-talk measurements (Stage 3, Part C)"
+        default n
+        help
+            Measures what happens when a PERSON talks over the agent: how far
+            their voice lands above the echo at the microphone. That ratio is the
+            single best predictor of whether voice barge-in will feel usable, and
+            no amount of off-device analysis can produce it.
+
+            Calibrates on the first eight blocks of each turn, which are assumed
+            to be the agent alone -- so wait about half a second after it starts
+            speaking before you say anything.
+
+            SAFE WITH THE MIC GATE ON. The measurement sits above the gate, so
+            audio is measured but never sent to Deepgram: you can talk over the
+            device without starting the self-conversation.
+
+            A debug build only. Leave it off for anything shipping.
+
+    config AEC_SWEEP_VOLUME
+        int "Force speaker volume for the linearity sweep (0 = use saved)"
+        default 0
+        range 0 100
+        help
+            Stage 3 of the barge-in work needs the SAME greeting played at several
+            volumes, and the saved NVS volume normally wins over every build-time
+            value -- so without this a sweep would need an NVS erase between runs.
+
+            Non-zero forces the level for this build only and does not persist, so
+            the user's own volume survives the experiment.
+
+            Set 40, then 60, then 80, then 100, flashing between each, and read
+            the LIN lines. See AEC-FINDINGS.md, "The go/no-go".
+
     config MIC_GATE_WHILE_AGENT_SPEAKS
         bool "Drop microphone audio while the agent is speaking"
         default y

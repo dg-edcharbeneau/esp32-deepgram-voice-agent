@@ -7,6 +7,7 @@ idf_component_register(
         boot_button.c
         dg_agent.c
         audio_io.c
+        audio_codecs.c
         ui.c
         face_spectrum.c
         orb_geometry.c

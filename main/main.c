@@ -39,6 +39,7 @@
 #include "nvs_flash.h"
 
 #include "agent_name.h"
+#include "audio_codecs.h"
 #include "audio_io.h"
 #include "boot_button.h"
 #include "dg_agent.h"
@@ -222,7 +223,13 @@ static void end_interrupt(const char *why)
 
 /* How long to wait for the speaker to drain before starting anyway. Long enough
  * for a sentence the agent has already finished sending, short enough that a
- * playback path stuck busy cannot swallow the feature. */
+ * playback path stuck busy cannot swallow the feature.
+ *
+ * NOTE the ring holds 12.3 s, not the ~6 s four places in this tree used to
+ * claim, so this 8 s is NOT the "cannot possibly still be playing" bound it reads
+ * as. A reply longer than 8 s of audio still gets cut off mid-word -- the exact
+ * fault the comment above enter_display_test() says this deferral exists to
+ * prevent. Unmeasured: no logged reply has been long enough to trip it. */
 #define TEST_ENTRY_WAIT_US (8 * 1000000)
 
 static void enter_display_test(void)
@@ -244,7 +251,7 @@ static void on_display_test_required(void *ctx)
     /*
      * AgentAudioDone is NOT the speaker finishing. It means the agent has
      * finished SENDING, and between that and the last sample leaving the codec
-     * sits the playback ring -- 384 kB, about six seconds of mono. Entering here
+     * sits the playback ring -- 384 kB, 12.3 s of mono. Entering here
      * stops the session, which drops the queue, and the announcement is cut off
      * mid-word. Measured on the device, not theorised.
      *
@@ -508,6 +515,8 @@ void app_main(void)
 
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
+        uint32_t lane_mic, lane_ref, lane_dead;
+        audio_io_lane_peaks(&lane_mic, &lane_ref, &lane_dead);
 
         ui_telemetry_t t;
         ui_get_telemetry(&t);
@@ -586,6 +595,7 @@ void app_main(void)
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32
+                 " lane=%" PRIu32 "/%" PRIu32 "/%" PRIu32 " ovf=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
                  " ialloc=%u",
                  (double)esp_timer_get_time() / 1000000.0,
@@ -597,6 +607,7 @@ void app_main(void)
                  t.mid_avg, t.mid_max, t.high_avg, t.high_max,
                  t.peak_mic, t.peak_agent,
                  s_turns, captured, s_audio_bytes, played, dropped,
+                 lane_mic, lane_ref, lane_dead, audio_codecs_rx_overruns(),
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),

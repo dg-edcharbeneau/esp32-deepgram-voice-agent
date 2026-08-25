@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <math.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -12,13 +13,30 @@
 
 #include "bsp/esp-bsp.h"
 
+#include "audio_codecs.h"
 #include "audio_io.h"
 
 static const char *TAG = "audio_io";
 
 /* The codecs are opened with this many channels; see the header. */
 #define CODEC_CHANNELS 2
-#define CODEC_BITS     16
+/*
+ * 32, and it is not about audio quality.
+ *
+ * The ES7210 emits a 4x16-bit TDM frame -- 64 bits -- and the S3's I2S RX cannot
+ * be put in TDM mode independently, because RX and TX share BCLK/WS in full
+ * duplex and must be configured identically. Reading the same 64 bits as
+ * 2 channels x 32 bits gets the whole frame through standard I2S, one 32-bit
+ * word carrying two 16-bit lanes.
+ *
+ * es7210_set_fs() is written for exactly this: in TDM mode with channel <= 2 and
+ * channel_mask == 0 it halves the requested width, so asking for 32 programs
+ * 16-bit slots. Do NOT ask for 16 expecting 8-bit slots -- `bits >>= 1` gives 8,
+ * es7210_set_bits() has no case 8 and writes 16-bit anyway, so the ADC would
+ * clock out 64 bits against 32 from the S3 and the reference would never be
+ * shifted out at all.
+ */
+#define CODEC_BITS     32
 
 /*
  * Mono frames per capture read. 1280 at 16 kHz is 80 ms, the chunk size Flux
@@ -34,8 +52,8 @@ static const char *TAG = "audio_io";
 
 /*
  * Playback ring holds MONO bytes -- the stereo doubling happens in the drain
- * task, so the buffer covers twice the wall-clock it otherwise would. 192 kB of
- * mono at 16 kHz is ~6 s, which comfortably holds one agent turn. Deepgram
+ * task, so the buffer covers twice the wall-clock it otherwise would. 384 kB of
+ * mono at 16 kHz is 12.3 s, which comfortably holds one agent turn. Deepgram
  * delivers a turn faster than it plays, so this buffer is what absorbs the
  * difference; too shallow and long replies drop mid-sentence.
  */
@@ -96,6 +114,110 @@ static volatile bool s_play_muted;
  */
 static volatile bool s_play_gap;
 
+/* Last block's per-lane peaks, for the telemetry line. Written by the capture
+ * task, read by the main loop; 32-bit stores, so no tearing. */
+static volatile uint32_t s_mic_peak;
+static volatile uint32_t s_ref_peak;
+static volatile uint32_t s_dead_peak;
+
+/*
+ * LINEARITY ACCUMULATORS -- the Stage 3 measurement, and the go/no-go for
+ * cancellation on this board. See AEC-FINDINGS.md.
+ *
+ * Both available references (this lane, and the software playback tap) sit
+ * UPSTREAM of the NS4150B amplifier, so any distortion the amplifier or the
+ * speaker adds is in the microphone and absent from the reference. No linear
+ * filter removes that, and it sets a hard ceiling on achievable ERLE. Required
+ * is 17-30 dB. Nobody has ever measured what this hardware allows.
+ *
+ * Accumulated only while the speaker is live, so with nobody talking the
+ * microphone contains echo and little else:
+ *   sum_mm  = sum(mic^2)     over the two microphone lanes, averaged
+ *   sum_rr  = sum(ref^2)     over the reference lane
+ *   sum_mr  = sum(mic*ref)   for the memoryless least-squares fit
+ * int64 because 1280 frames x 32767^2 overflows 32 bits in a single block.
+ *
+ * Owned by the capture task; read and reset by it too, at the end of a turn.
+ */
+static int64_t s_lin_mm, s_lin_rr;
+static uint32_t s_lin_blocks, s_lin_clip_mic, s_lin_clip_ref;
+static bool s_lin_armed;
+
+/*
+ * THE LAG SEARCH, and the reason the first version of this measurement returned
+ * nothing.
+ *
+ * Correlating mic against ref at zero lag measures noise: the reference is tapped
+ * at the ES8311's output, and the microphone hears it only after the DAC's
+ * interpolation filter, the amplifier, the air, and the ADC's decimation filter.
+ * That is tens of samples. A memoryless fit at the wrong alignment reports
+ * ERLE ~ 0 dB however linear the path actually is -- which is exactly what it did
+ * (k swinging -0.12 to -1.04 across four runs).
+ *
+ * So correlate across a span of lags and take the best. 128 lags is 8 ms at
+ * 16 kHz, comfortably past any codec group delay on this board, and costs
+ * 1280 x 128 MACs per 80 ms block -- about 2 M MAC/s on a 240 MHz core.
+ *
+ * The result is still a MEMORYLESS bound: one scalar at one delay, no room
+ * impulse response. A real adaptive filter does better. That is the point -- a
+ * pessimistic floor that still rises as volume drops is evidence the ceiling is
+ * nonlinearity rather than acoustics.
+ */
+#define LIN_MAX_LAG 128
+/*
+ * A FIXED WINDOW, because otherwise the runs are not comparable. The first sweep
+ * accumulated 95, 36, 70 and 41 blocks at the four volumes -- different amounts
+ * of different speech -- and any ratio computed across those is measuring the
+ * content as much as the hardware. 30 blocks is 2.4 s, comfortably inside the
+ * greeting at every volume.
+ *
+ * NOTE this whole measurement is not free: the correlation is ~2 M MAC/s on the
+ * capture task, and it raised RX overruns from 4 to over 100 per run. Fine for a
+ * measurement build, NOT fine to ship. It is gated on CONFIG_AEC_SWEEP_VOLUME
+ * for that reason.
+ */
+#define LIN_MAX_BLOCKS 30
+
+/*
+ * PART C -- DOUBLE-TALK, the measurement that needs a person.
+ *
+ * A and B characterise the echo path with nobody talking. This one answers the
+ * question that actually predicts whether voice barge-in will feel usable: when
+ * someone speaks over the agent at normal distance and normal volume, how far
+ * above the echo does their voice land at the microphone?
+ *
+ * It cannot use a detector, because a working detector is the thing that does
+ * not exist. So it calibrates instead: the first DT_CAL_BLOCKS of a turn are
+ * assumed to be agent-only, which fixes the amplitude ratio k = mic_echo / ref.
+ * Every block after that is compared against k * ref, and the excess is the
+ * person.
+ *
+ *   pred   = k * ref_rms           what the echo alone should measure
+ *   excess = mic_rms / pred        how much the person added, in dB
+ *   speech = sqrt(mic^2 - pred^2)  their voice, separated by power subtraction
+ *   ser    = speech / pred         THE NUMBER -- signal-to-echo at the mic
+ *
+ * SAFE TO RUN WITH THE MIC GATE ON. This sits above the gate's continue, so the
+ * microphone is measured but never sent to Deepgram -- you can talk over the
+ * device all you like without starting the self-conversation.
+ *
+ * Cheap on purpose: one pass of squares per block, no correlation, so unlike the
+ * Stage 3 lag search it does not steal enough CPU to cause RX overruns.
+ */
+#define DT_CAL_BLOCKS 8
+static int64_t s_lin_corr[LIN_MAX_LAG];
+static int16_t s_lin_hist[LIN_MAX_LAG];  /* past reference samples, ring */
+static size_t s_lin_hist_pos;
+
+#if CONFIG_AEC_DOUBLETALK_LOG
+static int64_t s_dt_cal_mm, s_dt_cal_rr;
+static uint32_t s_dt_blocks;
+static double s_dt_k;
+static double s_dt_best_ser;
+static bool s_dt_have_ser;
+static bool s_dt_armed;
+#endif
+
 /* Milliseconds since boot, truncated. One 32-bit store, so no writer can tear it
  * and no reader can catch it half-updated. */
 static inline uint32_t now_ms(void)
@@ -155,7 +277,10 @@ static void playback_task(void *arg)
     /* Mono in, stereo out: the codec is open with two channels, so every
      * sample has to be written twice. */
     int16_t *mono = heap_caps_malloc(CHUNK_MONO, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    int16_t *stereo = heap_caps_malloc(CHUNK_MONO * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* Mono in, stereo out, and the codec is open at 32 bits, so each sample
+     * leaves as two 32-bit words. */
+    int32_t *stereo = heap_caps_malloc((CHUNK_MONO / sizeof(int16_t)) * 2 * sizeof(int32_t),
+                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (mono == NULL || stereo == NULL) {
         ESP_LOGE(TAG, "no internal RAM for playback buffers");
         vTaskDelete(NULL);
@@ -216,12 +341,18 @@ static void playback_task(void *arg)
             s_play_tap(mono, samples);
         }
 
+        /*
+         * Left-justified into the 32-bit slot: the ES8311 takes the top 16 bits,
+         * so << 16 is the identity transform on the audio and only the container
+         * changed. Shifting the other way would attenuate by 96 dB.
+         */
         for (size_t i = 0; i < samples; i++) {
-            stereo[2 * i] = mono[i];
-            stereo[2 * i + 1] = mono[i];
+            int32_t v = (int32_t)mono[i] << 16;
+            stereo[2 * i] = v;
+            stereo[2 * i + 1] = v;
         }
 
-        int err = esp_codec_dev_write(s_spk, stereo, (int)(samples * 2 * sizeof(int16_t)));
+        int err = esp_codec_dev_write(s_spk, stereo, (int)(samples * 2 * sizeof(int32_t)));
         if (err != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "esp_codec_dev_write failed: %d", err);
         }
@@ -231,9 +362,86 @@ static void playback_task(void *arg)
 
 /* ---------------- capture ---------------- */
 
+/*
+ * One line per agent turn, unattended. Reports what a MEMORYLESS fit can cancel,
+ * which is a pessimistic bound on ERLE -- it has no notion of the room's impulse
+ * response, so real echo delay inflates the residual. That is deliberate: a
+ * RISING trend as volume drops is evidence the ceiling is nonlinearity rather
+ * than acoustics, which is exactly the question.
+ *
+ *   erl   = 10*log10(sum_mm / sum_rr)      how much louder the mic is than the ref
+ *   erle  = 10*log10(sum_mm / residual)    what one scalar can remove
+ *   k                                       the best scalar itself
+ */
+#if CONFIG_AEC_DOUBLETALK_LOG
+static void dt_end(void)
+{
+    if (s_dt_armed && s_dt_blocks > DT_CAL_BLOCKS) {
+        if (s_dt_have_ser) {
+            ESP_LOGI(TAG, "DT turn done: blocks=%" PRIu32 " k=%.4f BEST ser=%+.1f dB",
+                     s_dt_blocks, s_dt_k, s_dt_best_ser);
+        } else {
+            /* Nothing rose above the echo. Either nobody spoke, or they did and
+             * the echo buried them -- which is itself the answer. */
+            ESP_LOGI(TAG, "DT turn done: blocks=%" PRIu32 " k=%.4f no speech above echo",
+                     s_dt_blocks, s_dt_k);
+        }
+    }
+    s_dt_cal_mm = s_dt_cal_rr = 0;
+    s_dt_blocks = 0;
+    s_dt_k = 0.0;
+    s_dt_best_ser = -999.0;
+    s_dt_have_ser = false;
+    s_dt_armed = false;
+}
+#endif
+
+static void lin_reset(void)
+{
+    s_lin_mm = s_lin_rr = 0;
+    s_lin_blocks = s_lin_clip_mic = s_lin_clip_ref = 0;
+    s_lin_armed = false;
+    for (size_t i = 0; i < LIN_MAX_LAG; i++) {
+        s_lin_corr[i] = 0;
+        s_lin_hist[i] = 0;
+    }
+    s_lin_hist_pos = 0;
+}
+
+static void lin_report(void)
+{
+    if (s_lin_blocks == 0 || s_lin_rr == 0 || s_lin_mm == 0) {
+        lin_reset();
+        return;
+    }
+    double mm = (double)s_lin_mm, rr = (double)s_lin_rr;
+
+    /* Best single delay, by correlation magnitude. */
+    size_t best = 0;
+    double best_c = 0.0;
+    for (size_t L = 0; L < LIN_MAX_LAG; L++) {
+        double c = (double)s_lin_corr[L];
+        if (c < 0) c = -c;
+        if (c > best_c) { best_c = c; best = L; }
+    }
+
+    double k = (double)s_lin_corr[best] / rr;
+    double resid = mm - k * k * rr;   /* == sum((mic - k*ref_delayed)^2) at the optimum */
+    if (resid < 1.0) {
+        resid = 1.0;
+    }
+    ESP_LOGI(TAG, "LIN vol=%d refgain=%d blocks=%" PRIu32
+             " erl=%.1f erle=%.1f lag=%u k=%.4f clip_mic=%" PRIu32 " clip_ref=%" PRIu32,
+             s_volume, CONFIG_AEC_REF_GAIN_DB, s_lin_blocks,
+             10.0 * log10(mm / rr), 10.0 * log10(mm / resid),
+             (unsigned)best, k, s_lin_clip_mic, s_lin_clip_ref);
+    lin_reset();
+}
+
 static void capture_task(void *arg)
 {
-    const size_t stereo_bytes = CAPTURE_FRAMES * CODEC_CHANNELS * sizeof(int16_t);
+    /* Four 16-bit TDM slots per frame -- 8 bytes -- read as two 32-bit I2S words. */
+    const size_t stereo_bytes = CAPTURE_FRAMES * AEC_LANES * sizeof(int16_t);
     const size_t mono_bytes = CAPTURE_FRAMES * sizeof(int16_t);
 
     int16_t *stereo = heap_caps_malloc(stereo_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -253,17 +461,115 @@ static void capture_task(void *arg)
             continue;
         }
 
-        int16_t peak_l = 0, peak_r = 0;
+        int16_t peak[AEC_LANES] = { 0 };
         for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
-            int16_t l = stereo[2 * i];
-            int16_t r = stereo[2 * i + 1];
-            /* Average, matching spec_analyzer_radial's downmix. */
-            mono[i] = (int16_t)(((int32_t)l + (int32_t)r) / 2);
+            const int16_t *f = &stereo[AEC_LANES * i];
+            for (int c = 0; c < AEC_LANES; c++) {
+                int16_t a = (f[c] < 0) ? (int16_t)-f[c] : f[c];
+                if (a > peak[c]) {
+                    peak[c] = a;
+                }
+            }
+            /*
+             * THE TWO MICROPHONE LANES, and only those. The probe in 9479446
+             * averaged lanes 0 and 1 because it did not yet know the order; lane
+             * 0 is the echo REFERENCE, so shipping that line would mix the
+             * speaker's own signal into what goes to Deepgram -- guaranteeing the
+             * self-conversation this whole exercise exists to stop.
+             */
+            mono[i] = (int16_t)(((int32_t)f[AEC_LANE_MIC_A] +
+                                 (int32_t)f[AEC_LANE_MIC_B]) / 2);
+        }
+#if CONFIG_AEC_SWEEP_VOLUME > 0
+        if (audio_io_playback_active() && s_lin_blocks < LIN_MAX_BLOCKS) {
+            for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
+                const int16_t *f = &stereo[AEC_LANES * i];
+                int32_t m = ((int32_t)f[AEC_LANE_MIC_A] + (int32_t)f[AEC_LANE_MIC_B]) / 2;
+                int16_t r = f[AEC_LANE_REF];
 
-            int16_t al = (l < 0) ? -l : l;
-            int16_t ar = (r < 0) ? -r : r;
-            if (al > peak_l) peak_l = al;
-            if (ar > peak_r) peak_r = ar;
+                /* Newest reference sample into the ring first, so lag 0 is the
+                 * sample captured in this very frame. */
+                s_lin_hist[s_lin_hist_pos] = r;
+
+                s_lin_mm += (int64_t)m * m;
+                s_lin_rr += (int64_t)r * r;
+                for (size_t L = 0; L < LIN_MAX_LAG; L++) {
+                    size_t idx = (s_lin_hist_pos + LIN_MAX_LAG - L) % LIN_MAX_LAG;
+                    s_lin_corr[L] += (int64_t)m * s_lin_hist[idx];
+                }
+                s_lin_hist_pos = (s_lin_hist_pos + 1) % LIN_MAX_LAG;
+
+                if (m >= 32000 || m <= -32000) s_lin_clip_mic++;
+                if (r >= 32000 || r <= -32000) s_lin_clip_ref++;
+            }
+            s_lin_blocks++;
+            s_lin_armed = true;
+            if (s_lin_blocks >= LIN_MAX_BLOCKS) {
+                lin_report();   /* fixed window reached; report and stand down */
+            }
+        } else if (s_lin_armed && !audio_io_playback_active()) {
+            /* Turn ended before the window filled -- report what there is, and
+             * the blocks= field says it is short. */
+            lin_report();
+        }
+#endif
+
+#if CONFIG_AEC_DOUBLETALK_LOG
+        if (audio_io_playback_active()) {
+            int64_t mm = 0, rr = 0;
+            for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
+                const int16_t *f = &stereo[AEC_LANES * i];
+                int32_t m = ((int32_t)f[AEC_LANE_MIC_A] + (int32_t)f[AEC_LANE_MIC_B]) / 2;
+                int32_t r = f[AEC_LANE_REF];
+                mm += (int64_t)m * m;
+                rr += (int64_t)r * r;
+            }
+            double mic_rms = sqrt((double)mm / CAPTURE_FRAMES);
+            double ref_rms = sqrt((double)rr / CAPTURE_FRAMES);
+            s_dt_armed = true;
+            s_dt_blocks++;
+
+            if (s_dt_blocks <= DT_CAL_BLOCKS) {
+                /* Assumed agent-only -- wait a beat before speaking. */
+                s_dt_cal_mm += mm;
+                s_dt_cal_rr += rr;
+                if (s_dt_blocks == DT_CAL_BLOCKS && s_dt_cal_rr > 0) {
+                    s_dt_k = sqrt((double)s_dt_cal_mm / (double)s_dt_cal_rr);
+                    ESP_LOGI(TAG, "DT calibrated: k=%.4f (mic_echo/ref) -- SPEAK NOW",
+                             s_dt_k);
+                }
+            } else if (s_dt_k > 0.0 && ref_rms > 1.0) {
+                double pred = s_dt_k * ref_rms;
+                double excess_db = 20.0 * log10((mic_rms > 1.0 ? mic_rms : 1.0) / pred);
+                double sp2 = mic_rms * mic_rms - pred * pred;
+                if (sp2 > 0.0) {
+                    double ser = 10.0 * log10(sp2 / (pred * pred));
+                    if (!s_dt_have_ser || ser > s_dt_best_ser) {
+                        s_dt_best_ser = ser;
+                        s_dt_have_ser = true;
+                    }
+                    ESP_LOGI(TAG, "DT blk=%" PRIu32 " mic=%.0f ref=%.0f pred=%.0f "
+                             "excess=%+.1f ser=%+.1f dB",
+                             s_dt_blocks, mic_rms, ref_rms, pred, excess_db, ser);
+                } else {
+                    ESP_LOGI(TAG, "DT blk=%" PRIu32 " mic=%.0f ref=%.0f pred=%.0f "
+                             "excess=%+.1f ser=-- (echo only)",
+                             s_dt_blocks, mic_rms, ref_rms, pred, excess_db);
+                }
+            }
+        } else if (s_dt_armed) {
+            dt_end();
+        }
+#endif
+
+        const int16_t peak_l = peak[AEC_LANE_MIC_A];
+        const int16_t peak_r = peak[AEC_LANE_MIC_B];
+        s_ref_peak = (uint32_t)peak[AEC_LANE_REF];
+        s_dead_peak = (uint32_t)peak[AEC_LANE_DEAD];
+        if (peak_l > peak_r) {
+            s_mic_peak = (uint32_t)peak_l;
+        } else {
+            s_mic_peak = (uint32_t)peak_r;
         }
 
 #if CONFIG_MIC_LEVEL_LOG
@@ -276,8 +582,12 @@ static void capture_task(void *arg)
         int64_t now = esp_timer_get_time();
         if (now >= next_level_log) {
             next_level_log = now + 3000000;
-            ESP_LOGI(TAG, "mic peak L=%d R=%d%s", peak_l, peak_r,
-                     audio_io_playback_active() ? " (gated: agent speaking)" : "");
+            /* All four lanes. The dead one is the control: if it ever moves,
+             * the slot order has shifted and every other reading here is
+             * meaningless. */
+            ESP_LOGI(TAG, "mic peak L=%d R=%d ref=%d dead=%d%s",
+                     peak_l, peak_r, peak[AEC_LANE_REF], peak[AEC_LANE_DEAD],
+                     audio_io_playback_active() ? " (capture gated)" : "");
         }
 #endif
 
@@ -301,6 +611,10 @@ static void capture_task(void *arg)
          * against the ~78 kB free once the display is up, so enabling it stopped
          * the session completing a TLS handshake at all (a4fa137). Reaching
          * barge-in needs a much smaller algorithm, not this gate removed.
+         *
+         * That algorithm now has a name and a price. The 70 kB was the AFE, not
+         * the canceller; esp-sr's standalone AEC is published at 8.2-26.9 kB of
+         * internal RAM. Unmeasured here -- see AEC-FINDINGS.md before trying it.
          */
         if (audio_io_playback_active()) {
             continue;
@@ -450,15 +764,16 @@ esp_err_t audio_io_init(int sample_rate)
      * esp_codec_dev_open() below sets the clock, overriding the BSP's 22050 Hz
      * default. This is the order spec_analyzer_radial's bsp_extra uses.
      */
-    s_spk = bsp_audio_codec_speaker_init();
-    if (s_spk == NULL) {
-        ESP_LOGE(TAG, "speaker (ES8311) init failed");
-        return ESP_FAIL;
-    }
-
-    s_mic = bsp_audio_codec_microphone_init();
-    if (s_mic == NULL) {
-        ESP_LOGE(TAG, "microphone (ES7210) init failed");
+    /*
+     * Built here rather than by the BSP, because the BSP hardcodes
+     * mic_selected to 0 and the driver then falls back to MIC1|MIC2 -- so MIC3,
+     * the echo reference, is never powered and never clocked out. See
+     * audio_codecs.h. This path does the same bsp_i2c_init() first, so the
+     * init-order trap the comment above describes is still avoided.
+     */
+    esp_err_t codec_err = audio_codecs_init_tdm(&s_spk, &s_mic);
+    if (codec_err != ESP_OK) {
+        ESP_LOGE(TAG, "TDM codec init failed: %s", esp_err_to_name(codec_err));
         return ESP_FAIL;
     }
 
@@ -508,6 +823,13 @@ esp_err_t audio_io_init(int sample_rate)
     /* Resolved here rather than in a separate init step, because the codec has
      * to exist before a level can be applied at all. */
     s_volume = volume_load();
+#if CONFIG_AEC_SWEEP_VOLUME > 0
+    /* The saved volume normally wins over Kconfig, which makes a volume sweep
+     * impossible without erasing NVS. This forces it for the run and does NOT
+     * persist -- the saved value is untouched. */
+    s_volume = CONFIG_AEC_SWEEP_VOLUME;
+    ESP_LOGW(TAG, "AEC sweep: volume forced to %d (saved value not changed)", s_volume);
+#endif
     esp_codec_dev_set_out_vol(s_spk, s_volume);
     esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
 
@@ -520,6 +842,34 @@ esp_err_t audio_io_init(int sample_rate)
     if (err != ESP_CODEC_DEV_OK) {
         ESP_LOGE(TAG, "microphone open failed: %d", err);
         return ESP_FAIL;
+    }
+
+    /*
+     * AFTER THE OPEN, AND THAT IS THE WHOLE POINT.
+     *
+     * esp_codec_dev_set_in_gain() above is device-wide: es7210_set_gain() fans
+     * out to _es7210_set_channel_gain(codec, 0xF, db), all four inputs, so the
+     * echo reference gets CONFIG_MIC_IN_GAIN too. It is a line-level tap of the
+     * ES8311's own output and wants no gain at all -- at 24 dB it has under 8 dB
+     * of headroom left, and a clipped reference is a nonlinearity in the one
+     * signal a canceller needs clean. But 0 dB is the opposite mistake -- 181
+     * peak, -45 dBFS -- so the value is CONFIG_AEC_REF_GAIN_DB and the linearity
+     * sweep is what should set it.
+     *
+     * Setting it BEFORE the open silently does nothing. esp_codec_dev_open()
+     * ends in _update_codec_setting(), which replays the stored device-wide
+     * mic_gain over every channel -- so the per-channel value is overwritten
+     * before a single frame is read, and both calls still return OK because
+     * es7210's vtable never assigns .is_open so nothing rejects them. Measured:
+     * the reference lane read 13,541 peak when it should read about 850.
+     *
+     * The mask indexes the ES7210's INPUTS, where the reference is MIC3 (bit 2).
+     * That is NOT its position in the captured frame, which is lane 0.
+     */
+    int ref_gain_err = esp_codec_dev_set_in_channel_gain(s_mic, AEC_REF_INPUT_MASK,
+                                                        (float)CONFIG_AEC_REF_GAIN_DB);
+    if (ref_gain_err != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "could not set reference lane gain: %d", ref_gain_err);
     }
     /* Both stay open for the session; reopening per turn clicks. */
 
@@ -737,6 +1087,13 @@ bool audio_io_playback_active(void)
     uint32_t since_queue = now - s_play_queue_ms;
     uint32_t since = (since_write < since_queue) ? since_write : since_queue;
     return since < PLAYBACK_TAIL_MS;
+}
+
+void audio_io_lane_peaks(uint32_t *mic, uint32_t *ref, uint32_t *dead)
+{
+    if (mic)  *mic = s_mic_peak;
+    if (ref)  *ref = s_ref_peak;
+    if (dead) *dead = s_dead_peak;
 }
 
 void audio_io_stats(uint32_t *played, uint32_t *dropped, uint32_t *captured)
