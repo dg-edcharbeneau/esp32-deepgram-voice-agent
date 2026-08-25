@@ -108,6 +108,25 @@ menu "Deepgram Agent Device"
             header, not the body), but it is the fastest way to check that what
             you think you are sending is what actually goes on the wire.
 
+    config AGENT_NAME
+        string "Agent name"
+        default "Grammer"
+        help
+            What the agent is called. Reaches the model as {{name}} in
+            main/prompt/identity.md, not as a function schema -- it is one
+            string, not a catalog.
+
+            THE FACTORY DEFAULT, with the same precedence rule as the voice: it
+            is used on first boot and after an NVS erase, and once the user has
+            asked to be calling it something else the saved name wins on every
+            later boot. The agent's reset_name function is what brings this value
+            back.
+
+            Kept short on purpose. It is spoken aloud, and a name arrives from
+            whatever a stranger said out loud, so main/agent_name.h caps it at
+            31 characters -- long enough for a name, too short to be a paragraph
+            of smuggled instructions.
+
     config DEEPGRAM_AGENT_PROMPT
         string "Agent system prompt (override)"
         default ""

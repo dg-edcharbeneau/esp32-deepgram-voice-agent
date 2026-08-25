@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 
+#include "agent_name.h"
 #include "faces.h"
 #include "orb_colors.h"
 #include "voices.h"
@@ -81,6 +82,11 @@ static const block_t s_blocks[] = {
  * write into `out`, never past `cap`, always NUL-terminated. */
 typedef void (*expand_fn)(char *out, size_t cap);
 
+static void expand_name(char *out, size_t cap)
+{
+    snprintf(out, cap, "%s", agent_name_get());
+}
+
 static void expand_voice(char *out, size_t cap)
 {
     /* voices_find() is tolerant of the model id, so this turns "flux-hannah-en"
@@ -111,6 +117,7 @@ static const struct {
     const char *key;
     expand_fn   fn;
 } s_vars[] = {
+    { "name",         expand_name },
     { "voice",        expand_voice },
     { "listen_model", expand_listen_model },
     { "speak_model",  expand_speak_model },

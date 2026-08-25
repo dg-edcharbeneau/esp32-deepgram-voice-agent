@@ -34,6 +34,7 @@ flowchart TB
 
     subgraph persona["Persona"]
         prompt["agent_prompt.c<br/><i>assembles main/prompt into one system prompt</i>"]
+        aname["agent_name.c<br/><i>what it is called + NVS</i>"]
     end
 
     subgraph cat["Catalogs (LVGL-free, so the WebSocket side can read them)"]
@@ -56,8 +57,8 @@ flowchart TB
 
     main --> session & aio & ui & boot & sta & creds & prov & voices
     session --> agent
-    agent --> voices & faces & colors & ui & aio & prompt
-    prompt --> voices & faces & colors
+    agent --> voices & faces & colors & ui & aio & prompt & aname
+    prompt --> voices & faces & colors & aname
     agent -. "on_reload_required" .-> session
     boot -. "toggle / erase+reboot" .-> session
     ui -. "tap / hold" .-> session
@@ -211,6 +212,8 @@ one, Deepgram would call a web service instead of asking the device:
 | `set_face` | `ui_set_face()` — the frame timer picks it up | always |
 | `set_color` | `ui_set_orb_color()` — same handoff; orb only | always |
 | `start_display_test` | Deferred to `AgentAudioDone`, then stops the session and hands the screen to `ui_start_display_test()` | always |
+| `set_name` | Saves to NVS; the model is told, and `{{name}}` carries it from the next `Settings` | always |
+| `reset_name` | Back to `CONFIG_AGENT_NAME`, same handoff | always |
 | `set_voice` | Saves to NVS, then reopens the session | Flux stack |
 | `reset_voice` | Back to `CONFIG_DEEPGRAM_FLUX_VOICE`, then reopens | Flux stack |
 
@@ -238,8 +241,9 @@ it copies and frees. Three properties are worth keeping:
   `send_settings()` already sits at 2,944 B of the WebSocket task's 6,144 — see
   `.claude/skills/esp-stack-budget/`.
 
-`{{placeholders}}` are expanded as blocks are copied: `{{voice}}`,
-`{{listen_model}}`, `{{speak_model}}`, and the three catalogs. An unknown one is
+`{{placeholders}}` are expanded as blocks are copied: `{{name}}`, `{{voice}}`,
+`{{listen_model}}`, `{{speak_model}}`, and the three catalogs. `{{name}}` is why
+renaming the agent needs no session reload — see the README section on it. An unknown one is
 copied through verbatim and logged, so a typo shows up rather than vanishing.
 
 A reopened session — every voice change is one — appends a note saying the

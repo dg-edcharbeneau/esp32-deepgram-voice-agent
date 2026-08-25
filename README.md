@@ -368,6 +368,36 @@ If a touch or UI volume control is ever added, funnel both callers through
 `audio_io_adjust_volume()` and put a mutex there — outside `esp_codec_dev`, so it
 cannot invert against the WebSocket client's own recursive lock.
 
+## Changing its name by asking
+
+The agent is called **Grammer** out of the box. "Call yourself Blake" changes
+that, and it survives a reboot; "go back to your old name" undoes it.
+
+Precedence is the voice's rule exactly: `CONFIG_AGENT_NAME` is a factory default
+used on first boot and after an NVS erase, and once someone has renamed it the
+saved name wins on every later boot. `reset_name` is what brings the Kconfig
+value back.
+
+Mechanically it is a third pattern, and the reason is worth keeping. `set_voice`
+reloads the session because the voice is a `Settings` field this account will not
+change in place. `set_face` does not, because Deepgram has never heard of the
+display. The name is neither: it is **text inside the system prompt**, reaching
+the model as `{{name}}` in [main/prompt/identity.md](main/prompt/identity.md). So
+the function response is enough for the session in progress, and `{{name}}`
+carries it from the next `Settings` onward — no reload, no history replay, and
+the two agree again the moment anything reconnects.
+
+There is no catalog, because any name is valid. That puts the whole burden on the
+function description, which is written against what actually goes wrong: the name
+arrives through speech-to-text, so the model is repeating something it *heard*,
+and left alone it hands over the entire sentence it heard it in.
+
+[main/agent_name.c](main/agent_name.c) trims and validates before storing.
+Control characters are refused outright — a newline in a "name" would forge a
+heading in the assembled prompt — and the 31-character cap is doing two jobs: a
+name is spoken aloud, and this is a string a stranger says out loud that ends up
+in the system prompt.
+
 ## Changing the face by asking
 
 "Show me the bars instead" works, and so does "go back to the orb". `set_face`
@@ -704,6 +734,7 @@ same monitor command works for both projects.
 | [main/wifi_prov.c](main/wifi_prov.c) | setup portal: SoftAP, the page, captive-portal DNS |
 | [main/boot_button.c](main/boot_button.c) | BOOT/GPIO 0: click toggles, 3 s hold forgets the network |
 | [main/dg_agent.c](main/dg_agent.c) | Agent API client: `Settings`, event decoding, KeepAlive |
+| [main/agent_name.c](main/agent_name.c) | what the agent is called: NVS, validation, and the factory default |
 | [main/agent_prompt.c](main/agent_prompt.c) | assembles the persona in PSRAM: block order, build gating, `{{placeholders}}` |
 | [main/prompt/](main/prompt/) | the persona itself, one `.md` per named block — edit these, not a Kconfig string |
 | [main/audio_io.c](main/audio_io.c) | both codecs: ES7210 capture, ES8311 playback, mono↔stereo, gating |
@@ -717,7 +748,7 @@ same monitor command works for both projects.
 | [main/orb_colors.c](main/orb_colors.c) | the orb colour catalog, same split, for the `set_color` schema |
 | [host/](host/) | off-device harnesses: geometry parity against the upstream TypeScript, and `prompt.sh` to print the assembled prompt |
 | [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
-| [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / greeting / audio / prompt override, and the Wi-Fi seed |
+| [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / name / greeting / audio / prompt override, and the Wi-Fi seed |
 | [WIFI-SETUP.md](WIFI-SETUP.md) | every way to get credentials onto the device, and why it will not connect |
 | [sdkconfig.defaults](sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
 | [components/tcp_transport/](components/tcp_transport/) | one-line override of IDF's WS handshake — see below |

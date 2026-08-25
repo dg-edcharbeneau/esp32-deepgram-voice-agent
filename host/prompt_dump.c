@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "agent_name.h"
 #include "agent_prompt.h"
 #include "faces.h"
 #include "orb_colors.h"
@@ -22,6 +23,8 @@
 /* Stand-ins for the device's saved state. The names are what matter -- the
  * assembler only ever copies them. */
 static const voice_t s_voice = { "hannah", "flux-hannah-en", "American woman, clear and confident", 1 };
+
+const char *agent_name_get(void) { return "Grammer"; }
 
 const voice_t *voices_find(const char *name) { (void)name; return &s_voice; }
 const char *voices_current_model(void) { return s_voice.model; }
