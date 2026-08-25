@@ -940,9 +940,9 @@ surviving sample is still correctly phased.
 
 **Playback never blocks the socket.** `on_audio()` runs on the WebSocket task,
 where a stall stops the whole session, so `audio_io_play()` drops PCM into a
-192 kB PSRAM stream buffer with a zero timeout and returns; a task on core 1
+384 kB PSRAM stream buffer with a zero timeout and returns; a task on core 1
 drains it, doubles it to stereo, and writes to the codec. The buffer holds mono,
-so it covers ~6 s — Deepgram sends a turn faster than it plays, and the buffer
+so it covers 12.3 s — Deepgram sends a turn faster than it plays, and the buffer
 absorbs the difference. Drops are counted rather than ignored, because the
 symptom is a gap you can hear.
 
@@ -1026,11 +1026,31 @@ does not fit next to a 466x466 display and a TLS socket. So the gate stays on,
 and the AEC scaffolding was removed rather than left in the tree implying a
 capability the device does not have.
 
-If barge-in is revisited, the cheap route is a **double-talk detector** rather
-than full cancellation: learn the room's coupling ratio while only the agent
-speaks, then flag any mic level above that ratio as a second voice. It needs no
-adaptive filter and no 70 kB — only the reference lane, which is what `9479446`
-recovers.
+It was long assumed here that if barge-in were revisited, the cheap route would be
+a **double-talk detector** rather than full cancellation: learn the room's
+coupling ratio while only the agent speaks, then flag any mic level above that
+ratio as a second voice, needing no adaptive filter and no 70 kB.
+
+**That is now disproven, with numbers.** Measured on 2026-08-25 with the gate off,
+the signal-to-echo ratio at the microphone is **-11 dB** — the person is four times
+quieter than the device's own voice. Because the microphone sums power, a talker
+at the echo's own level raises the mic by 3.0 dB and a typical talker by **0.33 dB**,
+which no threshold can separate from noise. The reference lane does not rescue it:
+`9479446`'s own numbers put the lane *quieter* than the microphones, an echo return
+loss of about -2.4 dB.
+
+Cancellation is the only acoustic route, it needs 17-30 dB of ERLE, and whether
+this hardware can deliver that is unmeasured. See
+[AEC-FINDINGS.md](AEC-FINDINGS.md) for the arithmetic, the price list and the one
+measurement that decides it.
+
+**Update, 2026-08-25: the 70 kB was the AFE, not the canceller.** esp-sr also
+ships a standalone AEC — `aec_create_from_config()` / `aec_process()`, no ring
+buffers and no model stages — published at **8.2–26.9 kB of internal RAM**
+depending on mode, against 66,219 B free with a live session. That is a different
+answer to the question `a4fa137` asked. Nothing has been measured on the device;
+the price list, the budget, the two remaining candidates and the open risks are
+in [AEC-FINDINGS.md](AEC-FINDINGS.md).
 
 ### The BSP init-order trap
 

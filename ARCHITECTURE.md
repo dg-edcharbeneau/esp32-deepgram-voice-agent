@@ -91,7 +91,7 @@ flowchart LR
     ws ==>|"binary frames"| dg{{"Deepgram Agent API<br/>wss://agent.deepgram.com<br/>/v1/agent/converse"}}
 
     dg ==>|"binary TTS"| oncb["on_audio()<br/><i>WebSocket task</i>"]
-    oncb --> ring["playback ring<br/>384 kB PSRAM ≈ 6 s mono"]
+    oncb --> ring["playback ring<br/>384 kB PSRAM = 12.3 s mono"]
     ring --> play["playback task<br/>prio 6, core 1<br/><i>mono duplicated to L+R</i>"]
     play -->|"I2S, blocking write"| spk(["ES8311 speaker"])
 
