@@ -704,6 +704,8 @@ same monitor command works for both projects.
 | [main/wifi_prov.c](main/wifi_prov.c) | setup portal: SoftAP, the page, captive-portal DNS |
 | [main/boot_button.c](main/boot_button.c) | BOOT/GPIO 0: click toggles, 3 s hold forgets the network |
 | [main/dg_agent.c](main/dg_agent.c) | Agent API client: `Settings`, event decoding, KeepAlive |
+| [main/agent_prompt.c](main/agent_prompt.c) | assembles the persona in PSRAM: block order, build gating, `{{placeholders}}` |
+| [main/prompt/](main/prompt/) | the persona itself, one `.md` per named block — edit these, not a Kconfig string |
 | [main/audio_io.c](main/audio_io.c) | both codecs: ES7210 capture, ES8311 playback, mono↔stereo, gating |
 | [main/ui.c](main/ui.c) | panel and touch bring-up, status label, QR overlay, frame timer, audio levels, face dispatch |
 | [main/ui_face.h](main/ui_face.h) | the face vtable and per-frame render context |
@@ -713,9 +715,9 @@ same monitor command works for both projects.
 | [main/face_spectrum.c](main/face_spectrum.c) | spectrum face: FFT, sample handoff, ring render. Initialises lazily |
 | [main/faces.c](main/faces.c) | the face catalog, LVGL-free so `dg_agent` can build the `set_face` schema |
 | [main/orb_colors.c](main/orb_colors.c) | the orb colour catalog, same split, for the `set_color` schema |
-| [host/](host/) | geometry parity harness — runs the upstream TypeScript and diffs the C dot-for-dot |
+| [host/](host/) | off-device harnesses: geometry parity against the upstream TypeScript, and `prompt.sh` to print the assembled prompt |
 | [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
-| [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / prompt / greeting / audio, and the Wi-Fi seed |
+| [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / greeting / audio / prompt override, and the Wi-Fi seed |
 | [WIFI-SETUP.md](WIFI-SETUP.md) | every way to get credentials onto the device, and why it will not connect |
 | [sdkconfig.defaults](sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
 | [components/tcp_transport/](components/tcp_transport/) | one-line override of IDF's WS handshake — see below |

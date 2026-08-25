@@ -109,8 +109,18 @@ menu "Deepgram Agent Device"
             you think you are sending is what actually goes on the wire.
 
     config DEEPGRAM_AGENT_PROMPT
-        string "Agent system prompt"
-        default "You are a friendly assistant living inside a small ESP32 device. Keep every answer to one or two short sentences."
+        string "Agent system prompt (override)"
+        default ""
+        help
+            AN OVERRIDE, AND NORMALLY EMPTY. The real prompt is main/prompt/*.md,
+            embedded into the firmware and assembled at session start -- see
+            main/agent_prompt.h for the layout and why it lives in files.
+
+            Anything typed here REPLACES all of it. Kconfig strings are one line
+            with no newlines, so this is for a quick bench experiment ("You only
+            speak in questions") and nothing longer. It logs a warning when set,
+            because a forgotten override looks exactly like a prompt that has no
+            effect.
 
     config DEEPGRAM_AGENT_GREETING
         string "Agent greeting"

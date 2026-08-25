@@ -32,6 +32,10 @@ flowchart TB
         prov["wifi_prov.c<br/><i>SoftAP captive portal</i>"]
     end
 
+    subgraph persona["Persona"]
+        prompt["agent_prompt.c<br/><i>assembles main/prompt into one system prompt</i>"]
+    end
+
     subgraph cat["Catalogs (LVGL-free, so the WebSocket side can read them)"]
         voices["voices.c<br/><i>Flux TTS voices + NVS</i>"]
         faces["faces.c<br/><i>face names for the schema</i>"]
@@ -52,7 +56,8 @@ flowchart TB
 
     main --> session & aio & ui & boot & sta & creds & prov & voices
     session --> agent
-    agent --> voices & faces & colors & ui & aio
+    agent --> voices & faces & colors & ui & aio & prompt
+    prompt --> voices & faces & colors
     agent -. "on_reload_required" .-> session
     boot -. "toggle / erase+reboot" .-> session
     ui -. "tap / hold" .-> session
@@ -209,6 +214,42 @@ one, Deepgram would call a web service instead of asking the device:
 | `set_voice` | Saves to NVS, then reopens the session | Flux stack |
 | `reset_voice` | Back to `CONFIG_DEEPGRAM_FLUX_VOICE`, then reopens | Flux stack |
 
+## The system prompt
+
+The persona is **text files, not a Kconfig string**. `main/prompt/` holds one
+`.md` per named block; `EMBED_TXTFILES` in `main/CMakeLists.txt` puts them in
+flash rodata, so they cost no RAM until a session starts and editing one
+triggers a rebuild.
+
+`agent_prompt_build()` joins them in PSRAM and hands `send_settings()` a string
+it copies and frees. Three properties are worth keeping:
+
+- **The order is the table in `agent_prompt.c`, not the filenames.** CMake
+  mangles a name starting with a digit into an extra leading underscore, so
+  `10-formatting.md` would be a trap; the C table is the single place the shape
+  of the prompt is stated.
+- **Two blocks are build-gated**, for the same reason `send_settings()` gates its
+  Flux fields: a prompt describing a build you did not make is worse than a
+  shorter one, because the model asserts it confidently. `substance-flux.md`
+  needs the Flux stack, and `half-duplex.md` / `barge-in.md` follow
+  `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS`.
+- **The frame does not grow with the prompt.** `agent_prompt_build()` measures
+  80 bytes of stack against an 11 kB result, which matters because
+  `send_settings()` already sits at 2,944 B of the WebSocket task's 6,144 — see
+  `.claude/skills/esp-stack-budget/`.
+
+`{{placeholders}}` are expanded as blocks are copied: `{{voice}}`,
+`{{listen_model}}`, `{{speak_model}}`, and the three catalogs. An unknown one is
+copied through verbatim and logged, so a typo shows up rather than vanishing.
+
+A reopened session — every voice change is one — appends a note saying the
+replayed history is the same conversation, which is what stops the model
+starting over.
+
+`CONFIG_DEEPGRAM_AGENT_PROMPT` still exists as a one-line override for bench
+experiments. It is empty by default and logs a warning when set, because a
+forgotten override looks exactly like a prompt with no effect.
+
 ## Boot and provisioning
 
 Credentials live in NVS and **NVS wins**: `CONFIG_WIFI_SSID` is a first-boot seed
@@ -318,6 +359,11 @@ compiles on the host. `host/run.sh` diffs it against the upstream TypeScript it
 was transcribed from — fourteen frames, dot by dot across all six output fields,
 0.02 px tolerance — which catches a transcription error there instead of by
 squinting at a 466 px panel.
+
+`host/prompt.sh` does the same trick for the persona: it compiles the real
+`main/agent_prompt.c` against stub ESP-IDF headers and prints the assembled
+prompt, so reviewing a wording change costs a second instead of a flash.
+`--resumed`, `--nova` and `--barge-in` dump the gated variants.
 
 ```mermaid
 flowchart LR

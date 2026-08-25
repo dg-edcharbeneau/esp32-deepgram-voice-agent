@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 
+#include "agent_prompt.h"
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "faces.h"
@@ -483,7 +484,32 @@ static esp_err_t send_settings(void)
     cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
     cJSON_AddStringToObject(think_provider, "type", "open_ai");
     cJSON_AddStringToObject(think_provider, "model", "gpt-4o-mini");
-    cJSON_AddStringToObject(think, "prompt", CONFIG_DEEPGRAM_AGENT_PROMPT);
+
+    /*
+     * The persona, assembled from the blocks in main/prompt. Built in PSRAM and freed
+     * immediately -- cJSON copies the string, and this function's frame must not
+     * grow with the prompt (see the stack note further down and agent_prompt.h).
+     *
+     * A resumed session gets told so: history_to_json() below replays the last
+     * few turns, and without this the model reads them as a conversation it is
+     * joining rather than one it has been having.
+     */
+    agent_prompt_ctx_t pctx = {
+        .notes = (s_history_count > 0)
+                     ? "You have already been talking with this person for a "
+                       "few turns. What follows is that same conversation, not "
+                       "a new one, so pick it up where it left off and do not "
+                       "start over or greet them again."
+                     : NULL,
+    };
+    char *prompt = agent_prompt_build(&pctx);
+    if (prompt != NULL) {
+        cJSON_AddStringToObject(think, "prompt", prompt);
+        free(prompt);
+    } else {
+        /* A session with a default persona is worth far more than no session. */
+        ESP_LOGE(TAG, "no system prompt; continuing without one");
+    }
 
     /*
      * Client-side functions, which is signalled by the *absence* of an
