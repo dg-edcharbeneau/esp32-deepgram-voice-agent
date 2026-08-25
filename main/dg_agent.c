@@ -11,6 +11,8 @@
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 
+#include "agent_name.h"
+#include "agent_prompt.h"
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "faces.h"
@@ -252,6 +254,52 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+        if (strcmp(name->valuestring, "set_name") == 0) {
+            const char *wanted = NULL;
+            cJSON *nargs = function_args(fn);
+            if (nargs != NULL) {
+                const cJSON *n = cJSON_GetObjectItemCaseSensitive(nargs, "name");
+                if (cJSON_IsString(n)) {
+                    wanted = n->valuestring;
+                }
+            }
+
+            /*
+             * NO RELOAD, unlike set_voice. The voice is a Settings field and
+             * this account ignores UpdateSpeak, so changing it costs a new
+             * session; the name is only ever text inside the prompt, and telling
+             * the model here is enough for this session. {{name}} carries it
+             * from the next Settings onwards, so the two agree again as soon as
+             * anything reconnects.
+             */
+            esp_err_t nerr = agent_name_set(wanted);
+            if (nerr != ESP_OK) {
+                /* Say so rather than staying silent, exactly as an unknown voice
+                 * does: nothing is applied and nothing is saved. */
+                send_function_response(id->valuestring, name->valuestring,
+                                       "That name will not work on this device. Ask them "
+                                       "for a shorter one, just the name on its own.");
+            } else {
+                ESP_LOGI(TAG, "EVT setname -> \"%s\"", agent_name_get());
+                snprintf(content, sizeof(content),
+                         "Your name is now %s. Answer to it from here on, and say "
+                         "it back once.", agent_name_get());
+                send_function_response(id->valuestring, name->valuestring, content);
+            }
+            cJSON_Delete(nargs);
+            continue;
+        }
+
+        if (strcmp(name->valuestring, "reset_name") == 0) {
+            agent_name_reset();
+            ESP_LOGI(TAG, "EVT setname -> \"%s\" (default)", agent_name_get());
+            snprintf(content, sizeof(content),
+                     "You are called %s again. Answer to it from here on.",
+                     agent_name_get());
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
         if (strcmp(name->valuestring, "adjust_volume") == 0) {
             int delta = 0;
             cJSON *vargs = function_args(fn);
@@ -483,7 +531,32 @@ static esp_err_t send_settings(void)
     cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
     cJSON_AddStringToObject(think_provider, "type", "open_ai");
     cJSON_AddStringToObject(think_provider, "model", "gpt-4o-mini");
-    cJSON_AddStringToObject(think, "prompt", CONFIG_DEEPGRAM_AGENT_PROMPT);
+
+    /*
+     * The persona, assembled from the blocks in main/prompt. Built in PSRAM and freed
+     * immediately -- cJSON copies the string, and this function's frame must not
+     * grow with the prompt (see the stack note further down and agent_prompt.h).
+     *
+     * A resumed session gets told so: history_to_json() below replays the last
+     * few turns, and without this the model reads them as a conversation it is
+     * joining rather than one it has been having.
+     */
+    agent_prompt_ctx_t pctx = {
+        .notes = (s_history_count > 0)
+                     ? "You have already been talking with this person for a "
+                       "few turns. What follows is that same conversation, not "
+                       "a new one, so pick it up where it left off and do not "
+                       "start over or greet them again."
+                     : NULL,
+    };
+    char *prompt = agent_prompt_build(&pctx);
+    if (prompt != NULL) {
+        cJSON_AddStringToObject(think, "prompt", prompt);
+        free(prompt);
+    } else {
+        /* A session with a default persona is worth far more than no session. */
+        ESP_LOGE(TAG, "no system prompt; continuing without one");
+    }
 
     /*
      * Client-side functions, which is signalled by the *absence* of an
@@ -610,6 +683,41 @@ static esp_err_t send_settings(void)
      * utterance -- a run of repeated directions -- rather than one exact string,
      * and says to ignore the surrounding wording.
      */
+    /*
+     * The name. No catalog and no enum -- any name is valid, which is exactly
+     * why the DESCRIPTION carries the rules instead: this arrives from
+     * speech-to-text, so the model is passing on something it HEARD, and left to
+     * itself it will hand over the whole sentence it heard it in.
+     */
+    cJSON *set_name = cJSON_CreateObject();
+    cJSON_AddStringToObject(set_name, "name", "set_name");
+    cJSON_AddStringToObject(set_name, "description",
+        "Change what you are called, and remember it. Use when the user asks you "
+        "to go by something else, gives you a new name, or asks what they should "
+        "call you and then names one. Pass ONLY the name itself, spelled as a "
+        "name and capitalised, with nothing else around it -- not the sentence "
+        "you heard it in, and not a title. If you did not catch it clearly, ask "
+        "them to say it again instead of guessing. Do not call this when the "
+        "user is telling you THEIR name.");
+    cJSON *nparams = cJSON_AddObjectToObject(set_name, "parameters");
+    cJSON_AddStringToObject(nparams, "type", "object");
+    cJSON *nprops = cJSON_AddObjectToObject(nparams, "properties");
+    cJSON *name_prop = cJSON_AddObjectToObject(nprops, "name");
+    cJSON_AddStringToObject(name_prop, "type", "string");
+    cJSON *nrequired = cJSON_AddArrayToObject(nparams, "required");
+    cJSON_AddItemToArray(nrequired, cJSON_CreateString("name"));
+    cJSON_AddItemToArray(functions, set_name);
+
+    cJSON *reset_name = cJSON_CreateObject();
+    cJSON_AddStringToObject(reset_name, "name", "reset_name");
+    cJSON_AddStringToObject(reset_name, "description",
+        "Go back to the name this device came with. Use when the user asks you to "
+        "reset your name or go back to what you were called before.");
+    cJSON *reset_nparams = cJSON_AddObjectToObject(reset_name, "parameters");
+    cJSON_AddStringToObject(reset_nparams, "type", "object");
+    cJSON_AddObjectToObject(reset_nparams, "properties");
+    cJSON_AddItemToArray(functions, reset_name);
+
     cJSON *set_test = cJSON_CreateObject();
     cJSON_AddStringToObject(set_test, "name", "start_display_test");
     cJSON_AddStringToObject(set_test, "description",

@@ -108,17 +108,61 @@ menu "Deepgram Agent Device"
             header, not the body), but it is the fastest way to check that what
             you think you are sending is what actually goes on the wire.
 
+    config AGENT_NAME
+        string "Agent name"
+        default "Grammer"
+        help
+            What the agent is called. Reaches the model as {{name}} in
+            main/prompt/identity.md, not as a function schema -- it is one
+            string, not a catalog.
+
+            THE FACTORY DEFAULT, with the same precedence rule as the voice: it
+            is used on first boot and after an NVS erase, and once the user has
+            asked to be calling it something else the saved name wins on every
+            later boot. The agent's reset_name function is what brings this value
+            back.
+
+            Kept short on purpose. It is spoken aloud, and a name arrives from
+            whatever a stranger said out loud, so main/agent_name.h caps it at
+            31 characters -- long enough for a name, too short to be a paragraph
+            of smuggled instructions.
+
     config DEEPGRAM_AGENT_PROMPT
-        string "Agent system prompt"
-        default "You are a friendly assistant living inside a small ESP32 device. Keep every answer to one or two short sentences."
+        string "Agent system prompt (override)"
+        default ""
+        help
+            AN OVERRIDE, AND NORMALLY EMPTY. The real prompt is main/prompt/*.md,
+            embedded into the firmware and assembled at session start -- see
+            main/agent_prompt.h for the layout and why it lives in files.
+
+            Anything typed here REPLACES all of it. Kconfig strings are one line
+            with no newlines, so this is for a quick bench experiment ("You only
+            speak in questions") and nothing longer. It logs a warning when set,
+            because a forgotten override looks exactly like a prompt that has no
+            effect.
 
     config DEEPGRAM_AGENT_GREETING
         string "Agent greeting"
-        default "Hi! I am running on an ESP32. Say something and I will answer."
+        default "I'm here... just talk to me like a person."
         help
             Spoken by the agent as soon as the session starts. Because the greeting
             needs no microphone input, hearing audio frames arrive is the quickest
             proof that the whole pipeline is connected.
+
+            IT IS ALSO THE PERSONA'S COLD OPEN, and the only line in this build
+            the model does not write. main/prompt/ spends two thousand words on
+            not sounding like a product, so a greeting that announces the hardware
+            undoes the first impression before the first reply. Keep it in voice:
+            short, low-key, no pitch, no feature list.
+
+            Spoken-safe, like everything else the device says -- no markdown, no
+            brackets, and no dashes, which are read out. "..." is the pause.
+
+            SHORT IS NOT A STYLE CHOICE HERE. There is no barge-in on this board,
+            so every second of greeting is a second the listener cannot interrupt.
+
+            Sent only when there is no history to replay, so a session reopened by
+            a voice change does not greet again.
 
     config AUDIO_OUT_VOLUME
         int "Speaker volume (0-100)"

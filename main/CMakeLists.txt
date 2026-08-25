@@ -16,7 +16,23 @@ idf_component_register(
         voices.c
         faces.c
         orb_colors.c
+        agent_prompt.c
+        agent_name.c
     INCLUDE_DIRS .
+    # The persona, one named block per file. Order lives in agent_prompt.c, not
+    # here -- this list only decides what gets embedded. Editing any of them
+    # rebuilds, so a prompt change is a normal edit-and-flash.
+    EMBED_TXTFILES
+        prompt/formatting.md
+        prompt/identity.md
+        prompt/conversation.md
+        prompt/speaking.md
+        prompt/substance.md
+        prompt/substance-flux.md
+        prompt/half-duplex.md
+        prompt/barge-in.md
+        prompt/boundaries.md
+        prompt/session.md
     REQUIRES
         esp_wifi
         esp_event

@@ -37,6 +37,7 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 
+#include "agent_name.h"
 #include "audio_io.h"
 #include "boot_button.h"
 #include "dg_agent.h"
@@ -325,6 +326,7 @@ void app_main(void)
 
     /* After nvs_flash_init(), before the first Settings message is built. */
     voices_init();
+    agent_name_init();
 
     /* Before the session, so the greeting has somewhere to go the moment it
      * arrives. */
