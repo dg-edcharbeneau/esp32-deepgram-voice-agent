@@ -322,7 +322,8 @@ static bool segment_vectors(int chunk)
 
 /* ---------------- one mode ---------------- */
 
-static void bench_mode(const char *label, aec_mode_t mode, uint32_t caps)
+static void bench_mode(const char *label, aec_mode_t mode, uint32_t caps,
+                       aec_nlp_level_t nlp)
 {
     wav_t near, far;
     if (!wav_open(&near, "aec_in_near.wav")) {
@@ -343,7 +344,7 @@ static void bench_mode(const char *label, aec_mode_t mode, uint32_t caps)
         .sample_rate   = 16000,
         .caps          = caps,
         .mode          = mode,
-        .nlp_level     = AEC_NLP_LEVEL_AGGR,
+        .nlp_level     = nlp,
     };
     aec_handle_t *h = aec_create_from_config(&cfg);
     if (h == NULL) {
@@ -490,15 +491,28 @@ void aec_bench_run(void)
 
     /* Espressif's recommendation first, then the mode this project committed to,
      * then the rest of the family so the published table can be checked. */
-    bench_mode("FD_LOW_COST",   AEC_MODE_FD_LOW_COST,   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    bench_mode("FD_HIGH_PERF",  AEC_MODE_FD_HIGH_PERF,  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    bench_mode("SR_HIGH_PERF",  AEC_MODE_SR_HIGH_PERF,  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    bench_mode("SR_LOW_COST",   AEC_MODE_SR_LOW_COST,   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const uint32_t psram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+
+    /*
+     * NLP level first, on the mode that ships. The earlier table was taken
+     * entirely at AGGR while the firmware runs NORMAL, so the one number quoted
+     * as justification did not describe the binary. NORMAL leaks more echo and
+     * damages speech less -- and speech damage during double-talk is exactly what
+     * barge-in cannot afford, so the difference is the whole tuning decision.
+     */
+    bench_mode("FD_LOW_COST/nlp=NORMAL",   AEC_MODE_FD_LOW_COST, psram, AEC_NLP_LEVEL_NORMAL);
+    bench_mode("FD_LOW_COST/nlp=AGGR",     AEC_MODE_FD_LOW_COST, psram, AEC_NLP_LEVEL_AGGR);
+    bench_mode("FD_LOW_COST/nlp=VERYAGGR", AEC_MODE_FD_LOW_COST, psram, AEC_NLP_LEVEL_VERYAGGR);
+
+    bench_mode("FD_HIGH_PERF",  AEC_MODE_FD_HIGH_PERF,  psram, AEC_NLP_LEVEL_AGGR);
+    bench_mode("SR_HIGH_PERF",  AEC_MODE_SR_HIGH_PERF,  psram, AEC_NLP_LEVEL_AGGR);
+    bench_mode("SR_LOW_COST",   AEC_MODE_SR_LOW_COST,   psram, AEC_NLP_LEVEL_AGGR);
 
     /* Is `caps` honoured at all? Same mode, default allocation, compare the
      * internal delta. AEC-FINDINGS.md carries a claim that only SR_HIGH_PERF
      * respects it, sourced from a disassembly nobody here has checked. */
-    bench_mode("FD_LOW_COST/default-caps", AEC_MODE_FD_LOW_COST, MALLOC_CAP_DEFAULT);
+    bench_mode("FD_LOW_COST/default-caps", AEC_MODE_FD_LOW_COST, MALLOC_CAP_DEFAULT,
+               AEC_NLP_LEVEL_AGGR);
 
     /*
      * FD only. All four vectors are 6.8 MB, which is 93% of the 7 MB partition and

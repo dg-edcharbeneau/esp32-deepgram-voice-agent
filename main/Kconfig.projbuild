@@ -265,6 +265,55 @@ menu "Deepgram Agent Device"
             device-wide gain over every channel and silently undoes anything set
             before it.
 
+    config AEC_ENABLE
+        bool "Cancel the echo in the live capture path"
+        default n
+        help
+            Puts esp-sr's standalone AEC between the microphone and everything
+            downstream -- Deepgram, the orb's level, the instrumentation.
+
+            AEC_MODE_FD_LOW_COST, chosen by measurement rather than by the
+            published table: 17.3 dB of ERLE on Espressif's own test vectors
+            against their own output's 18.3, 16 bytes of internal RAM, and
+            largest-contiguous-block untouched. The SR modes have no non-linear
+            stage and scored negative. See AEC-FINDINGS.md.
+
+            Needs the 4-channel reference lane, which is unconditional now.
+
+            THIS ALONE DOES NOT GIVE BARGE-IN. It cleans the microphone;
+            MIC_GATE_WHILE_AGENT_SPEAKS is what still closes it. Turn the gate off
+            separately, and only once this has been shown to work -- with the gate
+            on, a broken canceller costs nothing.
+
+            Cost: ~123 kB PSRAM and published 19.6% of a core. The capture task
+            runs on core 1 alongside LVGL, so watch fps and audio_codecs_rx_
+            overruns() before trusting it.
+
+    choice AEC_NLP_LEVEL_CHOICE
+        prompt "Non-linear processing aggressiveness"
+        depends on AEC_ENABLE
+        default AEC_NLP_NORMAL
+        help
+            How hard the non-linear stage suppresses residual echo. It suppresses
+            hardest during DOUBLE-TALK, which is the barge-in moment, so the
+            aggressive settings trade away the very thing being built. Tunable only
+            with a person talking over the device.
+
+        config AEC_NLP_NORMAL
+            bool "Normal -- least speech damage, most residual echo"
+        config AEC_NLP_AGGR
+            bool "Aggressive -- esp-sr's own default"
+        config AEC_NLP_VERYAGGR
+            bool "Very aggressive -- most suppression, most speech damage"
+    endchoice
+
+    config AEC_NLP_LEVEL
+        int
+        depends on AEC_ENABLE
+        default 0 if AEC_NLP_NORMAL
+        default 1 if AEC_NLP_AGGR
+        default 2 if AEC_NLP_VERYAGGR
+
     config AEC_BENCH
         bool "Run the AEC bench against Espressif's test vectors at boot"
         default n

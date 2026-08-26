@@ -293,6 +293,30 @@ and the reference are scored on the identical frame set.
 **Both columns are reproducible**: two runs, same board, gave identical figures to
 the decimal.
 
+### NLP level, on the mode that ships
+
+The per-mode table above was taken entirely at `AEC_NLP_LEVEL_AGGR`, which the
+bench hardcoded, while the firmware runs `NORMAL` -- so the 17.3 dB quoted as
+justification described a configuration the binary did not use. Measured
+separately, same vectors, same echo-only frames:
+
+| `nlp_level` | ERLE |
+|---|---|
+| `NORMAL` *(what ships)* | **16.1 dB** |
+| `AGGR` *(esp-sr's default)* | 17.3 dB |
+| `VERYAGGR` | 18.0 dB |
+| *Espressif's own output* | *18.3 dB* |
+
+**NORMAL costs 1.2 dB against AGGR**, and that is the whole price of choosing the
+setting that damages speech least. Non-linear processing suppresses hardest during
+double-talk, which is the barge-in moment, so the aggressive settings trade away
+the thing being built. 1.2 dB is a cheap insurance premium — and it can be changed
+on a live handle with `aec_set_nlp_level()` if a person talking over the device
+turns out to need it.
+
+Note 16.1 dB sits just under the 17.1 dB needed to put residual echo 6 dB below a
+typical voice. Marginal by design rather than by accident.
+
 ### What the ranking does settle
 
 **FD, not SR, and it is not close.** The SR modes score negative — they add energy

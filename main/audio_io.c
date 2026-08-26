@@ -13,6 +13,10 @@
 
 #include "bsp/esp-bsp.h"
 
+#if CONFIG_AEC_ENABLE
+#include "esp_aec.h"
+#endif
+
 #include "audio_codecs.h"
 #include "audio_io.h"
 
@@ -48,7 +52,22 @@ static const char *TAG = "audio_io";
  * larger writes directly reduce the pressure behind that failure. See the
  * "short send timeout" section of the README.
  */
+/*
+ * 1024 with the canceller, 1280 without.
+ *
+ * aec_get_chunksize() returns 512 for every mode on this chip -- measured, and
+ * matching handle.frame_size -- so 1024 is exactly two AEC frames with no
+ * remainder. 1280 would leave an alternating 256/0 residue, and a partial frame
+ * fed to aec_process() is a frame of silence to the adaptive filter.
+ *
+ * The non-AEC path keeps 1280 so enabling the canceller is the only thing that
+ * changes the send cadence to Deepgram.
+ */
+#if CONFIG_AEC_ENABLE
+#define CAPTURE_FRAMES 1024
+#else
 #define CAPTURE_FRAMES 1280
+#endif
 
 /*
  * Playback ring holds MONO bytes -- the stereo doubling happens in the drain
@@ -119,6 +138,47 @@ static volatile bool s_play_gap;
 static volatile uint32_t s_mic_peak;
 static volatile uint32_t s_ref_peak;
 static volatile uint32_t s_dead_peak;
+
+#if CONFIG_AEC_ENABLE
+/*
+ * The canceller, and the two buffers it needs beside the ones already here.
+ *
+ * FD_LOW_COST by measurement, not by the published table: it achieved 17.3 dB of
+ * ERLE on Espressif's own vectors against their 18.3 -- BOTH AT nlp_level = AGGR,
+ * which is what the bench hardcodes and NOT what this build necessarily runs; see
+ * CONFIG_AEC_NLP_LEVEL. It costs 16 bytes of internal
+ * RAM, and leaves largest-contiguous-block untouched -- which is the number
+ * a4fa137 died on. The SR modes have no non-linear stage at all
+ * (aec_nlp_process() returns 0) and scored NEGATIVE. See AEC-FINDINGS.md.
+ *
+ * Buffers come from heap_caps_aligned_alloc(16, ...) because esp_aec.h warns
+ * about it twice; plain heap_caps_malloc is what the rest of this file uses and
+ * is not good enough here.
+ */
+/*
+ * CONVERGENCE GATE.
+ *
+ * An adaptive filter knows nothing at boot. The greeting is the first audio it
+ * ever sees, and measured over three empty-room runs it leaked enough of that
+ * first burst for Deepgram to transcribe the agent's own greeting back as the
+ * user -- twice in three runs, never later in the session. One turn of
+ * self-conversation per boot, where before the canceller it was sixteen turns in
+ * twenty-four seconds and did not stop.
+ *
+ * So behave like the old half-duplex gate until the filter has actually seen
+ * echo, then get out of the way. Counted in blocks with real reference energy
+ * rather than in wall-clock, because silence teaches an adaptive filter nothing:
+ * 16 blocks at 64 ms is about a second of the agent actually speaking.
+ */
+#define AEC_WARMUP_BLOCKS 16
+#define AEC_WARMUP_REF_PEAK 500
+static uint32_t s_aec_warm;
+
+static aec_handle_t *s_aec;
+static int16_t *s_aec_ref;   /* lane 0, the echo reference */
+static int16_t *s_aec_out;   /* cancelled microphone */
+static int s_aec_chunk;
+#endif
 
 /*
  * LINEARITY ACCUMULATORS -- the Stage 3 measurement, and the go/no-go for
@@ -444,8 +504,13 @@ static void capture_task(void *arg)
     const size_t stereo_bytes = CAPTURE_FRAMES * AEC_LANES * sizeof(int16_t);
     const size_t mono_bytes = CAPTURE_FRAMES * sizeof(int16_t);
 
-    int16_t *stereo = heap_caps_malloc(stereo_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    int16_t *mono = heap_caps_malloc(mono_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* Aligned: esp_aec.h requires 16-byte alignment for anything handed to
+     * aec_process(), and `mono` is handed to it. The pattern is already used for
+     * the FFT buffers in face_spectrum.c. */
+    int16_t *stereo = heap_caps_aligned_alloc(16, stereo_bytes,
+                                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    int16_t *mono = heap_caps_aligned_alloc(16, mono_bytes,
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (stereo == NULL || mono == NULL) {
         ESP_LOGE(TAG, "no internal RAM for capture buffers");
         vTaskDelete(NULL);
@@ -460,6 +525,21 @@ static void capture_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+
+#if CONFIG_AEC_ENABLE
+        /*
+         * ONE runtime test, used by every AEC site below.
+         *
+         * s_aec_ref was previously written inside the downmix loop under the
+         * compile-time #if alone, while the null check sat sixteen lines further
+         * down. Both of audio_io_init()'s graceful-degradation paths leave these
+         * pointers NULL -- so a failed aec_create_from_config(), the one case the
+         * comment there promises is survivable, stored to address 0 on the first
+         * capture block and panicked. Deterministic, so it would have been a boot
+         * loop, on the path meant to avoid one.
+         */
+        const bool aec_on = (s_aec != NULL && s_aec_ref != NULL && s_aec_out != NULL);
+#endif
 
         int16_t peak[AEC_LANES] = { 0 };
         for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
@@ -479,7 +559,48 @@ static void capture_task(void *arg)
              */
             mono[i] = (int16_t)(((int32_t)f[AEC_LANE_MIC_A] +
                                  (int32_t)f[AEC_LANE_MIC_B]) / 2);
+#if CONFIG_AEC_ENABLE
+            if (aec_on) {
+                s_aec_ref[i] = f[AEC_LANE_REF];
+            }
+#endif
         }
+
+#if CONFIG_AEC_ENABLE
+        /*
+         * CANCEL BEFORE ANY GATE, TAP OR SINK. Everything downstream -- the level
+         * the orb draws, what Deepgram hears, the double-talk instrumentation --
+         * should see the cleaned signal, not the raw microphone.
+         *
+         * Two chunks of exactly s_aec_chunk; CAPTURE_FRAMES is sized so there is
+         * no remainder. The filter is adaptive and stateful, so every block must
+         * go through in order even when the session is stopped -- skipping frames
+         * would make it diverge and it would then have to reconverge mid-reply,
+         * which is the worst possible moment.
+         */
+        if (aec_on) {
+            for (size_t off = 0; off + (size_t)s_aec_chunk <= CAPTURE_FRAMES;
+                 off += (size_t)s_aec_chunk) {
+                aec_process(s_aec, mono + off, s_aec_ref + off, s_aec_out + off);
+            }
+            memcpy(mono, s_aec_out, CAPTURE_FRAMES * sizeof(int16_t));
+
+            if (s_aec_warm < AEC_WARMUP_BLOCKS &&
+                peak[AEC_LANE_REF] > AEC_WARMUP_REF_PEAK) {
+                s_aec_warm++;
+                if (s_aec_warm == AEC_WARMUP_BLOCKS) {
+                    ESP_LOGI(TAG, "AEC converged (%d blocks of reference audio); "
+                             "microphone open during playback from here",
+                             AEC_WARMUP_BLOCKS);
+                }
+            }
+            /* Half-duplex until then -- the filter still gets every frame above,
+             * it is only the OUTPUT that is withheld while it is still learning. */
+            if (s_aec_warm < AEC_WARMUP_BLOCKS && audio_io_playback_active()) {
+                continue;
+            }
+        }
+#endif
 #if CONFIG_AEC_SWEEP_VOLUME > 0
         if (audio_io_playback_active() && s_lin_blocks < LIN_MAX_BLOCKS) {
             for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
@@ -587,7 +708,7 @@ static void capture_task(void *arg)
              * meaningless. */
             ESP_LOGI(TAG, "mic peak L=%d R=%d ref=%d dead=%d%s",
                      peak_l, peak_r, peak[AEC_LANE_REF], peak[AEC_LANE_DEAD],
-                     audio_io_playback_active() ? " (capture gated)" : "");
+                     audio_io_playback_active() ? " (agent speaking)" : "");
         }
 #endif
 
@@ -871,6 +992,46 @@ esp_err_t audio_io_init(int sample_rate)
     if (ref_gain_err != ESP_CODEC_DEV_OK) {
         ESP_LOGW(TAG, "could not set reference lane gain: %d", ref_gain_err);
     }
+#if CONFIG_AEC_ENABLE
+    {
+        aec_config_t acfg = {
+            .mic_num       = 1,
+            .ref_num       = 1,
+            .out_num       = 1,
+            .filter_length = 4,
+            .sample_rate   = 16000,
+            .caps          = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+            .mode          = AEC_MODE_FD_LOW_COST,
+            .nlp_level     = CONFIG_AEC_NLP_LEVEL,
+        };
+        s_aec = aec_create_from_config(&acfg);
+        if (s_aec == NULL) {
+            /* Not fatal: a device that still talks is better than one that does
+             * not boot. The log says the microphone is uncancelled. */
+            ESP_LOGE(TAG, "AEC create failed -- running WITHOUT cancellation");
+        } else {
+            s_aec_chunk = aec_get_chunksize(s_aec);
+            s_aec_ref = heap_caps_aligned_alloc(16, CAPTURE_FRAMES * sizeof(int16_t),
+                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            s_aec_out = heap_caps_aligned_alloc(16, CAPTURE_FRAMES * sizeof(int16_t),
+                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (s_aec_ref == NULL || s_aec_out == NULL ||
+                s_aec_chunk <= 0 || (CAPTURE_FRAMES % s_aec_chunk) != 0) {
+                ESP_LOGE(TAG, "AEC unusable (chunk=%d, frames=%d) -- disabling",
+                         s_aec_chunk, CAPTURE_FRAMES);
+                aec_destroy(s_aec);
+                s_aec = NULL;
+                free(s_aec_ref); free(s_aec_out);
+                s_aec_ref = NULL; s_aec_out = NULL;
+            } else {
+                ESP_LOGI(TAG, "AEC: FD_LOW_COST, chunk=%d, %d per capture block, "
+                         "nlp=%d", s_aec_chunk, CAPTURE_FRAMES / s_aec_chunk,
+                         (int)CONFIG_AEC_NLP_LEVEL);
+            }
+        }
+    }
+#endif
+
     /* Both stay open for the session; reopening per turn clicks. */
 
     s_ring = xStreamBufferCreateWithCaps(RING_BYTES, 1, MALLOC_CAP_SPIRAM);
@@ -905,6 +1066,21 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink)
 
     /* Priority above playback: a missed read is lost audio, a late write is
      * only a small gap the ring buffer absorbs. */
+    /*
+     * STAYS ON CORE 1, INCLUDING WITH THE CANCELLER -- and that is a measurement,
+     * not an oversight.
+     *
+     * Enabling the AEC costs the display 25.0 -> 20.4 fps, draw 18 -> 23 ms.
+     * a4fa137's lesson says to move DSP off the display's core, so core 0 was
+     * tried: 20.0-22.6 fps, i.e. no recovery. Core placement is not the cause.
+     *
+     * What is left is the PSRAM bus. The canceller's ~123 kB working set is read
+     * and written every frame, and the render buffer and orb geometry live in
+     * PSRAM too; that contention is shared no matter which core runs which task.
+     * UNVERIFIED as a mechanism -- what is measured is that moving cores does not
+     * help, so moving cores was not kept. Core 0 also carries Wi-Fi and TLS,
+     * which is a real risk for the handshake, and there is no reason to take it.
+     */
     if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7, NULL, 1) != pdPASS) {
         return ESP_FAIL;
     }
