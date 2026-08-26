@@ -130,13 +130,19 @@ static void on_state(dg_agent_state_t state, void *ctx)
         ui_set_behaviour(UI_BEHAVIOUR_INITIALIZING);
         break;
     case DG_AGENT_ERROR:
+        /* The stream died mid-turn, so the next bytes to arrive belong to a
+         * different one. Says so before anything can be stitched onto them. */
+        audio_io_note_stream_gap();
         /* Frozen, not merely dim: this one has stopped trying. */
         ui_set_failed(true);
         ui_set_behaviour(UI_BEHAVIOUR_DISCONNECTED);
         break;
     case DG_AGENT_DISCONNECTED:
         /* Between attempts. session_ctl reports a deliberate stop separately, so
-         * arriving here means the socket went away on its own. */
+         * arriving here means the socket went away on its own -- and THAT is the
+         * path audio_io_reset() never covered, because the auto-reconnect does not
+         * go through session_ctl. */
+        audio_io_note_stream_gap();
         ui_set_behaviour(UI_BEHAVIOUR_CONNECTING);
         break;
     }

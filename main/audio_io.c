@@ -697,6 +697,14 @@ void audio_io_flush(void)
     }
 }
 
+void audio_io_note_stream_gap(void)
+{
+    /* Same flag the flush and the mute raise; audio_io_play() consumes it before
+     * the stitch. Safe from any task -- one bool store, and the producer is the
+     * only reader. */
+    s_play_gap = true;
+}
+
 void audio_io_mute_playback(bool muted)
 {
     /*
