@@ -9,6 +9,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_websocket_client.h"
 
 #include "agent_name.h"
@@ -33,6 +34,11 @@ static const char *TAG = "dg_agent";
 /* Deepgram closes an idle Agent socket after ~10 s of no audio. */
 #define KEEPALIVE_PERIOD_MS 5000
 
+/* Skip the keepalive if audio went upstream this recently -- the audio has
+ * already done its job. Well under KEEPALIVE_PERIOD_MS so a genuinely quiet
+ * uplink still gets one on the very next tick. */
+#define KEEPALIVE_SKIP_MS 2000
+
 #define WS_OPCODE_CONT   0x00
 #define WS_OPCODE_TEXT   0x01
 #define WS_OPCODE_BINARY 0x02
@@ -40,22 +46,42 @@ static const char *TAG = "dg_agent";
 #define SEND_TIMEOUT pdMS_TO_TICKS(2000)
 
 /*
- * Mic audio uses the same deadline as everything else, and it must stay
- * generous. A short one looks attractive -- this send runs on the priority-7
- * capture task, so blocking stalls esp_codec_dev_read() -- but it is a trap:
- * esp_transport_ssl_write() returns 0 when its write poll times out, and the
- * WebSocket client treats a zero-length write as fatal and tears the session
- * down. At 31 sends a second over a link that is also carrying TTS audio down,
- * a 200 ms deadline dropped the session every few seconds and the agent
- * re-greeted on every reconnect.
+ * Mic audio keeps the generous deadline, and the impatience lives in the
+ * transport instead. This is worth understanding before shortening it again.
  *
- * So the cost of being impatient here is the whole conversation, not one 32 ms
- * chunk. If capture stalls become a real problem, the fix is to move the send
- * off the capture task, not to shorten this.
+ * The comment here used to explain why it had to be generous: a short deadline
+ * made esp_transport_poll_write() time out, transport_ws returned 0, and the
+ * WebSocket client treated a zero-length write as a broken socket and tore the
+ * session down. 200 ms dropped the session every few seconds.
+ *
+ * LOCAL PATCH 2 in components/tcp_transport/transport_ws.c removes that trap --
+ * a congested BINARY frame is now dropped and reported sent. But shortening THIS
+ * was still wrong, twice over, and both were measured on the device:
+ *
+ *   1. This value is also the lock deadline. esp_websocket_client takes its
+ *      client lock with it, so 200 ms produced a flood of "Could not lock
+ *      ws-client within 200 timeout" and the client dropped mic frames before
+ *      they ever reached the socket. CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK looks
+ *      like the cure and is not -- it deadlocks the client outright; see the
+ *      comment on it in sdkconfig.defaults. The deadline has to cover the lock.
+ *
+ *   2. It is also the deadline for the header and payload writes themselves.
+ *      Those happen AFTER the frame is committed, and a timeout there tears a
+ *      frame in half -- "esp_transport_write() returned 0" with no poll line
+ *      above it, which is fatal and correctly so.
+ *
+ * The capture-task stall this was meant to fix is handled where it can be handled
+ * safely: WS_AUDIO_POLL_MS caps the WRITABILITY POLL at 150 ms for audio frames,
+ * so a congested socket costs one frame and 150 ms, while a frame that has
+ * started going out still gets the full deadline to finish.
+ *
+ * The better structure is still to move the send off the capture task entirely.
  */
 #define AUDIO_SEND_TIMEOUT SEND_TIMEOUT
 
 static esp_websocket_client_handle_t s_client;
+/* Written by the capture task, read by the keepalive task. One 32-bit store. */
+static volatile uint32_t s_last_audio_ms;
 static dg_agent_callbacks_t s_cb;
 static volatile bool s_ready;
 static TaskHandle_t s_keepalive_task;
@@ -1017,10 +1043,34 @@ static void keepalive_task(void *arg)
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(KEEPALIVE_PERIOD_MS));
-        if (s_ready && esp_websocket_client_is_connected(s_client)) {
-            esp_websocket_client_send_text(s_client, KEEPALIVE, sizeof(KEEPALIVE) - 1,
-                                           SEND_TIMEOUT);
+        if (!s_ready || !esp_websocket_client_is_connected(s_client)) {
+            continue;
         }
+        /*
+         * Act on the paragraph above: while the microphone is streaming, the
+         * audio IS the keepalive, and this frame is not merely redundant -- it is
+         * harmful. It is TEXT, so transport_ws cannot drop it when the send queue
+         * is full (LOCAL PATCH 2 covers binary only, because Settings must never
+         * be dropped silently). It therefore blocks in poll_write holding the
+         * client lock, stalls the capture task behind it, and finally times out
+         * and takes the session down -- observed as a live session dying with
+         * mic= frozen for the full SEND_TIMEOUT.
+         *
+         * Congestion only happens when audio is flowing, which is precisely when
+         * this frame is unnecessary. So skip it then, and send it when the uplink
+         * really is quiet -- the mic gate during a long agent reply, which is the
+         * case the keepalive exists for.
+         *
+         * Worst case with no traffic at all: audio stops just after a check, the
+         * next check is KEEPALIVE_PERIOD_MS later and sends. Comfortably inside
+         * Deepgram's ~10 s.
+         */
+        uint32_t quiet_ms = (uint32_t)(esp_timer_get_time() / 1000) - s_last_audio_ms;
+        if (quiet_ms < KEEPALIVE_SKIP_MS) {
+            continue;
+        }
+        esp_websocket_client_send_text(s_client, KEEPALIVE, sizeof(KEEPALIVE) - 1,
+                                       SEND_TIMEOUT);
     }
 }
 
@@ -1144,6 +1194,10 @@ esp_err_t dg_agent_send_audio(const void *pcm, size_t len)
     if (!s_ready || len == 0) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Ahead of the send, not after it: a send that blocks is exactly when the
+     * keepalive must stay out of the way, and stamping afterwards would leave
+     * the clock stale for the whole time it was blocked. */
+    s_last_audio_ms = (uint32_t)(esp_timer_get_time() / 1000);
     int sent = esp_websocket_client_send_bin(s_client, (const char *)pcm, (int)len,
                                             AUDIO_SEND_TIMEOUT);
     return sent < 0 ? ESP_FAIL : ESP_OK;

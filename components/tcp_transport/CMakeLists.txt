@@ -1,6 +1,9 @@
-# Overrides ESP-IDF's `tcp_transport` component by name so one line of
-# transport_ws.c can be changed -- see the LOCAL PATCH comment in that file for
-# why (agent.deepgram.com 404s on "Host: host:443").
+# Overrides ESP-IDF's `tcp_transport` component by name so two spots in
+# transport_ws.c can be changed -- see the LOCAL PATCH comments in that file:
+#
+#   1. The Host header, because agent.deepgram.com 404s on "Host: host:443".
+#   2. _ws_write()'s poll_write timeout, because the WebSocket client treats a
+#      full send queue as a broken socket and tears down a live session over it.
 #
 # Only transport_ws.c and Kconfig are copied here. Every other source and both
 # include directories are referenced straight out of $IDF_PATH, so this override

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -397,8 +398,78 @@ static int _ws_write(esp_transport_handle_t t, int opcode, int mask_flag, const 
     char *mask;
     int header_len = 0, i;
 
+    /* LOCAL PATCH 2 -- drop a congested audio frame instead of killing the
+     * session. See the Host-header patch above for why this file is vendored.
+     *
+     * esp_transport_poll_write() returning 0 means the socket was NOT WRITABLE
+     * within the deadline. It does NOT mean the socket is broken: errno,
+     * transport_error and the TLS error are all clean when this fires. But
+     * returning 0 reaches esp_websocket_client_send_with_exact_opcode(), whose
+     * test is
+     *
+     *     if (wlen < 0 || (wlen == 0 && need_write != 0))
+     *         ... esp_websocket_client_abort_connection(...)
+     *
+     * -- unconditional. A full send queue and a dead socket are the same event to
+     * it, so a live session is torn down and reconnected.
+     *
+     * Measured on this device: the capture task pushes 32 kB/s of PCM into a
+     * 23,040 B TCP send buffer, which is 0.72 s of audio. Any stall longer than
+     * that fills the queue and the session dies -- five times in seven sessions,
+     * every one with no agent audio inbound and ~50 kB of internal RAM free. The
+     * `mic=` counter in the TLM line freezes for exactly the send deadline before
+     * each one, which is what identified the blocking write.
+     *
+     * For a realtime microphone stream the right answer to a full queue is to DROP
+     * THE FRAME: 80 ms of audio is recoverable, a session is not.
+     *
+     * TWO DEADLINES, and the split is the load-bearing part. The POLL runs on a
+     * short leash so a congested socket costs one frame and WS_AUDIO_POLL_MS of
+     * the priority-7 capture task rather than the caller's full deadline. The
+     * WRITES below keep the caller's timeout_ms in full, because once the header
+     * is on the wire the frame is committed -- a timeout there tears a frame in
+     * half and MUST stay fatal. Shortening both instead was tried and produced
+     * exactly that: "esp_transport_write() returned 0" with no poll line above it.
+     *
+     * Strictly bounded, because the drop lies to the caller:
+     *
+     *   - Only poll_write == 0 (congested). poll_write < 0 is a real error, still
+     *     returned, still fatal -- a dead socket must stay fatal.
+     *   - Only a self-contained BINARY frame: FIN set and opcode BINARY, never
+     *     CONT. Dropping one fragment of a fragmented message would leave the peer
+     *     holding half a message. Audio fits in one frame here (2,560 B against
+     *     dg_agent's 4,096 B buffer_size), so this covers every audio message and
+     *     none of the fragments of a large one.
+     *   - Only binary. Every TEXT frame is control traffic -- Settings, KeepAlive,
+     *     UpdateSpeak -- and silently dropping Settings would hang the session with
+     *     no symptom at all.
+     *
+     * Nothing has been written to the wire at the drop: this check precedes the
+     * header write, so the frame stream stays correctly framed.
+     *
+     * Delete this once esp_websocket_client distinguishes a full send queue from a
+     * broken socket. */
+#define WS_AUDIO_POLL_MS 150
+    const bool self_contained_binary =
+        len > 0 && (opcode & WS_FIN) && ((opcode & 0x0F) == WS_OPCODE_BINARY);
+    int poll_timeout_ms = timeout_ms;
+    if (self_contained_binary && (timeout_ms < 0 || timeout_ms > WS_AUDIO_POLL_MS)) {
+        poll_timeout_ms = WS_AUDIO_POLL_MS;
+    }
+
     int poll_write;
-    if ((poll_write = esp_transport_poll_write(ws->parent, timeout_ms)) <= 0) {
+    if ((poll_write = esp_transport_poll_write(ws->parent, poll_timeout_ms)) <= 0) {
+        if (poll_write == 0 && self_contained_binary) {
+            static uint32_t dropped;
+            dropped++;
+            /* First of a burst, then sparsely -- at 12.5 frames/s a line per drop
+             * would bury the log that diagnoses the burst. */
+            if (dropped == 1 || (dropped % 25) == 0) {
+                ESP_LOGW(TAG, "send queue full, dropped %d byte audio frame "
+                              "(%" PRIu32 " since boot)", len, dropped);
+            }
+            return len;
+        }
         ESP_LOGE(TAG, "Error transport_poll_write(%d)", poll_write);
         return poll_write;
     }

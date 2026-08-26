@@ -860,6 +860,74 @@ attempt needs. With the canceller off the branch costs ~1-3 fps against the
 original 25 and IMPROVES largest free block at session start, 32,768 -> 59,392,
 because of the PSRAM buffer move.
 
+### The interrupt reopened the same window
+
+Written 2026-08-26, on branch `fix-touch-interrupt`. The gate was on, full duplex
+was abandoned, and `main` still hit this the same day:
+
+```
+E (45930) transport_ws: Error transport_poll_write(0)
+E (45930) websocket_client: esp_transport_write() returned 0, transport_error=ESP_OK, ...
+E (45931) dg_agent: transport error: esp_transport_write() returned 0, ...
+```
+
+**The touch-ring interrupt was defeating the gate it was supposed to make
+unnecessary.** A tap flushed the ring and set the playback mute, and the mute path
+in `audio_io_play()` deliberately does not stamp the queue clock -- so
+`audio_io_playback_active()` fell within ~350 ms, the mic gate stopped gating, and
+capture streamed 32 kB/s upstream straight through the rest of the reply, which
+Deepgram was still sending. Section 1 above, exactly, just time-boxed to a turn.
+
+Two things widened it. `end_interrupt()` hung off `AgentAudioDone`, which means
+finished SENDING and sits up to 12.3 s of ring ahead of the speaker -- so a tap in
+the tail, the case the feature exists for, arrived after its own clearing event and
+latched the mute for the full 30 s deadline. And `UI_INTERRUPT` fired on any short
+click outside the centre button, so stray touches triggered it.
+
+The fix has two halves, and neither is the mic gate.
+
+**The session no longer dies of congestion.** `components/tcp_transport/transport_ws.c`
+LOCAL PATCH 2 drops a self-contained BINARY frame when `esp_transport_poll_write()`
+times out, and reports it sent. The WebSocket client's send path treats `wlen == 0`
+as a broken socket unconditionally, so a full send queue and a dead socket were the
+same event to it. Only binary is droppable: TEXT carries `Settings`, and dropping
+that silently hangs a session with no symptom. `poll_write < 0` stays fatal. The
+poll runs on a 150 ms leash while the writes keep the caller's full deadline --
+once the header is on the wire the frame is committed, and a timeout there tears it
+in half.
+
+**The keepalive no longer kills sessions either.** It is TEXT, so the patch above
+cannot cover it; it blocked in `poll_write` holding the client lock, stalled the
+capture task behind it, and timed out fatally. It now skips itself when audio went
+upstream in the last 2 s -- congestion only happens while audio is flowing, which
+is exactly when the keepalive is redundant.
+
+### Dead ends, so nobody spends another day on them
+
+- **`audio_io_uplink_blocked()`** -- a second predicate so the mic gate could follow
+  the mute while the display kept an honest `audio_io_playback_active()`. Removed.
+  The mute is released by the user SPEAKING AGAIN, so a gated mic cannot hear its
+  own release. The mic now stays open through an interruption and full duplex costs
+  dropped frames, not the session.
+- **`AgentAudioDone` as end-of-turn** -- it does not arrive. Zero times across a
+  12-minute run, once each in two earlier ones. `dg_agent` parses it correctly;
+  Deepgram simply does not send it for most turns.
+- **A gap in the inbound audio as end-of-turn** -- indistinguishable from a stall,
+  and this link stalls for seconds. A 1.5 s quiet window released the mute mid-reply
+  and the agent resumed talking.
+- **`MUTE_MAX_MS` at 8 s** -- an absolute cap expires mid-reply. Back to 30 s, and
+  now a pure backstop for a tap that is never followed by speech.
+- **`CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK`** -- do not enable it. Its send-error
+  path takes `client->lock` with `portMAX_DELAY` and wedges the client permanently.
+  See the comment in `sdkconfig.defaults`.
+
+**Still unexplained:** why the socket stalls at all. 32 kB/s to a cloud endpoint
+should not saturate, `errno` is 0, RAM is ample, and Wi-Fi power save is already
+`WIFI_PS_NONE`. Roughly 17% of mic frames drop. The patches above make that
+survivable, not absent, and the drop counter now measures it. A related failure
+survives at connect time: the 17.6 kB `Settings` TEXT frame failing with
+`errno=119` (EINPROGRESS), which self-recovers by reconnecting.
+
 **If anyone picks this up again**, the two walls above are the thing to attack, and
 neither is an AEC problem: send less audio upstream, or find the residual-echo
 margin somewhere other than the canceller. Raising `nlp_level` is the obvious idea

@@ -88,6 +88,80 @@ static void note_activity(void)
     s_activity_us = esp_timer_get_time();
 }
 
+static inline uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/*
+ * INTERRUPT STATE
+ *
+ * Above the callbacks because on_state() and on_audio() both need it, not as a
+ * statement about where it belongs.
+ *
+ * An interrupted turn's mute, and the deadline that guarantees it ends.
+ *
+ * 32-bit ms rather than the int64_t microseconds used elsewhere in this file,
+ * because three tasks touch it -- the LVGL task sets it on the tap, the WebSocket
+ * task clears it when the user speaks, this loop clears it on the backstop -- and
+ * a 32-bit store is indivisible where a 64-bit one is two halves. Same reasoning
+ * as the split in audio_io.c. The clear/set race between them is benign: the
+ * worst outcome is a mute that lasts until the deadline.
+ *
+ * ENDING IT IS THE HARD PART, and two obvious signals were tried on the device
+ * and both failed. Recorded here so neither gets tried a third time:
+ *
+ *   AgentAudioDone -- DOES NOT ARRIVE. Deepgram sent it 0 times across a
+ *     12-minute run and once each in two earlier ones. dg_agent parses it
+ *     correctly; it simply is not sent for most turns. Waiting on it parks the
+ *     mute on the backstop every time.
+ *
+ *   A gap in the inbound audio -- CANNOT BE DISTINGUISHED FROM A STALL. This
+ *     link stalls for seconds at a time; that is the bug the transport patch
+ *     exists for. A 1.5 s quiet window released the mute mid-reply and the agent
+ *     resumed talking: "I interrupted and it started talking again on its own."
+ *
+ * What actually means "that turn is over" is THE USER SPEAKING AGAIN. It is the
+ * intent behind the tap, it comes from Deepgram's own VAD rather than from
+ * timing, and it cannot be forged by a network stall.
+ *
+ * The consequence is that the mute must NOT gate the microphone -- a deaf device
+ * can never hear its own release. See the gate comment in audio_io.c: the
+ * full-duplex session death that motivated gating is handled in transport_ws.c
+ * now, so the cost of listening through the tail is dropped frames.
+ */
+
+/*
+ * Last resort, for the case where the user taps and then never speaks. Long,
+ * because until it fires the agent's remaining audio is being discarded, which is
+ * exactly what was asked for -- there is no rush. It no longer risks deafness.
+ */
+#define MUTE_MAX_MS 30000
+static volatile uint32_t s_mute_deadline_ms;
+
+/*
+ * True while agent audio is still ARRIVING, as distinct from still playing.
+ *
+ * The interrupt needs this and AgentAudioDone alone cannot give it: done means
+ * the agent finished SENDING, and the ring holds 12.3 s behind that, so a tap in
+ * the tail -- the case the feature exists for -- lands after its own clearing
+ * event and latches the mute until the deadline. With this flag the tail tap
+ * takes the flush and skips the mute entirely, because nothing more is coming.
+ *
+ * Set on the WebSocket task, read on the LVGL task, one bool store either way.
+ */
+static volatile bool s_turn_inbound;
+
+static void end_interrupt(const char *why)
+{
+    if (s_mute_deadline_ms == 0) {
+        return;
+    }
+    s_mute_deadline_ms = 0;
+    audio_io_mute_playback(false);
+    ESP_LOGI(TAG, "EVT interrupt-end (%s)", why);
+}
+
 static const char *state_name(dg_agent_state_t state)
 {
     switch (state) {
@@ -107,6 +181,21 @@ static void on_state(dg_agent_state_t state, void *ctx)
          * this one rather than every session since boot. */
         s_audio_bytes = 0;
         s_turns = 0;
+        /* No turn can be in flight on a socket that has just opened. The
+         * disconnect paths below already clear this, so it is belt and braces --
+         * but a stale true would arm a mute on the first tap of a session that
+         * has nothing to mute. */
+        s_turn_inbound = false;
+        /*
+         * And the same for a pending mute, which is NOT belt and braces: a
+         * deliberate stop goes through session_ctl and logs "session stopped"
+         * without ever reaching the DISCONNECTED case below, so the deadline
+         * outlives its session and fires inside the next one -- observed as an
+         * "EVT interrupt-end (deadline)" four seconds into a fresh session that
+         * had never been interrupted. audio_io_reset() already clears the mute
+         * itself on that path; this clears the timer that chases it.
+         */
+        end_interrupt("new session");
     }
     /* Runs on the WebSocket task, so this must not touch LVGL -- it stores the
      * literal and the frame timer picks it up. */
@@ -133,6 +222,11 @@ static void on_state(dg_agent_state_t state, void *ctx)
         /* The stream died mid-turn, so the next bytes to arrive belong to a
          * different one. Says so before anything can be stitched onto them. */
         audio_io_note_stream_gap();
+        /* And nothing more is coming down it, so an interruption still waiting for
+         * the user to speak would otherwise discard the whole of the NEXT turn
+         * before the backstop caught it. */
+        s_turn_inbound = false;
+        end_interrupt("stream gone");
         /* Frozen, not merely dim: this one has stopped trying. */
         ui_set_failed(true);
         ui_set_behaviour(UI_BEHAVIOUR_DISCONNECTED);
@@ -143,6 +237,10 @@ static void on_state(dg_agent_state_t state, void *ctx)
          * path audio_io_reset() never covered, because the auto-reconnect does not
          * go through session_ctl. */
         audio_io_note_stream_gap();
+        /* Same as the error path: the socket is gone, so the inbound turn it was
+         * carrying is over whether or not it said so. */
+        s_turn_inbound = false;
+        end_interrupt("stream gone");
         ui_set_behaviour(UI_BEHAVIOUR_CONNECTING);
         break;
     }
@@ -157,6 +255,10 @@ static void on_conversation_text(const char *role, const char *content, void *ct
 static void on_audio(const uint8_t *data, size_t len, void *ctx)
 {
     s_audio_bytes += len;
+    /* Bytes are on the wire right now, which is what the interrupt has to know:
+     * a tap while this is set has a reply still arriving to mute, a tap after it
+     * clears has only the ring to flush. */
+    s_turn_inbound = true;
     /* Non-blocking by contract -- this is the WebSocket task. */
     audio_io_play(data, len);
 }
@@ -171,6 +273,13 @@ static void on_user_started_speaking(void *ctx)
     ui_note_user_speech();
     /* Stop mid-sentence rather than talk over the user. */
     audio_io_flush();
+    /*
+     * And this ends an interruption. The user talking is the only trustworthy
+     * "that turn is over" this API offers -- see the note above MUTE_MAX_MS for
+     * the two signals that were tried and failed. The flush above runs first so
+     * nothing the mute was holding back can be heard on the way out.
+     */
+    end_interrupt("user speaking");
 }
 
 /* Runs on the capture task. dg_agent_send_audio() no-ops until the session is
@@ -193,38 +302,6 @@ static void on_reload_required(void *ctx)
  */
 static bool s_test_entry_pending;
 static int64_t s_test_entry_deadline_us;
-
-/*
- * An interrupted turn's mute, and the deadline that guarantees it ends.
- *
- * 32-bit ms rather than the int64_t microseconds used elsewhere in this file,
- * because three tasks touch it -- the LVGL task sets it, the WebSocket task
- * clears it on AgentAudioDone, this loop clears it on the deadline -- and a
- * 32-bit store is indivisible where a 64-bit one is two halves. Same reasoning
- * as the split in audio_io.c. The clear/set race between them is benign: the
- * worst outcome is a mute that lasts until the deadline.
- *
- * The deadline exists because AgentAudioDone is not guaranteed. A turn that
- * never reports done would otherwise leave the device permanently silent with no
- * symptom other than a device that has stopped talking.
- */
-#define MUTE_MAX_MS 30000
-static volatile uint32_t s_mute_deadline_ms;
-
-static inline uint32_t now_ms(void)
-{
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-static void end_interrupt(const char *why)
-{
-    if (s_mute_deadline_ms == 0) {
-        return;
-    }
-    s_mute_deadline_ms = 0;
-    audio_io_mute_playback(false);
-    ESP_LOGI(TAG, "EVT interrupt-end (%s)", why);
-}
 
 /* How long to wait for the speaker to drain before starting anyway. Long enough
  * for a sentence the agent has already finished sending, short enough that a
@@ -271,7 +348,11 @@ static void on_display_test_required(void *ctx)
 static void on_agent_audio_done(void *ctx)
 {
     note_activity();
-    /* The turn is over, so whatever was being discarded has stopped arriving. */
+    /* The agent has stopped SENDING, so nothing more can arrive to discard. Worth
+     * having when it comes, but do not build on it: measured across a 12-minute
+     * run, Deepgram sent this zero times. The release that actually fires is the
+     * user speaking. */
+    s_turn_inbound = false;
     end_interrupt("turn done");
     ESP_LOGI(TAG, "turn complete, %" PRIu32 " audio bytes received", s_audio_bytes);
 }
@@ -291,21 +372,37 @@ static void on_gesture(ui_gesture_t gesture)
 
     case UI_INTERRUPT:
         /*
-         * Both halves, or neither works: the flush silences the ring, the mute
-         * stops Deepgram's remaining audio refilling it. Deliberately NOT routed
-         * through session_ctl -- request() drops anything arriving while busy or
-         * inside COOLDOWN_MS, which is exactly when someone interrupts, and both
-         * calls here are a single flag store so they are safe on the LVGL task.
+         * The flush silences the ring. Whether that is the whole job depends on
+         * something the flush cannot see: is the reply still ARRIVING?
          *
-         * With the mic gate on, the reward is immediate: playback goes inactive,
-         * capture reopens within PLAYBACK_TAIL_MS, and the user can just talk.
+         * If it is, the mute is the other half -- Deepgram has no interrupt
+         * message and keeps sending, so a flush alone just makes the agent pause
+         * and resume mid-word a moment later. Measured: 410 kB of story kept
+         * arriving over the 14 s after one tap, every byte of it discarded.
+         *
+         * If it is not -- a tap after the last byte has landed, with only the ring
+         * left to empty -- there is nothing to mute. Flush and stop.
+         *
+         * Either way the microphone stays open and the user can talk immediately,
+         * which is both what the feature promised and what releases the mute.
+         *
+         * Deliberately NOT routed through session_ctl: request() drops anything
+         * arriving while busy or inside COOLDOWN_MS, which is exactly when someone
+         * interrupts. Every call here is a single flag store, safe on the LVGL
+         * task.
          */
         if (audio_io_playback_active()) {
-            ESP_LOGI(TAG, "EVT interrupt");
             audio_io_flush();
-            audio_io_mute_playback(true);
-            s_mute_deadline_ms = now_ms() + MUTE_MAX_MS;
             note_activity();
+            if (s_turn_inbound) {
+                ESP_LOGI(TAG, "EVT interrupt");
+                audio_io_mute_playback(true);
+                s_mute_deadline_ms = now_ms() + MUTE_MAX_MS;
+            } else {
+                /* Distinct from the line above so a serial capture shows which
+                 * path ran -- the tail tap arms no mute and gets no end event. */
+                ESP_LOGI(TAG, "EVT interrupt (tail)");
+            }
         } else {
             /* Nothing to stop. Logged because a ring tap that appears to do
              * nothing is otherwise indistinguishable from a dead touch panel. */
@@ -514,7 +611,11 @@ void app_main(void)
             }
         }
 
-        /* Unsigned compare, so it is correct across the 49-day wrap. */
+        /*
+         * Backstop only. The real release is on_user_started_speaking(); this
+         * catches a tap that is never followed by speech. Unsigned compare, so it
+         * is correct across the 49-day wrap.
+         */
         if (s_mute_deadline_ms != 0 &&
             (now_ms() - s_mute_deadline_ms) < (UINT32_MAX / 2)) {
             end_interrupt("deadline");
