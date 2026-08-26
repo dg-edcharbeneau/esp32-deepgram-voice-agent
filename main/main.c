@@ -39,9 +39,6 @@
 #include "nvs_flash.h"
 
 #include "agent_name.h"
-#include "aec_bench.h"
-#include "heap_probe.h"
-#include "audio_codecs.h"
 #include "audio_io.h"
 #include "boot_button.h"
 #include "dg_agent.h"
@@ -377,10 +374,6 @@ static void enter_provisioning(void)
 
 void app_main(void)
 {
-#if CONFIG_HEAP_PROBE
-    /* Before anything large is allocated, so the hook is armed for all of it. */
-    heap_probe_start();
-#endif
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -429,15 +422,6 @@ void app_main(void)
         ESP_LOGW(TAG, "spectrum display unavailable, continuing headless");
     }
 
-#if CONFIG_AEC_BENCH
-    /*
-     * AFTER ui_start(), deliberately. The display's contiguous render buffer is
-     * the largest single allocation this firmware makes, and a canceller priced
-     * before it would be priced against a heap the device is never actually in.
-     * a4fa137 failed on exactly that distinction.
-     */
-    aec_bench_run();
-#endif
 
     /* After the panel, so the portal's instructions are actually readable. */
     if (!have_creds) {
@@ -532,8 +516,6 @@ void app_main(void)
 
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
-        uint32_t lane_mic, lane_ref, lane_dead;
-        audio_io_lane_peaks(&lane_mic, &lane_ref, &lane_dead);
 
         ui_telemetry_t t;
         ui_get_telemetry(&t);
@@ -612,7 +594,6 @@ void app_main(void)
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32
-                 " lane=%" PRIu32 "/%" PRIu32 "/%" PRIu32 " ovf=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
                  " ialloc=%u",
                  (double)esp_timer_get_time() / 1000000.0,
@@ -624,7 +605,6 @@ void app_main(void)
                  t.mid_avg, t.mid_max, t.high_avg, t.high_max,
                  t.peak_mic, t.peak_agent,
                  s_turns, captured, s_audio_bytes, played, dropped,
-                 lane_mic, lane_ref, lane_dead, audio_codecs_rx_overruns(),
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),

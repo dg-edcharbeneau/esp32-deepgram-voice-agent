@@ -7,9 +7,6 @@ idf_component_register(
         boot_button.c
         dg_agent.c
         audio_io.c
-        audio_codecs.c
-        aec_bench.c
-        heap_probe.c
         ui.c
         face_spectrum.c
         orb_geometry.c
@@ -51,6 +48,4 @@ idf_component_register(
         espressif__esp_lvgl_adapter
         espressif__esp-dsp
         espressif__button
-        espressif__esp-sr
-        spiffs
 )

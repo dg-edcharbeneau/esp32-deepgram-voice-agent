@@ -864,6 +864,54 @@ neither is an AEC problem: send less audio upstream, or find the residual-echo
 margin somewhere other than the canceller. Raising `nlp_level` is the obvious idea
 and it is worth 1.2 dB, which is not enough.
 
+## Where the removed code lives
+
+Everything below was built, measured and then taken back out, on the same
+reasoning `12d285b` gave the first time: default-off scaffolding "made the tree
+imply AEC was in play when it is not, and the next person to read `audio_io.c`
+would have paid for that". The knowledge is in this document; the code is in git.
+
+`git show <sha>` brings any of it back. All on branch `echo-cancellation`.
+
+| artefact | what it was | commit |
+|---|---|---|
+| `main/aec_bench.{c,h}` | the deterministic bench: Espressif's far/near vectors through `aec_process()` per mode, ERLE with echo-only segmentation, heap deltas, NLP sweep | `4c4fd3d`, extended in `200ee86` |
+| `main/audio_codecs.{c,h}` | ES7210 in 4-channel TDM so the echo-reference lane is powered and clocked | `dbd124c` (first proved in `9479446`) |
+| `main/heap_probe.{c,h}` | allocation-failure hook + 50 ms heap sampler; what named the 1,630 B `INTERNAL\|DMA` failure | uncommitted, see `7804177`'s parent tree |
+| AEC in the capture path | `aec_process()` between capture and everything downstream, plus the convergence gate | `c477a1b` |
+| linearity sweep | `CONFIG_AEC_SWEEP_VOLUME`, per-turn `LIN` lines, 128-lag correlation | `dbd124c` |
+| double-talk log | `CONFIG_AEC_DOUBLETALK_LOG`, Part C — written, never produced data | `dbd124c` |
+| `espressif/esp-sr` dependency | pins `esp-dsp` to exactly 1.8.0; nothing published is compatible with `^1.8.2` | `4c4fd3d` |
+| SPIFFS test-vector image | `spiffs_create_partition_image(storage ...)` in the root `CMakeLists.txt`; vectors are downloads, never committed | `4c4fd3d` |
+
+The test vectors themselves are not in the repo — they are ~1.7 MB each and
+fetched from the URLs in Sources. Three of the five fit the 7 MB `storage`
+partition; four do not (93% and spiffsgen refuses it).
+
+### What was kept, and why
+
+Not everything from this branch was scaffolding. Merged into the device because it
+stands on its own:
+
+- **The touch-ring interrupt** (`c477a1b`'s ancestor `148f480`). Works in any room,
+  needs no canceller, and is what a device without echo cancellation should have.
+- **Two real bugs**: `s_last_play_us` written by two tasks as a 64-bit value, the
+  same fault `25e48d4` fixed for `s_speech_us`; and the producer-side carry
+  surviving a stream discontinuity, which offset every sample after an
+  auto-reconnect until a deliberate session stop.
+- **The capture and playback `stereo` buffers in PSRAM.** They never needed to be
+  internal — the codec only copies through them. Measured on the cleaned tree:
+  free internal at session start 74,775 -> 83,003 and largest block
+  32,768 -> 69,632, against the pre-branch build.
+- **This document.**
+
+### If you pick this up again
+
+Start from "Why full duplex was abandoned". The canceller is not the problem and
+re-deriving that will cost you a day. The two walls are bandwidth and residual
+echo, and neither is fixed by tuning the AEC.
+
+
 ## Sources
 
 Read, and load-bearing for the numbers above:

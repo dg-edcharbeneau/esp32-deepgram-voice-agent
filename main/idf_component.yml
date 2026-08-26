@@ -10,21 +10,10 @@ dependencies:
   lvgl/lvgl:
     version: "9.5.0"
     public: true
-  # FFT for the spectrum display, PINNED EXACTLY, and not by preference.
+  # FFT for the spectrum display; the version spec_analyzer_radial proved.
   #
-  # This is a4fa137's open question, now answered: EVERY published esp-sr version
-  # pins esp-dsp to an exact version, and none of them is >= 1.8.2. The newest
-  # (2.5.1) requires exactly 1.8.0, so "^1.8.2" and esp-sr are unsatisfiable
-  # together -- the solver rejects the whole graph rather than choosing.
-  #
-  # Downgrading is safe and already proven: 9af05bc ran this same pin, and only
-  # face_spectrum.c touches esp-dsp, through dsps_fft2r_fc32, dsps_bit_rev_fc32,
-  # dsps_fft2r_init_fc32, dsps_wind_hann_f32 and dsps_mul_f32 -- long-stable APIs
-  # unchanged across these releases. 12d285b moved it to ^1.8.2 only because
-  # esp-sr had just been removed, not because anything needed the newer version.
-  espressif/esp-dsp: "1.8.0"
-  # Echo cancellation. NOT the AFE this time -- a4fa137 measured the AFE at ~70 kB
-  # of internal RAM and it does not fit; the STANDALONE AEC (esp_aec.h) is a
-  # different object with a different price. Used here only by the bench in
-  # main/aec_bench.c, which is default-off.
-  espressif/esp-sr: "^2.1.0"
+  # Pinned to exactly 1.8.0 twice now, both times to satisfy espressif/esp-sr:
+  # EVERY published esp-sr version pins esp-dsp exactly and none is >= 1.8.2, so
+  # the two are unsatisfiable together and the solver rejects the whole graph.
+  # esp-sr is gone again, so this is free to float. See AEC-FINDINGS.md.
+  espressif/esp-dsp: "^1.8.2"
