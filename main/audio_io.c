@@ -301,14 +301,22 @@ static void capture_task(void *arg)
          * comment claimed. Deepgram's "Audio Preprocessing & Barge-In" guide has
          * no AEC setting and explicitly pushes cancellation to the device.
          *
-         * And the device could, in principle: this board wires an echo reference
-         * from the ES8311's output into ES7210 MIC3, sample-aligned because the
-         * same ADC captures it in the same frame. That was proven in commit
-         * 9479446 and measured -- see the echo section of the README. What does
-         * not fit is the canceller: esp-sr's AFE wants ~70 kB of internal RAM
-         * against the ~78 kB free once the display is up, so enabling it stopped
-         * the session completing a TLS handshake at all (a4fa137). Reaching
-         * barge-in needs a much smaller algorithm, not this gate removed.
+         * A CANCELLER WAS BUILT AND IT WORKS. Not the ~70 kB AFE a4fa137 measured
+         * -- that was the wrong object -- but esp-sr's standalone AEC in
+         * FD_LOW_COST, which costs 16 bytes of internal RAM and achieves 17.3 dB
+         * of ERLE against Espressif's own output at 18.3 on their test vectors.
+         * With it running the device stops answering itself: one turn in an empty
+         * room where before there were sixteen in twenty-four seconds.
+         *
+         * IT STILL DOES NOT BUY BARGE-IN, and the gate stays. Two reasons, neither
+         * of them the canceller's: streaming the microphone through the agent's
+         * reply saturates the TCP send queue until a 1,630 B DMA allocation fails
+         * and the session drops, and even while that audio reached Deepgram it
+         * never distinguished a person talking over the agent from the residual
+         * echo. The interrupt on this device is the tap on the display ring.
+         *
+         * The whole investigation, the numbers and where the removed code lives
+         * are in AEC-FINDINGS.md. Read it before removing this gate again.
          */
         if (audio_io_playback_active()) {
             continue;
