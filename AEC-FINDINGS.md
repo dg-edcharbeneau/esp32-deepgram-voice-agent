@@ -31,9 +31,11 @@ nonlinear processing — and on Espressif's own test vectors they made the signa
 internal RAM as well. See "Priced on the bench" below.
 
 The acoustic questions here — the -11 dB signal-to-echo ratio, the linearity
-sweep — have been measured on the device. The canceller itself has now been
-measured too, but **only against recorded vectors**, which says the integration is
-correct and says nothing about this room.
+sweep — have been measured on the device. The canceller has been measured too:
+**17.3 dB of ERLE, against Espressif's own output at 18.3 dB on identical
+frames.** That says the integration is correct and the library performs as
+advertised. It says nothing about this room, because the vectors are Espressif's
+echo path, not ours.
 
 Written 2026-08-25, prompted by turning `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` off
 and hearing the agent answer itself. Revised the same day after an adversarial
@@ -250,36 +252,46 @@ All modes at `filter_length = 4`, `sample_rate = 16000`, 1 mic / 1 ref / 1 out,
 `caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT`, `nlp_level = AEC_NLP_LEVEL_AGGR`.
 Baseline before any of them: 97,811 B free internal, 86,016 B largest block.
 
-| mode | internal | PSRAM | largest block | NLP applied | score |
-|---|---|---|---|---|---|
-| **`FD_LOW_COST`** | **-16 B** | 123.4 kB | **unchanged** | **yes (512)** | **2.6** |
-| `FD_HIGH_PERF` | 8,472 B | 141.5 kB | 81,920 -> 73,728 | yes (512) | 2.8 |
-| `SR_HIGH_PERF` | 8,616 B | 102.5 kB | 81,920 -> 73,728 | **no (0)** | **-1.1** |
-| `SR_LOW_COST` | 500 B | 84.4 kB | unchanged | **no (0)** | **-0.7** |
-| *Espressif's own output* | | | | | *2.3* |
+| mode | internal | PSRAM | largest block | NLP applied | **ERLE** | whole-file |
+|---|---|---|---|---|---|---|
+| **`FD_LOW_COST`** | **-16 B** | 123.4 kB | **unchanged** | **yes (512)** | **17.3 dB** | 2.6 |
+| `FD_HIGH_PERF` | 8,472 B | 141.5 kB | 81,920 -> 73,728 | yes (512) | 17.9 dB | 2.8 |
+| `SR_HIGH_PERF` | 8,616 B | 102.5 kB | 81,920 -> 73,728 | **no (0)** | **-5.9 dB** | -1.1 |
+| `SR_LOW_COST` | 500 B | 84.4 kB | unchanged | **no (0)** | **-5.6 dB** | -0.7 |
+| *Espressif's own output* | | | | | *18.3 dB* | *2.3* |
 
 `aec_get_chunksize()` returns **512** for every mode, matching `handle.frame_size`
 — so `CAPTURE_FRAMES` should be 1024, two frames exactly, rather than today's 1280.
 `aec_destroy()` returns everything; the largest leak seen was 104 B of
 fragmentation noise.
 
-### READ THE SCORE COLUMN CAREFULLY -- IT IS NOT ERLE
+### The two columns, and why there are two
 
-The score is `10*log10(sum(near^2) / sum(out^2))` over the whole file, and **that
-is not echo return loss enhancement.** Espressif's own output scores 2.3 by it,
-and their canceller plainly does better than 2.3 dB of echo suppression. The
-reason is that their vector contains near-end speech, and a canceller must not
-remove the talker — so whole-file energy reduction conflates "removed the echo"
-with "removed everything".
+**ERLE is the real figure**, measured over single-talk frames only: far end active,
+near end silent. **Whole-file** is total energy reduction across the entire vector,
+and it is *not* ERLE — the first version of this bench reported only that, and it
+was misleading. Espressif's own output scores 2.3 by it, and their canceller is
+plainly better than 2.3 dB. The reason is that their vector contains near-end
+speech, a canceller must not remove the talker, and so whole-file energy reduction
+conflates removing the echo with removing everything.
 
-**A real ERLE figure needs echo-only segments** — far end active, near end silent —
-and this bench does not segment. So:
+Nothing labels the single-talk frames, so they are inferred, and the inference is
+worth stating because the result rests on it:
 
-- The column is valid for **RANKING**, because every mode saw identical input.
-- It is valid as an **acceptance test**: ours at 2.6 against theirs at 2.3 says our
-  integration is correct, independently of this room.
-- It is **not** comparable to the 17-30 dB requirement derived earlier in this
-  document. **The achievable ERLE on this hardware remains unmeasured.**
+- during echo-only, `near ~= g * far` for the echo path's gain `g`;
+- during double-talk the talker only ADDS energy, never subtracts.
+
+So across far-active frames the LOW percentile of `near/far` is the echo path
+alone. The bench takes the 20th percentile as `g` and admits frames within 6 dB of
+it. Deliberately conservative: misclassifying double-talk as echo-only would
+*understate* ERLE, which is the safe direction to be wrong in.
+
+On these vectors that finds **210 echo-only frames of 1669 (13%)**, with
+`g = 0.4588` — an echo return loss of 6.8 dB on Espressif's own path. Every mode
+and the reference are scored on the identical frame set.
+
+**Both columns are reproducible**: two runs, same board, gave identical figures to
+the decimal.
 
 ### What the ranking does settle
 
@@ -666,24 +678,33 @@ There may be no setting that does both.
 rebuild — but only with a person talking over the device, and only once the
 canceller is in the live audio path.
 
-## The absolute number is still missing
+## The absolute number, and whose echo path it belongs to
 
-Worth stating plainly, because the bench makes it easy to think otherwise:
-**nobody has measured the ERLE this hardware can achieve.**
+**Measured: `FD_LOW_COST` achieves 17.3 dB of ERLE**, against Espressif's own
+output at 18.3 dB on the identical frames. The canceller does what it claims, and
+our integration gets within a decibel of its author's result.
 
-The bench proves the integration is correct and ranks the modes. Its score column
-is whole-file energy reduction on a vector containing near-end speech, which is
-not ERLE — see the warning under "Priced on the bench". The 17 dB and 30 dB
-targets derived earlier in this document have nothing measured against them yet.
+Held against the requirements derived earlier in this document:
 
-Two things would close it, in order:
-1. **Echo-only segmentation in the bench** — gate the accumulation on far-end
-   active and near-end silent, and the same vectors then yield a real ERLE per
-   mode, still deterministically and still with Espressif's output as the
-   reference.
-2. **The live path** — reference lane and microphone into `aec_process()` on this
-   board, in this room, which is the only thing that answers whether *this*
-   speaker and *this* microphone can be cancelled.
+| target | needs | verdict |
+|---|---|---|
+| residual echo 6 dB under a typical voice | 17.1 dB | **met, barely** |
+| typical echo below the room noise floor | 30.5 dB | not met |
+| worst-case echo below the room noise floor | 42.5 dB | not met |
+
+So on this evidence a canceller stops the agent transcribing itself in ordinary
+conversation, and does *not* bury the echo in silence.
+
+**THE CAVEAT THAT MATTERS: this is Espressif's echo path, not ours.** Their vector
+has an echo return loss of 6.8 dB. This board, measured with the reference lane at
+12 dB, sits at 15-17 dB. Different rooms, different speakers, different coupling —
+17.3 dB does not transfer. What transfers is that the canceller is correctly wired
+and performs to specification, which is exactly what a bench can establish and an
+acoustic test cannot.
+
+The remaining measurement is the live path: reference lane and microphone into
+`aec_process()` on this board, in this room. That is the only thing that answers
+whether *this* speaker and *this* microphone can be cancelled, and it is Stage 4.
 
 So: **do not promise voice barge-in on this board.** The canceller is now known to
 fit, known to be wired correctly, and known to be the FD family. Whether it

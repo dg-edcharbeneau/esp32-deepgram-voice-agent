@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_aec.h"
@@ -116,6 +117,14 @@ static heap_snap_t heap_now(void)
     return h;
 }
 
+/* Echo-only frame map, filled by segment_vectors() below. Declared up here
+ * because bench_reference() has to score the same frames the modes do. */
+#define SEG_MAX_FRAMES 2048
+static float *s_far_rms;
+static float *s_near_rms;
+static bool  *s_echo_only;
+static size_t s_seg_frames;
+
 /* ---------------- ERLE ---------------- */
 
 static double erle_db(double near_energy, double out_energy)
@@ -155,8 +164,8 @@ static void bench_reference(const char *expected_name)
         return;
     }
 
-    double ne = 0.0, oe = 0.0;
-    size_t frame = 0;
+    double ne = 0.0, oe = 0.0, se_n = 0.0, se_o = 0.0;
+    size_t frame = 0, se_frames = 0;
     const size_t skip = (size_t)(SKIP_SECONDS * 16000) / N;
     for (;;) {
         size_t na = wav_read(&near, a, N);
@@ -168,19 +177,147 @@ static void bench_reference(const char *expected_name)
         if ((frame % 50) == 0) {
             vTaskDelay(1);
         }
-        if (frame++ >= skip) {
+        if (frame >= skip) {
             for (size_t i = 0; i < n; i++) {
                 ne += (double)a[i] * a[i];
                 oe += (double)b[i] * b[i];
             }
+            /* Same frames as the modes are scored on, or the comparison is not
+             * like-for-like. N here is 512, which is what chunk turned out to be
+             * for every mode. */
+            if (frame < s_seg_frames && s_echo_only[frame]) {
+                for (size_t i = 0; i < n; i++) {
+                    se_n += (double)a[i] * a[i];
+                    se_o += (double)b[i] * b[i];
+                }
+                se_frames++;
+            }
         }
+        frame++;
     }
-    ESP_LOGI(TAG, "REFERENCE %s: erle=%.1f dB (this is the number to match)",
-             expected_name, erle_db(ne, oe));
+    ESP_LOGI(TAG, "REFERENCE %s: erle=%.1f dB over %u echo-only frames "
+             "| whole-file energy drop %.1f dB  <-- the number to match",
+             expected_name, erle_db(se_n, se_o), (unsigned)se_frames,
+             erle_db(ne, oe));
 
     free(a); free(b);
     wav_close(&near);
     wav_close(&exp);
+}
+
+
+/* ---------------- echo-only segmentation ---------------- */
+
+/*
+ * WHY THIS EXISTS
+ *
+ * The first version of this bench scored 10*log10(sum(near^2)/sum(out^2)) over the
+ * whole file and called it ERLE. It is not. Espressif's own output scores 2.3 dB
+ * by that measure, and their canceller is plainly better than 2.3 dB -- their
+ * vector contains near-end speech, a canceller must not remove the talker, and so
+ * whole-file energy reduction conflates removing the echo with removing
+ * everything.
+ *
+ * ERLE is defined over SINGLE-TALK: far end active, near end silent. Nothing
+ * labels those frames, so they are inferred, and the inference is the interesting
+ * part:
+ *
+ *   During echo-only, near ~= g * far for the echo path's gain g.
+ *   During double-talk, the talker only ADDS energy -- never subtracts.
+ *
+ * So across far-active frames, the LOW percentile of near/far is the echo path
+ * alone; frames near that floor are echo-only, frames well above it contain a
+ * voice. Taking the 20th percentile as g and admitting frames within 6 dB of it
+ * is deliberately conservative: misclassifying double-talk as echo-only would
+ * understate ERLE, which is the safe direction to be wrong in.
+ */
+static int cmp_float(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+/* One pass over the vectors, no AEC involved. Fills s_echo_only. */
+static bool segment_vectors(int chunk)
+{
+    wav_t near, far;
+    if (!wav_open(&near, "aec_in_near.wav")) {
+        return false;
+    }
+    if (!wav_open(&far, "aec_in_far.wav")) {
+        wav_close(&near);
+        return false;
+    }
+
+    int16_t *a = heap_caps_aligned_alloc(16, (size_t)chunk * sizeof(int16_t),
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    int16_t *b = heap_caps_aligned_alloc(16, (size_t)chunk * sizeof(int16_t),
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (a == NULL || b == NULL) {
+        free(a); free(b); wav_close(&near); wav_close(&far);
+        return false;
+    }
+
+    s_seg_frames = 0;
+    while (s_seg_frames < SEG_MAX_FRAMES) {
+        if (wav_read(&near, a, (size_t)chunk) < (size_t)chunk) break;
+        if (wav_read(&far,  b, (size_t)chunk) < (size_t)chunk) break;
+        double ne = 0.0, fe = 0.0;
+        for (int i = 0; i < chunk; i++) {
+            ne += (double)a[i] * a[i];
+            fe += (double)b[i] * b[i];
+        }
+        s_near_rms[s_seg_frames] = (float)sqrt(ne / chunk);
+        s_far_rms[s_seg_frames]  = (float)sqrt(fe / chunk);
+        s_seg_frames++;
+        /* This pass blocks app_main too, and tripped the watchdog once for the
+         * same reason the mode loops did. */
+        if ((s_seg_frames % 50) == 0) {
+            vTaskDelay(1);
+        }
+    }
+    free(a); free(b);
+    wav_close(&near); wav_close(&far);
+
+    if (s_seg_frames < 20) {
+        return false;
+    }
+
+    /* Far-active floor: 5% of the loudest far frame. */
+    float far_max = 0.0f;
+    for (size_t i = 0; i < s_seg_frames; i++) {
+        if (s_far_rms[i] > far_max) far_max = s_far_rms[i];
+    }
+    const float far_floor = far_max * 0.05f;
+
+    /* The echo path's own gain, as the 20th percentile of near/far. */
+    float *ratios = heap_caps_malloc(s_seg_frames * sizeof(float), MALLOC_CAP_SPIRAM);
+    if (ratios == NULL) {
+        return false;
+    }
+    size_t nr = 0;
+    for (size_t i = 0; i < s_seg_frames; i++) {
+        if (s_far_rms[i] > far_floor) {
+            ratios[nr++] = s_near_rms[i] / s_far_rms[i];
+        }
+    }
+    if (nr < 10) { free(ratios); return false; }
+    qsort(ratios, nr, sizeof(float), cmp_float);
+    const float g = ratios[nr / 5];
+    free(ratios);
+
+    size_t n_echo = 0;
+    for (size_t i = 0; i < s_seg_frames; i++) {
+        s_echo_only[i] = (s_far_rms[i] > far_floor) &&
+                         (s_near_rms[i] < g * s_far_rms[i] * 2.0f);
+        if (s_echo_only[i]) n_echo++;
+    }
+
+    ESP_LOGI(TAG, "segmented: %u frames, %u far-active, %u echo-only (%.0f%%), "
+             "echo-path gain g=%.4f (ERL %.1f dB)",
+             (unsigned)s_seg_frames, (unsigned)nr, (unsigned)n_echo,
+             100.0 * n_echo / (double)s_seg_frames, g, -20.0 * log10(g));
+    return n_echo >= 10;
 }
 
 /* ---------------- one mode ---------------- */
@@ -260,8 +397,8 @@ static void bench_mode(const char *label, aec_mode_t mode, uint32_t caps)
     wav_rewind(&near);
     wav_rewind(&far);
 
-    double ne = 0.0, oe = 0.0;
-    size_t frame = 0;
+    double ne = 0.0, oe = 0.0, se_n = 0.0, se_o = 0.0;
+    size_t frame = 0, se_frames = 0;
     const size_t skip = (size_t)(SKIP_SECONDS * 16000) / (size_t)chunk;
     for (;;) {
         size_t nn = wav_read(&near, in, (size_t)chunk);
@@ -276,15 +413,27 @@ static void bench_mode(const char *label, aec_mode_t mode, uint32_t caps)
         if ((frame % 50) == 0) {
             vTaskDelay(1);
         }
-        if (frame++ >= skip) {
+        if (frame >= skip) {
             for (int i = 0; i < chunk; i++) {
                 ne += (double)in[i] * in[i];
                 oe += (double)out[i] * out[i];
             }
+            /* The real ERLE: single-talk frames only. The filter still ran on
+             * every frame -- only the accounting is selective. */
+            if (frame < s_seg_frames && s_echo_only[frame]) {
+                for (int i = 0; i < chunk; i++) {
+                    se_n += (double)in[i] * in[i];
+                    se_o += (double)out[i] * out[i];
+                }
+                se_frames++;
+            }
         }
+        frame++;
     }
 
-    ESP_LOGI(TAG, "%s: RESULT erle=%.1f dB over %u frames", label,
+    ESP_LOGI(TAG, "%s: RESULT erle=%.1f dB over %u echo-only frames "
+             "| whole-file energy drop %.1f dB over %u frames",
+             label, erle_db(se_n, se_o), (unsigned)se_frames,
              erle_db(ne, oe), (unsigned)frame);
 
     free(in); free(ref); free(out);
@@ -321,6 +470,20 @@ void aec_bench_run(void)
         ESP_LOGI(TAG, "vectors mounted: %u of %u bytes used", (unsigned)used, (unsigned)total);
     }
 
+    s_far_rms   = heap_caps_malloc(SEG_MAX_FRAMES * sizeof(float), MALLOC_CAP_SPIRAM);
+    s_near_rms  = heap_caps_malloc(SEG_MAX_FRAMES * sizeof(float), MALLOC_CAP_SPIRAM);
+    s_echo_only = heap_caps_malloc(SEG_MAX_FRAMES * sizeof(bool),  MALLOC_CAP_SPIRAM);
+    if (s_far_rms == NULL || s_near_rms == NULL || s_echo_only == NULL) {
+        ESP_LOGE(TAG, "no PSRAM for segmentation");
+        goto done;
+    }
+    /* chunk is 512 for every mode on this chip -- confirmed by aec_get_chunksize()
+     * and handle.frame_size in the first run. Segment once, reuse for all modes. */
+    if (!segment_vectors(512)) {
+        ESP_LOGE(TAG, "segmentation failed; erle figures would be meaningless");
+        goto done;
+    }
+
     heap_snap_t base = heap_now();
     ESP_LOGI(TAG, "baseline: internal=%u largest=%u spiram=%u",
              (unsigned)base.internal, (unsigned)base.largest, (unsigned)base.spiram);
@@ -347,6 +510,9 @@ void aec_bench_run(void)
      */
     bench_reference("aec_test_fd.wav");
 
+done:
+    free(s_far_rms); free(s_near_rms); free(s_echo_only);
+    s_far_rms = NULL; s_near_rms = NULL; s_echo_only = NULL;
     esp_vfs_spiffs_unregister("storage");
     ESP_LOGI(TAG, "bench done");
 }
