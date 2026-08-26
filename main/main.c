@@ -39,6 +39,7 @@
 #include "nvs_flash.h"
 
 #include "agent_name.h"
+#include "aec_bench.h"
 #include "audio_codecs.h"
 #include "audio_io.h"
 #include "boot_button.h"
@@ -421,6 +422,16 @@ void app_main(void)
         /* A dark screen is not a reason to give up the voice loop. */
         ESP_LOGW(TAG, "spectrum display unavailable, continuing headless");
     }
+
+#if CONFIG_AEC_BENCH
+    /*
+     * AFTER ui_start(), deliberately. The display's contiguous render buffer is
+     * the largest single allocation this firmware makes, and a canceller priced
+     * before it would be priced against a heap the device is never actually in.
+     * a4fa137 failed on exactly that distinction.
+     */
+    aec_bench_run();
+#endif
 
     /* After the panel, so the portal's instructions are actually readable. */
     if (!have_creds) {

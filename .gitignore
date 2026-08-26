@@ -12,3 +12,6 @@ managed_components/
 
 # Internal bug report -- kept local, not published
 agent-edge-host-header-404.md
+
+# Espressif AEC test vectors, fetched not authored -- see CMakeLists.txt
+aec_vectors/

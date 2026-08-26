@@ -8,6 +8,7 @@ idf_component_register(
         dg_agent.c
         audio_io.c
         audio_codecs.c
+        aec_bench.c
         ui.c
         face_spectrum.c
         orb_geometry.c
@@ -49,4 +50,6 @@ idf_component_register(
         espressif__esp_lvgl_adapter
         espressif__esp-dsp
         espressif__button
+        espressif__esp-sr
+        spiffs
 )

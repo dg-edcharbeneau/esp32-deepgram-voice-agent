@@ -265,6 +265,27 @@ menu "Deepgram Agent Device"
             device-wide gain over every channel and silently undoes anything set
             before it.
 
+    config AEC_BENCH
+        bool "Run the AEC bench against Espressif's test vectors at boot"
+        default n
+        help
+            Links espressif/esp-sr and prices its STANDALONE AEC -- memory per
+            mode, and the echo return loss enhancement each one achieves on
+            Espressif's own far/near test pair.
+
+            The point is the comparison. aec_test_fd.wav and aec_test_sr.wav are
+            what Espressif's AEC produces from that pair, so matching their ERLE
+            says our integration is correct INDEPENDENTLY of this room, this
+            speaker and this microphone. Every other measurement in this project
+            conflates those two questions.
+
+            Needs the vectors in the `storage` partition: `idf.py storage-flash`
+            once. The partition was already there and unused, so partitions.csv is
+            unchanged.
+
+            A DEBUG BUILD. It links esp-sr, pins esp-dsp to 1.8.0, adds ~6 MB of
+            flashed data and blocks boot for a couple of minutes. Leave it off.
+
     config AEC_DOUBLETALK_LOG
         bool "Log double-talk measurements (Stage 3, Part C)"
         default n

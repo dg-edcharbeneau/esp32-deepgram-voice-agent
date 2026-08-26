@@ -23,8 +23,17 @@ quieter than the echo. No energy-ratio gate can work at any threshold. See "The
 number that decides everything" below; it supersedes the fallback this document
 used to propose.
 
-Nothing here has been measured on the device. The one measurement that would
-settle it is named in "The go/no-go" at the end.
+**The mode recommendation in this document was wrong, and has been corrected by
+measurement.** It originally chose `AEC_MODE_SR_HIGH_PERF` on the grounds that it
+is cheapest on internal RAM. The SR modes apply **linear filtering only** — no
+nonlinear processing — and on Espressif's own test vectors they made the signal
+*worse*. `AEC_MODE_FD_LOW_COST` is the answer, and it turns out to be cheaper on
+internal RAM as well. See "Priced on the bench" below.
+
+The acoustic questions here — the -11 dB signal-to-echo ratio, the linearity
+sweep — have been measured on the device. The canceller itself has now been
+measured too, but **only against recorded vectors**, which says the integration is
+correct and says nothing about this room.
 
 Written 2026-08-25, prompted by turning `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` off
 and hearing the agent answer itself. Revised the same day after an adversarial
@@ -185,24 +194,31 @@ prices through the AFE. The rest of the table is what was never priced.
 names describe cancellation quality and CPU, not memory, and the high-performance
 modes push more of their state to PSRAM. Since internal RAM is the binding
 constraint here and PSRAM is not — there is ~5.9 MB of it free — the naming works
-against the reader. `SR_HIGH_PERF` at 8.2 kB internal is the cheapest thing in
-the table *for this device*.
+against the reader. **But the published internal figures are wrong for both
+LOW_COST rows** — measured, `FD_LOW_COST` costs 16 bytes, not 30.9 kB. The table
+below is kept because it is what Espressif publishes; the measured column in
+"Priced on the bench" is what to trust.
 
-**Which family.** Espressif's guidance is that the SR modes suit automatic speech
-recognition and the VOIP modes suit audio a human will listen to. Everything this
-device captures goes to Flux, an ASR — nobody ever hears the microphone signal —
-so the SR family is the right one, and it happens to be the cheap one.
+**Which family — and this was answered wrongly here at first.** The original
+reasoning was that the SR modes suit automatic speech recognition, which is what
+this device feeds, so SR was "the right one, and it happens to be the cheap one".
 
-**And `SR_HIGH_PERF` is not merely cheaper — it is the only mode that honours
-`caps`.** Disassembly of the shipped library shows its seventeen
+Both halves are false. The ESP-SR page says SR is *"linear filtering only"* while
+FD is *"linear filtering + nonlinear processing, suitable for Full-Duplex
+dialogue"* — and barge-in is precisely the full-duplex case. Measured on the
+bench, the SR modes score **negative**. FD is also cheaper on internal RAM, not
+dearer. See "Priced on the bench".
+
+**A claim that turned out to be false, kept here because it was acted on.** It
+was reported that `SR_HIGH_PERF` is the only mode honouring `caps`: Disassembly of the shipped library shows its seventeen
 `heap_caps_aligned_calloc` calls all take `config->caps`, so `MALLOC_CAP_SPIRAM`
 moves essentially the whole allocation to PSRAM and leaves the internal draw near
 200 bytes with no single block above ~3 kB. `SR_LOW_COST` ignores the field and
-hard-wires its 18.8 kB internal regardless of what you ask for. That makes the
-choice decisive rather than a trade, and it is the number that most matters
-against a 45,056 B largest free block. **Unverified here** — it comes from an
-adversarial review, not from this project's own disassembly, and should be
-confirmed before it is relied on.
+hard-wires its 18.8 kB internal regardless of what you ask for.
+
+Measured, that is wrong: `SR_LOW_COST` takes 500 B internal and `FD_LOW_COST`
+takes 16 B. It came from a subagent's disassembly, was flagged unverified, was
+relied on anyway to pick a mode, and is now refuted by the bench.
 
 ### Caveat on the numbers
 
@@ -221,6 +237,107 @@ being a property of the chip — which is the reading this document takes. So:
 **treat the RAM column as sound and the CPU column as needing measurement here.**
 The roughly 2× gap between the two pages' CPU figures is about what 240 MHz
 against 400 MHz would predict, which is mild corroboration and not proof.
+
+## Priced on the bench
+
+Measured 2026-08-25 on this board, esp-sr 2.5.1, against Espressif's own AEC test
+vectors rather than against the room. `aec_in_far.wav` and `aec_in_near.wav` are a
+far/near pair; `aec_test_fd.wav` is what Espressif's own AEC produces from them.
+Nothing is played and nothing is recorded — the files are read from flash straight
+into `aec_process()`, so the same bytes go in every run.
+
+All modes at `filter_length = 4`, `sample_rate = 16000`, 1 mic / 1 ref / 1 out,
+`caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT`, `nlp_level = AEC_NLP_LEVEL_AGGR`.
+Baseline before any of them: 97,811 B free internal, 86,016 B largest block.
+
+| mode | internal | PSRAM | largest block | NLP applied | score |
+|---|---|---|---|---|---|
+| **`FD_LOW_COST`** | **-16 B** | 123.4 kB | **unchanged** | **yes (512)** | **2.6** |
+| `FD_HIGH_PERF` | 8,472 B | 141.5 kB | 81,920 -> 73,728 | yes (512) | 2.8 |
+| `SR_HIGH_PERF` | 8,616 B | 102.5 kB | 81,920 -> 73,728 | **no (0)** | **-1.1** |
+| `SR_LOW_COST` | 500 B | 84.4 kB | unchanged | **no (0)** | **-0.7** |
+| *Espressif's own output* | | | | | *2.3* |
+
+`aec_get_chunksize()` returns **512** for every mode, matching `handle.frame_size`
+— so `CAPTURE_FRAMES` should be 1024, two frames exactly, rather than today's 1280.
+`aec_destroy()` returns everything; the largest leak seen was 104 B of
+fragmentation noise.
+
+### READ THE SCORE COLUMN CAREFULLY -- IT IS NOT ERLE
+
+The score is `10*log10(sum(near^2) / sum(out^2))` over the whole file, and **that
+is not echo return loss enhancement.** Espressif's own output scores 2.3 by it,
+and their canceller plainly does better than 2.3 dB of echo suppression. The
+reason is that their vector contains near-end speech, and a canceller must not
+remove the talker — so whole-file energy reduction conflates "removed the echo"
+with "removed everything".
+
+**A real ERLE figure needs echo-only segments** — far end active, near end silent —
+and this bench does not segment. So:
+
+- The column is valid for **RANKING**, because every mode saw identical input.
+- It is valid as an **acceptance test**: ours at 2.6 against theirs at 2.3 says our
+  integration is correct, independently of this room.
+- It is **not** comparable to the 17-30 dB requirement derived earlier in this
+  document. **The achievable ERLE on this hardware remains unmeasured.**
+
+### What the ranking does settle
+
+**FD, not SR, and it is not close.** The SR modes score negative — they add energy
+rather than removing it. The cause is visible rather than inferred:
+`aec_nlp_process()` documents "or 0 if NLP is not applied", and it returns **512
+for both FD modes and 0 for both SR modes**. Linear filtering alone, on a vector
+containing double-talk, does not help.
+
+This confirms the ESP-SR page ("SR: linear filtering only"; "FD: linear filtering
++ nonlinear processing, suitable for Full-Duplex dialogue") and **contradicts the
+header**, whose `aec_create()` doc comment says "recommend to set
+AEC_MODE_SR_LOW_COST". Barge-in is the full-duplex case; take the page's advice,
+not the header's.
+
+### The published table is wrong for the LOW_COST modes
+
+Published against measured internal RAM, same chip, `caps` set to PSRAM:
+
+| mode | published | measured | |
+|---|---|---|---|
+| `FD_LOW_COST` | 30.9 kB | **-16 B** | published figure is ~2000x the truth |
+| `SR_LOW_COST` | 18.8 kB | 500 B | |
+| `SR_HIGH_PERF` | 8.2 kB | 8,616 B | matches |
+| `FD_HIGH_PERF` | 20.3 kB | 8,472 B | |
+
+The HIGH_PERF rows are close to published; the LOW_COST rows are not remotely.
+The likely explanation is that the published figures were taken without `caps`
+steering, but that is a guess — what is certain is that **the row that made
+FD_LOW_COST look unaffordable is off by three orders of magnitude**, and the mode
+this document rejected on memory grounds is in fact the cheapest of the four.
+
+**The `caps` claim in this document was also wrong.** It said only `SR_HIGH_PERF`
+honours the field and that `SR_LOW_COST` "ignores it and hard-wires 18.8 kB
+internal". Measured, `SR_LOW_COST` takes 500 B and `FD_LOW_COST` takes 16 B. That
+claim came from a subagent's disassembly, was flagged unverified, and is now
+refuted. One caveat on the reverse test: running `FD_LOW_COST` with
+`MALLOC_CAP_DEFAULT` gave 284 B internal, barely different — because this build
+sets `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096`, so large allocations already
+prefer PSRAM. The `caps` flag could not be isolated by that comparison.
+
+### Why largest-block is the number to watch, and why it is fine
+
+`a4fa137` failed because largest contiguous internal block collapsed 49,152 ->
+3,584 and mbedTLS could not get a handshake buffer. Both LOW_COST modes leave
+largest block **completely unchanged**; the HIGH_PERF modes cost 8 kB of it.
+Note the baseline here is 86,016 B because the bench runs at boot, before a
+session; with a live session this board measures 17,408-31,744 B. FD_LOW_COST
+taking essentially nothing internal is what makes that irrelevant.
+
+### How to re-run it
+
+`CONFIG_AEC_BENCH=y`, then `idf.py flash` and `idf.py storage-flash` once. The
+vectors live in the `storage` SPIFFS partition, which was already in
+`partitions.csv` and unused, so no layout change was needed. Only three of the
+five vectors fit: 6.8 MB is 93% of the 7 MB partition and spiffsgen refuses it,
+where three files is 70%. `aec_test_sr.wav` is the one left out; swap it in for
+`aec_test_fd.wav` to check SR against its reference.
 
 ## The budget it has to fit
 
@@ -362,13 +479,16 @@ garbage, so the filter never converges and nothing says so.
 
 **Ranking, on internal RAM, which is what decides it:**
 
-1. esp-sr standalone AEC, `SR_HIGH_PERF` — ~200 B internal with `caps=SPIRAM`
-   (8.2 kB published), already a component, already ported.
-2. WebRTC AECM — ~4.3 kB internal, ~25.2 kB PSRAM. The right answer *if* the
-   reference has to be the software tap.
-3. esp-sr standalone AEC, `SR_LOW_COST` — 18.8 kB internal, and `caps` is ignored.
+1. **esp-sr standalone AEC, `FD_LOW_COST`** — 16 B internal, 123 kB PSRAM,
+   largest block untouched, NLP active, and it matches Espressif's own output on
+   their vectors. Measured, not published.
+2. esp-sr standalone AEC, `FD_HIGH_PERF` — 8.5 kB internal, 141 kB PSRAM, scores
+   marginally higher (2.8 vs 2.6) but costs 8 kB of largest block for it.
+3. WebRTC AECM — ~4.3 kB internal, ~25.2 kB PSRAM. Still the right answer *if* the
+   reference ever has to be the software tap, whose lead wanders 0-90 ms.
 4. SpeexDSP MDF — 115.8 kB, mostly relocatable to PSRAM, own port.
-5. Bespoke PBFDAF — rejected, above.
+5. esp-sr `SR_*` — **do not use.** Linear filtering only, no NLP, scored negative.
+6. Bespoke PBFDAF — rejected, above.
 
 ## The cheap fallback does not exist
 
@@ -506,12 +626,17 @@ not be restored verbatim:
    which is `a4fa137`'s failure mode arriving by a different route, and a one-line
    prevention.
 
-Then the canceller: `AEC_MODE_SR_HIGH_PERF`, `caps = MALLOC_CAP_SPIRAM |
-MALLOC_CAP_8BIT`, `sample_rate = 16000` exactly (the library branches on the
-literal and falls back otherwise), `filter_length = 4`, `mic_num = ref_num =
-out_num = 1`. `aec_get_chunksize()` returns 512, so **`CAPTURE_FRAMES` should move
-from 1280 to 1024** — two AEC frames exactly, remainder zero, send rate still
-~15.6/s. Leaving it at 1280 forces an alternating 256/0 residue.
+Then the canceller: **`AEC_MODE_FD_LOW_COST`**, `caps = MALLOC_CAP_SPIRAM |
+MALLOC_CAP_8BIT`, `sample_rate = 16000`, `filter_length = 4`, `mic_num = ref_num =
+out_num = 1`, `nlp_level` to be tuned on hardware. `aec_get_chunksize()` returns
+512 — confirmed on device, matching `handle.frame_size` — so **`CAPTURE_FRAMES`
+should move from 1280 to 1024**, two AEC frames exactly, remainder zero, send rate
+still ~15.6/s. Leaving it at 1280 forces an alternating 256/0 residue.
+
+Buffers passed to `aec_process()` must come from `heap_caps_aligned_alloc(16, ...)`
+— the header warns about it twice. `audio_io.c`'s capture buffers currently use
+plain `heap_caps_malloc`; the aligned pattern already exists in
+`face_spectrum.c`.
 
 `partitions.csv` needs no change: esp-sr's model packing is guarded and its
 `else()` branch is a no-op, and the factory partition is 8 MB against a 1,647,920 B
@@ -527,15 +652,42 @@ canceller does.
 
 ## A second risk no measurement settles
 
-Even if linearity passes and the canceller fits and runs, the SR modes' non-linear
-processing suppresses hardest *during double-talk* — which is the barge-in moment.
-`AEC_NLP_LEVEL_AGGR` may stop the empty-room loop while also swallowing a
-normal-volume interruption; `NORMAL` leaks more echo. There may be no setting that
-does both. It is tunable only on hardware with a person present, and it is the
-most likely way this fails *after* fitting, running and passing the linearity test.
+This section was written about the wrong mode. It described `AEC_NLP_LEVEL_AGGR`
+as a risk while recommending SR — where, as the bench then showed,
+`aec_nlp_process()` returns 0 and the NLP level does nothing at all. Corrected:
 
-So: **do not promise voice barge-in on this board.** It is probably achievable. It
-is not assured.
+**Now that the mode is FD, the risk is real.** NLP is active (`aec_nlp_process()`
+returns 512), and non-linear processing suppresses hardest *during double-talk*,
+which is exactly the barge-in moment. `AEC_NLP_LEVEL_AGGR` may stop the empty-room
+loop while also swallowing a normal-volume interruption; `NORMAL` leaks more echo.
+There may be no setting that does both.
+
+`aec_set_nlp_level()` changes it on a live handle, so this is tunable without a
+rebuild — but only with a person talking over the device, and only once the
+canceller is in the live audio path.
+
+## The absolute number is still missing
+
+Worth stating plainly, because the bench makes it easy to think otherwise:
+**nobody has measured the ERLE this hardware can achieve.**
+
+The bench proves the integration is correct and ranks the modes. Its score column
+is whole-file energy reduction on a vector containing near-end speech, which is
+not ERLE — see the warning under "Priced on the bench". The 17 dB and 30 dB
+targets derived earlier in this document have nothing measured against them yet.
+
+Two things would close it, in order:
+1. **Echo-only segmentation in the bench** — gate the accumulation on far-end
+   active and near-end silent, and the same vectors then yield a real ERLE per
+   mode, still deterministically and still with Espressif's output as the
+   reference.
+2. **The live path** — reference lane and microphone into `aec_process()` on this
+   board, in this room, which is the only thing that answers whether *this*
+   speaker and *this* microphone can be cancelled.
+
+So: **do not promise voice barge-in on this board.** The canceller is now known to
+fit, known to be wired correctly, and known to be the FD family. Whether it
+suppresses enough is still unmeasured.
 
 ## Open risks
 
@@ -607,6 +759,33 @@ Leads, not read in depth:
 - [espressif/esp-box#185][box] — a comparable S3 board asking for an AEC example.
 - [`speexdsp/include/speex/speex_echo.h`][speexh]
 - [rjsachse/ESP32-SpeexDSP][speexesp]
+
+The test vectors, from the page's own `Test Audio Resources` section, base URL
+`https://docs.espressif.com/projects/esp-sr/en/latest/esp32s3/_downloads/<hash>/<file>`:
+
+| file | role | hash |
+|---|---|---|
+| `aec_in_far.wav` | far end, the playback reference | `5f945a2ceda76a8fc345d85261eeca63` |
+| `aec_in_near.wav` | near end, microphone with echo | `f5edb84d0389c362d01509694da332f2` |
+| `aec_test_fd.wav` | FD expected output | `89b30961e2fc8073504a6002059ede11` |
+| `aec_test_sr.wav` | SR expected output | `6996684bc7bf82f827f19815b51bf6a6` |
+| `aec_test_voip.wav` | VOIP expected output | `3e51d2f8ce5c409d19ccd63def1718dd` |
+
+All mono, 16 kHz, 16-bit, 53.2 s — verified by parsing the headers on device,
+because the page states none of it.
+
+Measured on this board by `main/aec_bench.c` on 2026-08-25, against those vectors: the per-mode table, the NLP probe, `aec_get_chunksize()` = 512, and the
+refutation of the published LOW_COST internal-RAM figures. The bench is
+default-off behind `CONFIG_AEC_BENCH`.
+
+From the shipped header rather than the page —
+`managed_components/espressif__esp-sr/include/esp32s3/esp_aec.h`: `aec_process()`
+alongside `aec_linear_process()` and `aec_nlp_process()` (the page mentions only
+the first); the warning that buffers must come from `heap_caps_aligned_alloc()`;
+`aec_handle_t` exposing `frame_size` and a copy of the config; and the
+`aec_create()` doc comment recommending `AEC_MODE_SR_LOW_COST`, which contradicts
+the page's own recommendation of `AEC_MODE_FD_LOW_COST` and is contradicted in
+turn by measurement.
 
 In this repo, cited by commit: `a4fa137` (the AFE measurement and its numbers),
 `9479446` (4-channel TDM bring-up, the per-lane peak table, the two I2S facts),
