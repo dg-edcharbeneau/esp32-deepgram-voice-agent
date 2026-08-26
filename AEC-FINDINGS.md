@@ -428,7 +428,8 @@ non-TDM route to MIC3 — is cut on this board (R48 is NC), so **4-channel TDM i
 the only way the reference reaches the S3**.
 
 `9479446` proved it and the code is recoverable: `git show 9479446` brings back
-`main/audio_codecs.{c,h}` (206 + 46 lines) plus 135 lines of `audio_io.c`. Two
+`main/audio_codecs.{c,h}` (206 + 46 lines) plus 135 lines of `audio_io.c` -- all
+since removed again, see "Where the removed code lives". Two
 non-obvious facts live in that diff:
 
 - The S3's I2S RX cannot be put in TDM mode independently of TX — they share
@@ -877,7 +878,7 @@ would have paid for that". The knowledge is in this document; the code is in git
 |---|---|---|
 | `main/aec_bench.{c,h}` | the deterministic bench: Espressif's far/near vectors through `aec_process()` per mode, ERLE with echo-only segmentation, heap deltas, NLP sweep | `4c4fd3d`, extended in `200ee86` |
 | `main/audio_codecs.{c,h}` | ES7210 in 4-channel TDM so the echo-reference lane is powered and clocked | `dbd124c` (first proved in `9479446`) |
-| `main/heap_probe.{c,h}` | allocation-failure hook + 50 ms heap sampler; what named the 1,630 B `INTERNAL\|DMA` failure | uncommitted, see `7804177`'s parent tree |
+| `main/heap_probe.{c,h}` | allocation-failure hook + 50 ms heap sampler; what named the 1,630 B `INTERNAL\|DMA` failure | `7804177` |
 | AEC in the capture path | `aec_process()` between capture and everything downstream, plus the convergence gate | `c477a1b` |
 | linearity sweep | `CONFIG_AEC_SWEEP_VOLUME`, per-turn `LIN` lines, 128-lag correlation | `dbd124c` |
 | double-talk log | `CONFIG_AEC_DOUBLETALK_LOG`, Part C — written, never produced data | `dbd124c` |
@@ -954,7 +955,8 @@ The test vectors, from the page's own `Test Audio Resources` section, base URL
 All mono, 16 kHz, 16-bit, 53.2 s — verified by parsing the headers on device,
 because the page states none of it.
 
-Measured on this board by `main/aec_bench.c` on 2026-08-25, against those vectors: the per-mode table, the NLP probe, `aec_get_chunksize()` = 512, and the
+Measured on this board by `main/aec_bench.c` on 2026-08-25 -- since removed, see
+"Where the removed code lives" -- against those vectors: the per-mode table, the NLP probe, `aec_get_chunksize()` = 512, and the
 refutation of the published LOW_COST internal-RAM figures. The bench is
 default-off behind `CONFIG_AEC_BENCH`.
 
