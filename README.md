@@ -1039,10 +1039,23 @@ which no threshold can separate from noise. The reference lane does not rescue i
 `9479446`'s own numbers put the lane *quieter* than the microphones, an echo return
 loss of about -2.4 dB.
 
-Cancellation is the only acoustic route, it needs 17-30 dB of ERLE, and whether
-this hardware can deliver that is unmeasured. See
-[AEC-FINDINGS.md](AEC-FINDINGS.md) for the arithmetic, the price list and the one
-measurement that decides it.
+Cancellation is the only acoustic route, and it was built and measured: esp-sr's
+standalone AEC in `AEC_MODE_FD_LOW_COST` achieves **17.3 dB of ERLE** on
+Espressif's own test vectors against their own output's 18.3, and with it running
+the device stops answering itself in an empty room -- one turn where before there
+were sixteen in twenty-four seconds.
+
+**It still does not give barge-in, and full duplex is off.** Two independent
+reasons: streaming the microphone through the agent's reply saturates the TCP send
+queue until a TLS allocation fails and the session drops, and even while that
+audio was reaching Deepgram it never distinguished a person talking over the agent
+from the residual echo. The interrupt on this device is the **tap on the display
+ring**, which works in any room and needs no canceller.
+
+The whole investigation, including the negative result and the measurement errors
+made along the way, is in [AEC-FINDINGS.md](AEC-FINDINGS.md). The canceller,
+the bench and the four-channel reference lane are all still in the tree,
+default-off, for whoever picks it up.
 
 **Update, 2026-08-25: the 70 kB was the AFE, not the canceller.** esp-sr also
 ships a standalone AEC — `aec_create_from_config()` / `aec_process()`, no ring

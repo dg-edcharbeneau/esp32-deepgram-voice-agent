@@ -23,6 +23,14 @@ quieter than the echo. No energy-ratio gate can work at any threshold. See "The
 number that decides everything" below; it supersedes the fallback this document
 used to propose.
 
+**OUTCOME: full duplex does not work on this board, and the device ships half
+duplex with a touch interrupt.** The canceller is real, measured and correct --
+17.3 dB of ERLE against Espressif's own 18.3 on their vectors -- and it does stop
+the device answering itself. It fails for two independent reasons that only appear
+together on live hardware, both recorded under "Why full duplex was abandoned" at
+the end. Everything above that section is still true and still worth having; it is
+the road that led there.
+
 **The mode recommendation in this document was wrong, and has been corrected by
 measurement.** It originally chose `AEC_MODE_SR_HIGH_PERF` on the grounds that it
 is cheapest on internal RAM. The SR modes apply **linear filtering only** — no
@@ -776,6 +784,85 @@ with zero `esp_codec_dev_read/write` failures.
 while mic lanes read 11,439-12,353. Today's mic peaks are 25,102 — about 6 dB
 hotter — which puts the reference near 16-19 k. Headroom is thin, not absent, and
 a clipped reference is a nonlinearity in the one signal that must be clean.
+
+## Why full duplex was abandoned
+
+Written 2026-08-26, after taking `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` off with the
+canceller running. Two reasons, either of which would be enough.
+
+### 1. The link cannot carry it
+
+With the gate on, the device sends nothing while the agent speaks. With it off, it
+pushes 32 kB/s upstream continuously, straight through the inbound reply burst.
+Internal RAM then falls in regular ~3,656 B steps -- about 2.5 x MSS, the size of a
+queued TCP segment chain -- until a 1,630 B `MALLOC_CAP_INTERNAL|DMA|8BIT`
+allocation fails, TLS drops and the WebSocket reconnects. Fourteen sessions in
+200 seconds.
+
+It is not a leak: free internal recovers fully on teardown, so the memory is held
+by the connection. `sdkconfig.defaults` already documents the other side of the
+same wall -- the stock 5,760 send buffer was raised to 23,040 precisely because a
+full queue makes the socket unwritable and the client treats that as fatal.
+Measured, moving between those walls:
+
+| `LWIP_TCP_SND_BUF_DEFAULT` | lowest free internal | alloc failures | unwritable-socket failures |
+|---|---|---|---|
+| 23,040 *(project default)* | 4,299 | 3 | 1 |
+| 8,640 | 12,495 | 2 | 6 |
+
+Reducing it raises the floor and trades one failure for the other. There is no
+value that avoids both, because the problem is the bandwidth full duplex creates,
+not the size of the buffer absorbing it.
+
+Returning 12.3 kB of internal RAM -- moving the capture and playback `stereo`
+buffers to PSRAM, which they did not need to leave -- bought 25 seconds before the
+same floor. That change is worth keeping on its own merits and is still in the
+tree; it is not a fix for this.
+
+### 2. It does not deliver barge-in anyway
+
+The point of all of it. With the canceller running, the gate off, and a person
+talking over the agent at normal distance and volume: **`UserStartedSpeaking` never
+fired during playback.** The telemetry shows `mic=` climbing steadily throughout
+(477k -> 694k), so the microphone audio was reaching Deepgram the whole time. It
+simply was not distinguished from the residual echo.
+
+That is the -11 dB signal-to-echo ratio arriving where the arithmetic said it
+would. 16.1 dB of ERLE at `nlp=NORMAL` sits just under the 17.1 dB needed to put
+residual echo 6 dB below a typical voice, and `AGGR` offers only 1.2 dB more while
+suppressing hardest during double-talk -- the exact moment in question.
+
+### A measurement error worth recording
+
+The Stage 4 commit reported "mic peak while the agent speaks: 28-34, room floor,
+against 25,102 uncancelled" as evidence the canceller worked. **That was the wrong
+signal.** The `mic peak` line is computed at `audio_io.c:570`, in the downmix loop,
+while `aec_process()` runs at `:604` -- so it has always shown the UNCANCELLED
+microphone. The figures quoted were a quiet room during a quiet passage.
+
+The empty-room result stands on its own and is not affected: one turn instead of
+sixteen, three runs in a row, no self-triggering. The canceller does work. The
+level figure printed next to it was measuring something else, and this project has
+now made that class of error three times -- largest-block against total-free in
+`a4fa137`, RMS against peak in the ERLE targets, and pre-AEC against post-AEC here.
+
+### What ships
+
+Half duplex, mic gate on, plus the touch-ring interrupt from Stage 1 -- which works
+in every room, needs no canceller, and is what a device without echo cancellation
+should have had from the start.
+
+Kept in the tree, all default-off: the canceller (`CONFIG_AEC_ENABLE`), the bench
+(`CONFIG_AEC_BENCH`), the heap probe (`CONFIG_HEAP_PROBE`) and the four-channel
+reference lane, which is unconditional because it is the foundation any future
+attempt needs. With the canceller off the branch costs ~1-3 fps against the
+original 25 and IMPROVES largest free block at session start, 32,768 -> 59,392,
+because of the PSRAM buffer move.
+
+**If anyone picks this up again**, the two walls above are the thing to attack, and
+neither is an AEC problem: send less audio upstream, or find the residual-echo
+margin somewhere other than the canceller. Raising `nlp_level` is the obvious idea
+and it is worth 1.2 dB, which is not enough.
 
 ## Sources
 

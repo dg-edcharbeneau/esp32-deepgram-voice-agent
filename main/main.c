@@ -40,6 +40,7 @@
 
 #include "agent_name.h"
 #include "aec_bench.h"
+#include "heap_probe.h"
 #include "audio_codecs.h"
 #include "audio_io.h"
 #include "boot_button.h"
@@ -376,6 +377,11 @@ static void enter_provisioning(void)
 
 void app_main(void)
 {
+#if CONFIG_HEAP_PROBE
+    /* Before anything large is allocated, so the hook is armed for all of it. */
+    heap_probe_start();
+#endif
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         /* Wi-Fi keeps calibration data in NVS; a stale partition must be wiped

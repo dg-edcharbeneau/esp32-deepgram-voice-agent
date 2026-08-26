@@ -314,6 +314,27 @@ menu "Deepgram Agent Device"
         default 1 if AEC_NLP_AGGR
         default 2 if AEC_NLP_VERYAGGR
 
+    config HEAP_PROBE
+        bool "Log what fails to allocate, and when internal RAM collapses"
+        default n
+        help
+            Two instruments for one question: with the canceller running and the
+            mic gate off, free internal RAM falls from ~45 kB to ~11 kB in under
+            two seconds and esp-aes then cannot allocate, so TLS fails and the
+            session drops every fifteen seconds.
+
+            The first hooks heap_caps_register_failed_alloc_callback() and prints
+            the exact size and capability mask that failed -- turning "esp-aes:
+            Failed to allocate memory" into a request that can be attributed.
+
+            The second samples free and largest-block every 50 ms and reports each
+            new floor. The TLM line samples once a second, which is too coarse to
+            tell one large allocation from a hundred small ones, and that
+            distinction decides which fix applies.
+
+            A DEBUG BUILD. The failure hook logs from whatever context ran out of
+            memory, including an ISR.
+
     config AEC_BENCH
         bool "Run the AEC bench against Espressif's test vectors at boot"
         default n

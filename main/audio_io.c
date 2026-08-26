@@ -337,10 +337,20 @@ static void playback_task(void *arg)
     /* Mono in, stereo out: the codec is open with two channels, so every
      * sample has to be written twice. */
     int16_t *mono = heap_caps_malloc(CHUNK_MONO, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    /* Mono in, stereo out, and the codec is open at 32 bits, so each sample
-     * leaves as two 32-bit words. */
-    int32_t *stereo = heap_caps_malloc((CHUNK_MONO / sizeof(int16_t)) * 2 * sizeof(int32_t),
-                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /*
+     * Mono in, stereo out, and the codec is open at 32 bits, so each sample
+     * leaves as two 32-bit words.
+     *
+     * PSRAM, not internal. esp_codec_dev_write() copies out of here into the I2S
+     * DMA descriptors, so this buffer never needs to be DMA-capable itself -- and
+     * internal RAM is the scarce resource. Measured: with the canceller running
+     * and the mic gate off, free internal fell to 4,071 B with a largest block of
+     * 1,536 and a 1,630 B AES DMA request then failed, taking the TLS session
+     * with it. This is 4 kB of that back.
+     */
+    int32_t *stereo = heap_caps_aligned_alloc(16,
+                                              (CHUNK_MONO / sizeof(int16_t)) * 2 * sizeof(int32_t),
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (mono == NULL || stereo == NULL) {
         ESP_LOGE(TAG, "no internal RAM for playback buffers");
         vTaskDelete(NULL);
@@ -504,11 +514,21 @@ static void capture_task(void *arg)
     const size_t stereo_bytes = CAPTURE_FRAMES * AEC_LANES * sizeof(int16_t);
     const size_t mono_bytes = CAPTURE_FRAMES * sizeof(int16_t);
 
-    /* Aligned: esp_aec.h requires 16-byte alignment for anything handed to
-     * aec_process(), and `mono` is handed to it. The pattern is already used for
-     * the FFT buffers in face_spectrum.c. */
+    /*
+     * `stereo` is PSRAM and `mono` is internal, and the split is deliberate.
+     *
+     * stereo is only the destination esp_codec_dev_read() copies the DMA
+     * descriptors into; nothing hands it to the canceller, so it need not be
+     * internal and at 8 kB it is the largest single block this file was holding.
+     * mono IS handed to aec_process(), which esp_aec.h says must be 16-byte
+     * aligned, and it stays internal because the filter touches it twice a block.
+     *
+     * The 12 kB the two stereo buffers return is aimed at a measured failure: free
+     * internal reaching 4,071 B with a largest block of 1,536, at which point a
+     * 1,630 B AES DMA allocation failed and the TLS session dropped.
+     */
     int16_t *stereo = heap_caps_aligned_alloc(16, stereo_bytes,
-                                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     int16_t *mono = heap_caps_aligned_alloc(16, mono_bytes,
                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (stereo == NULL || mono == NULL) {
