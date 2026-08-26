@@ -49,7 +49,7 @@ static const char *TAG = "audio_io";
 
 /* How long after the last playback write we still consider the agent to be
  * speaking, covering audio already handed to the I2S DMA. */
-#define PLAYBACK_TAIL_US 300000
+#define PLAYBACK_TAIL_MS 300
 
 static esp_codec_dev_handle_t s_spk;
 static esp_codec_dev_handle_t s_mic;
@@ -61,8 +61,47 @@ static audio_io_tap_t s_cap_tap;
 static volatile uint32_t s_played;
 static volatile uint32_t s_dropped;
 static volatile uint32_t s_captured;
-static volatile int64_t s_last_play_us;
+/*
+ * Playback recency, SPLIT BY OWNER. Two tasks stamp this -- the drain task after
+ * a codec write, and the WebSocket task as it queues -- and a 32-bit CPU stores a
+ * 64-bit value in two halves, so a reader could land mid-write and see a time
+ * that never existed. Exactly the fault 25e48d4 fixed for s_speech_us, and the
+ * same remedy: one writer each, narrowed to 32-bit ms where a store is
+ * indivisible. The reader takes the smaller elapsed, which is correct across the
+ * 49-day wrap in a way that comparing the stamps themselves is not.
+ */
+static volatile uint32_t s_play_write_ms;  /* drain task only */
+static volatile uint32_t s_play_queue_ms;  /* WebSocket task only */
 static volatile bool s_flush_pending;
+
+/*
+ * Set when a turn has been interrupted -- see audio_io_mute_playback(). The
+ * producer drops everything until the turn ends, because flushing the ring alone
+ * only silences what has already arrived: Deepgram keeps sending the rest of the
+ * reply, the ring refills, and the agent resumes mid-word a moment later.
+ */
+static volatile bool s_play_muted;
+
+/*
+ * Set by anything that BREAKS THE BYTE STREAM -- a flush, an interrupt. Consumed
+ * by audio_io_play(), which owns the carry and is the only task allowed to touch
+ * it: clearing the carry from the interrupting task instead would race a stitch
+ * already in progress, and dropping a byte misaligns the stream just as surely as
+ * keeping a stale one.
+ *
+ * Without this, a half sample left over from a cut-off turn is stitched onto the
+ * FIRST chunk of the next one, and every sample after it is offset by a byte for
+ * the rest of the session. It is not a click; it is white noise that never
+ * recovers.
+ */
+static volatile bool s_play_gap;
+
+/* Milliseconds since boot, truncated. One 32-bit store, so no writer can tear it
+ * and no reader can catch it half-updated. */
+static inline uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
 static int s_volume;
 static bool s_volume_from_nvs;
 
@@ -116,7 +155,12 @@ static void playback_task(void *arg)
     /* Mono in, stereo out: the codec is open with two channels, so every
      * sample has to be written twice. */
     int16_t *mono = heap_caps_malloc(CHUNK_MONO, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    int16_t *stereo = heap_caps_malloc(CHUNK_MONO * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* PSRAM: esp_codec_dev_write() copies out of here into the I2S DMA
+     * descriptors, so it never needs to be DMA-capable itself, and internal RAM
+     * is the scarce resource on this board. Measured over the AEC work: moving
+     * this and its capture twin took largest free internal block at session start
+     * from 32,768 to 59,392. */
+    int16_t *stereo = heap_caps_malloc(CHUNK_MONO * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (mono == NULL || stereo == NULL) {
         ESP_LOGE(TAG, "no internal RAM for playback buffers");
         vTaskDelete(NULL);
@@ -186,7 +230,7 @@ static void playback_task(void *arg)
         if (err != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "esp_codec_dev_write failed: %d", err);
         }
-        s_last_play_us = esp_timer_get_time();
+        s_play_write_ms = now_ms();
     }
 }
 
@@ -197,7 +241,10 @@ static void capture_task(void *arg)
     const size_t stereo_bytes = CAPTURE_FRAMES * CODEC_CHANNELS * sizeof(int16_t);
     const size_t mono_bytes = CAPTURE_FRAMES * sizeof(int16_t);
 
-    int16_t *stereo = heap_caps_malloc(stereo_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* PSRAM, same reasoning as the playback side: this is only where
+     * esp_codec_dev_read() copies the DMA descriptors to. `mono` stays internal
+     * because every consumer walks it per sample. */
+    int16_t *stereo = heap_caps_malloc(stereo_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     int16_t *mono = heap_caps_malloc(mono_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (stereo == NULL || mono == NULL) {
         ESP_LOGE(TAG, "no internal RAM for capture buffers");
@@ -254,14 +301,22 @@ static void capture_task(void *arg)
          * comment claimed. Deepgram's "Audio Preprocessing & Barge-In" guide has
          * no AEC setting and explicitly pushes cancellation to the device.
          *
-         * And the device could, in principle: this board wires an echo reference
-         * from the ES8311's output into ES7210 MIC3, sample-aligned because the
-         * same ADC captures it in the same frame. That was proven in commit
-         * 9479446 and measured -- see the echo section of the README. What does
-         * not fit is the canceller: esp-sr's AFE wants ~70 kB of internal RAM
-         * against the ~78 kB free once the display is up, so enabling it stopped
-         * the session completing a TLS handshake at all (a4fa137). Reaching
-         * barge-in needs a much smaller algorithm, not this gate removed.
+         * A CANCELLER WAS BUILT AND IT WORKS. Not the ~70 kB AFE a4fa137 measured
+         * -- that was the wrong object -- but esp-sr's standalone AEC in
+         * FD_LOW_COST, which costs 16 bytes of internal RAM and achieves 17.3 dB
+         * of ERLE against Espressif's own output at 18.3 on their test vectors.
+         * With it running the device stops answering itself: one turn in an empty
+         * room where before there were sixteen in twenty-four seconds.
+         *
+         * IT STILL DOES NOT BUY BARGE-IN, and the gate stays. Two reasons, neither
+         * of them the canceller's: streaming the microphone through the agent's
+         * reply saturates the TCP send queue until a 1,630 B DMA allocation fails
+         * and the session drops, and even while that audio reached Deepgram it
+         * never distinguished a person talking over the agent from the residual
+         * echo. The interrupt on this device is the tap on the display ring.
+         *
+         * The whole investigation, the numbers and where the removed code lives
+         * are in AEC-FINDINGS.md. Read it before removing this gate again.
          */
         if (audio_io_playback_active()) {
             continue;
@@ -530,7 +585,27 @@ esp_err_t audio_io_play(const uint8_t *pcm, size_t len)
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_last_play_us = esp_timer_get_time();
+    /*
+     * Ahead of the mute check, not inside it: the gap has to be honoured even
+     * when NOTHING arrives while muted, which is precisely the case that bites.
+     * Tap late in a turn, get no further chunks to clear the carry on, and the
+     * stale byte lands on the next turn instead.
+     */
+    if (s_play_gap) {
+        s_play_gap = false;
+        s_in_carry_valid = false;
+    }
+
+    if (s_play_muted) {
+        /*
+         * Interrupted turn: drop the rest of it. Deliberately does NOT stamp the
+         * queue clock -- the whole point is that playback goes quiet, so
+         * audio_io_playback_active() must be allowed to fall and reopen the mic.
+         */
+        return ESP_OK;
+    }
+
+    s_play_queue_ms = now_ms();
 
     /* Stitch the previous frame's orphaned byte onto this one. */
     uint8_t head[2];
@@ -614,6 +689,32 @@ void audio_io_flush(void)
      */
     if (s_ring != NULL) {
         s_flush_pending = true;
+        /* The drain task drops its own carry; this is the producer's half, which
+         * audio_io_reset() used to be the only thing that cleared -- and its sole
+         * caller is a deliberate session stop, so an auto-reconnect never reached
+         * it. */
+        s_play_gap = true;
+    }
+}
+
+void audio_io_note_stream_gap(void)
+{
+    /* Same flag the flush and the mute raise; audio_io_play() consumes it before
+     * the stitch. Safe from any task -- one bool store, and the producer is the
+     * only reader. */
+    s_play_gap = true;
+}
+
+void audio_io_mute_playback(bool muted)
+{
+    /*
+     * Scoped to a turn by the caller, never latched here. main.c clears it on
+     * AgentAudioDone and on a hard deadline, because a turn that never reports
+     * done would otherwise leave the device permanently and silently deaf.
+     */
+    s_play_muted = muted;
+    if (muted) {
+        s_play_gap = true;
     }
 }
 
@@ -633,6 +734,8 @@ void audio_io_reset(void)
      * is the sole writer of the carry. */
     s_in_carry_valid = false;
     s_in_carry = 0;
+    s_play_gap = false;
+    s_play_muted = false;
     s_played = 0;
     s_dropped = 0;
     s_captured = 0;
@@ -646,7 +749,18 @@ bool audio_io_playback_active(void)
     if (xStreamBufferBytesAvailable(s_ring) > 0) {
         return true;
     }
-    return (esp_timer_get_time() - s_last_play_us) < PLAYBACK_TAIL_US;
+    /* Nothing has ever played: both stamps are still 0, and `now - 0` is small
+     * for the first PLAYBACK_TAIL_MS after boot -- which would claim playback is
+     * active before a single sample has been queued. */
+    if (s_play_write_ms == 0 && s_play_queue_ms == 0) {
+        return false;
+    }
+    /* Elapsed per stamp, smaller wins -- see the declarations. */
+    uint32_t now = now_ms();
+    uint32_t since_write = now - s_play_write_ms;
+    uint32_t since_queue = now - s_play_queue_ms;
+    uint32_t since = (since_write < since_queue) ? since_write : since_queue;
+    return since < PLAYBACK_TAIL_MS;
 }
 
 void audio_io_stats(uint32_t *played, uint32_t *dropped, uint32_t *captured)

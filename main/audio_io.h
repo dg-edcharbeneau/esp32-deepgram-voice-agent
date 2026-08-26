@@ -72,6 +72,32 @@ void audio_io_set_capture_tap(audio_io_tap_t tap);
 void audio_io_flush(void);
 
 /*
+ * Tell the playback path that the incoming byte stream has broken.
+ *
+ * Not a flush -- whatever is already queued still plays. This only says that the
+ * NEXT bytes to arrive are discontinuous with the last, so the half-sample
+ * audio_io_play() may be holding must be dropped rather than stitched onto them.
+ *
+ * Call it whenever the socket goes away underneath a turn. A websocket
+ * auto-reconnect does not pass through session_ctl, so nothing else clears that
+ * carry, and one orphaned byte offsets every sample after it for the rest of the
+ * session -- audible as white noise, not as a join.
+ */
+void audio_io_note_stream_gap(void);
+
+/*
+ * Discard incoming agent audio until told otherwise.
+ *
+ * The other half of an interruption. audio_io_flush() silences what has already
+ * arrived; this stops what is still coming, because Deepgram has no interrupt
+ * message and keeps sending the rest of a reply regardless -- so a flush on its
+ * own just makes the agent pause and then resume mid-word.
+ *
+ * MUST BE SCOPED TO A TURN by the caller. Left set, the device is silently deaf.
+ */
+void audio_io_mute_playback(bool muted);
+
+/*
  * Stop or resume streaming captured audio.
  *
  * The capture task keeps reading the codec either way -- the ES7210 is clocked

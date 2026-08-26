@@ -250,9 +250,18 @@ menu "Deepgram Agent Device"
             detection, not the cancellation, so with the gate off it fires on the
             agent's own voice and the agent interrupts itself -- worse than no
             barge-in, because it corrupts the conversation rather than limiting
-            it. The board does have a real echo reference on ES7210 MIC3 (commit
-            9479446), but esp-sr's canceller needs ~70 kB of internal RAM and does
-            not fit alongside the display (a4fa137). See the README's echo section.
+            it.
+
+            A canceller WAS built against the board's echo reference and it works
+            -- esp-sr's standalone AEC, 17.3 dB of ERLE, and with it the device
+            stops answering itself in an empty room. It still does not give
+            barge-in: the microphone stream saturates the TCP send queue until TLS
+            cannot allocate, and Deepgram never distinguished a person talking over
+            the agent from the residual echo. Use the tap on the display ring.
+
+            AEC-FINDINGS.md has the measurements and where the removed code lives.
+            The ~70 kB figure that used to appear here was esp-sr's AFE, not its
+            canceller, and it sent this project down the wrong road once already.
 
     config SESSION_IDLE_TIMEOUT_S
         int "Stop the session after this many idle seconds (0 = never)"
