@@ -3,17 +3,40 @@
  *
  * WHY A HAND-ROLLED BLITTER
  *
- * A frame is ~456 anti-aliased alpha-blended discs of radius 0.3 to 4.2 px. Put
- * through LVGL's draw pipeline that is 456 draw descriptors, area clips and
- * draw-unit dispatches per frame; written directly into the canvas pixels -- which
- * this module owns outright -- it is about 11,000 pixel blends, roughly 1.5 ms.
+ * A frame is ~456 anti-aliased alpha-blended discs. Put through LVGL's draw
+ * pipeline that is 456 draw descriptors, area clips and draw-unit dispatches per
+ * frame; written directly into the canvas pixels -- which this module owns
+ * outright -- it is a bounded number of pixel blends and one invalidated box.
  *
- * The measured budget is what justifies keeping it this simple. On this panel the
- * spectrum face spends ~16 ms drawing inside a ~55 ms frame, and ~40 ms of that
- * frame is LVGL's PSRAM-to-internal copy plus the QSPI flush, which no amount of
- * rasteriser cleverness touches. So this file optimises the two things that do
- * matter -- how many pixels are touched, and how many are flushed -- and leaves
- * the per-pixel path obvious.
+ * WHAT IT ACTUALLY COSTS, because the estimate that used to sit here was wrong
+ * by an order of magnitude and was the stated reason not to do better.
+ *
+ * It claimed ~11,000 blends and "roughly 1.5 ms". Measured over 5,000 face_orb
+ * log lines from real sessions: median 16.2 ms, minimum 9.8 ms, maximum 22.9 ms.
+ * It never once came in under 9.8. Alongside that, from 12,339 telemetry lines on
+ * this face: the frame period is a median 40 ms (25.0 fps) and the whole draw
+ * callback a median 18.5 ms. So the raster is about 40% of the frame and ~88% of
+ * the draw -- geometry is the other 2.2 ms.
+ *
+ * The old paragraph then argued from the SPECTRUM face's budget -- ~16 ms of
+ * drawing inside a ~55 ms frame, ~40 ms of it LVGL's PSRAM-to-internal copy plus
+ * the QSPI flush -- that no amount of rasteriser cleverness could matter. Two
+ * things are wrong with borrowing it. This face's frame is 40 ms, not 55, so
+ * there is ~21 ms behind the draw rather than ~40. And 16 ms of raster is not a
+ * small draw next to it.
+ *
+ * The 11,000 figure is consistent with a mean footprint of about 5x5 px and does
+ * not appear to account for blit_dot making TWO passes over each bounding box, or
+ * for the sqrtf per pixel in the transition annulus -- and it predates SPRITE_MAX
+ * going 14 -> 20, which roughly doubles a dot's footprint area at amplitude.
+ *
+ * NONE OF WHICH SAYS THE DESIGN IS WRONG. Direct-to-canvas still beats the draw
+ * pipeline it replaced, and the two things this file optimises -- how many pixels
+ * are touched and how many are flushed -- are still the two that matter. What is
+ * no longer supported is the conclusion that the per-pixel path is too cheap to
+ * be worth improving. If someone wants that back, measure it; the numbers above
+ * are what to beat, and the atlas the plan originally called for was rejected on
+ * the strength of the figure that turned out to be wrong.
  *
  * COVERAGE, AND WHY NOT AN ATLAS
  *

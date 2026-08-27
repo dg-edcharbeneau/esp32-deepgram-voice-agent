@@ -122,7 +122,9 @@ static volatile bool s_suppress_state;
  * makes one layer down: drop a frame, never a session.
  */
 #define AUDIO_QUEUE_FRAMES 4
-#define AUDIO_FRAME_BYTES  2560            /* 1280 samples x int16, see audio_io.c */
+/* From audio_io.h, not a literal repeated here: the queue is sized in whole
+ * capture chunks, so the two must agree by construction. */
+#define AUDIO_FRAME_BYTES  AUDIO_IO_CAPTURE_BYTES
 #define AUDIO_QUEUE_BYTES  (AUDIO_QUEUE_FRAMES * (AUDIO_FRAME_BYTES + 16))
 
 /* PSRAM: it is 10 kB that nothing touches from an ISR, and internal RAM is what

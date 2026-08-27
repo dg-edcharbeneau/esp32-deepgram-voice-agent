@@ -374,6 +374,19 @@ static band_state_t s_band[2]; /* [0] agent, [1] mic */
 static bool s_vad_open;
 
 /*
+ * The two crossover poles. Exact, not the x/(1+x) approximation: 2 kHz at 16 kHz
+ * is nowhere near low enough relative to the sample rate for that to hold.
+ *
+ * Resolved once in build_ui() rather than lazily on first use. publish_level()
+ * runs on BOTH audio tasks, and a lazy `if (a1 == 0.0f)` there could be entered
+ * by one task while the other had set a1 and not yet a2 -- leaving a2 at zero for
+ * a block, which collapses the mid and high bands into the input. Neither tap is
+ * attached until ui_start() has returned, so by the time either can be called
+ * these are already written.
+ */
+static float s_pole_low, s_pole_mid;
+
+/*
  * When the microphone last carried actual SPEECH, as opposed to merely carrying
  * data.
  *
@@ -551,13 +564,7 @@ static void publish_level(const int16_t *mono, size_t samples, ui_source_t src)
         return;
     }
 
-    /* Exact poles, not the x/(1+x) approximation: 2 kHz at 16 kHz is nowhere near
-     * low enough relative to the sample rate for that to hold. Computed once. */
-    static float a1, a2;
-    if (a1 == 0.0f) {
-        a1 = 1.0f - expf(-2.0f * (float)M_PI * BAND_LOW_HZ / BAND_SAMPLE_RATE);
-        a2 = 1.0f - expf(-2.0f * (float)M_PI * BAND_MID_HZ / BAND_SAMPLE_RATE);
-    }
+    const float a1 = s_pole_low, a2 = s_pole_mid;
 
     band_state_t *st = &s_band[(src == UI_SRC_MIC) ? 1 : 0];
     float y1 = st->y1, y2 = st->y2;
@@ -1806,6 +1813,11 @@ static esp_err_t build_ui(void)
      * returns white for an out-of-range index, so a Kconfig list that has drifted
      * out of step with the table degrades to the default look. */
     s_tint_rgb = orb_colors_rgb(CONFIG_UI_DEFAULT_ORB_COLOR);
+
+    /* Before the frame timer and before any tap is attached, which is what makes
+     * publish_level() free of a first-use check. See s_pole_low. */
+    s_pole_low = 1.0f - expf(-2.0f * (float)M_PI * BAND_LOW_HZ / BAND_SAMPLE_RATE);
+    s_pole_mid = 1.0f - expf(-2.0f * (float)M_PI * BAND_MID_HZ / BAND_SAMPLE_RATE);
 
     esp_err_t err = select_face(CONFIG_UI_DEFAULT_FACE);
     if (err != ESP_OK) {

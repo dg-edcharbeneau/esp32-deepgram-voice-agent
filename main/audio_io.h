@@ -51,6 +51,18 @@ typedef void (*audio_io_capture_sink_t)(const uint8_t *pcm, size_t len);
  */
 typedef void (*audio_io_tap_t)(const int16_t *mono, size_t samples);
 
+/*
+ * One capture chunk, in mono frames and in bytes.
+ *
+ * Published because dg_agent.c has to size its uplink queue in whole chunks, and
+ * it was carrying its own literal 2560 with a comment pointing back here -- two
+ * numbers that had to agree with nothing to make them. 1280 frames at 16 kHz is
+ * 80 ms, the chunk size Flux recommends; audio_io.c's CAPTURE_FRAMES note has the
+ * rest of the reasoning.
+ */
+#define AUDIO_IO_CAPTURE_FRAMES 1280
+#define AUDIO_IO_CAPTURE_BYTES  (AUDIO_IO_CAPTURE_FRAMES * (int)sizeof(int16_t))
+
 /* Opens both codecs at the shared rate and starts the playback task. */
 esp_err_t audio_io_init(int sample_rate);
 

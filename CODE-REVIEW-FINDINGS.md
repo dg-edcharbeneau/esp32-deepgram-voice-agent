@@ -3,13 +3,18 @@
 A full review of `main/*.c` -- 19 files, ~11.2k lines. `managed_components/` and
 `components/tcp_transport/` are vendored and were not in scope.
 
-Seven of the twelve findings are fixed, across three commits. The rest are recorded
-here rather than fixed, so the next person to open one of these files does not
-have to re-derive them. Nothing below is speculative: each one names the failure
-scenario, and where a number appears it was measured or verified.
+All twelve findings and all eight nits are now fixed, across four commits. They
+are kept here rather than deleted so the reasoning survives the diff: each entry
+names the failure scenario it was fixed for, which is what stops a future change
+quietly reinstating it.
 
-Severity is the review's own: **B** blocks a merge, **I** should be fixed,
-**N** is a nit.
+Nothing below is speculative. Where a number appears it was measured, and two
+entries record corrections to the review as originally written -- I4's failure
+mode and I8's band arithmetic -- because both were wrong in ways that mattered.
+
+Severity is the review's own: **B** blocked a merge, **I** should be fixed,
+**N** was a nit. One thing remains unseen rather than unfixed: I8 changes what
+the panel draws and has been verified only by building.
 
 ---
 
@@ -192,103 +197,111 @@ rather than at the next message's first slice, so a following message that never
 presents an offset-0 TEXT slice still starts clean. Also cleared on socket close
 and in `dg_agent_start()`, alongside the existing `s_json_len` resets.
 
-## Open
+### I8. The spectrum point-sampled 24 of 512 FFT bins FIXED
 
-### I8. The spectrum point-samples 24 of 512 FFT bins
-
-`face_spectrum.c:225-226`:
+`face_spectrum.c`:
 
 ```c
 int fft_idx = i * (FFT_N / 2) / STRIPE_COUNT;
 display_spectrum[i] = ...s_spectrum[fft_idx];
 ```
 
-488 of the 512 bins are computed and thrown away, so a tone landing between taps
-is invisible and the bars alias. Linear spacing also puts about 20 of the 24
-bands above 4 kHz, where speech has little energy.
+488 of the 512 bins were computed and thrown away. Bands are 21.33 bins wide
+(333 Hz at 1024/16 kHz), so the taps sat 333 Hz apart and anything between two of
+them was invisible however loud it was. Band 0 sampled bin 0, which is DC.
 
-**Decided, deferred: average (or max) over each band's bin range, keeping linear
-bin spacing.** Two lines, no new constants, no re-tuning -- the FFT is already
-paid for. Log-spaced band edges would be the larger visual win but would need
-`DB_MIN` and the perceptual curve re-tuned, and would diverge from
-`spec_analyzer_radial`, which this face was lifted from unchanged.
+*(Correcting this entry as first written: it claimed linear spacing puts "about 20
+of the 24 bands above 4 kHz". It is exactly 12 of 24 -- linear spacing puts half
+above the midpoint by definition. The criticism that survives is narrower: only
+the first three bands cover the sub-1 kHz region where speech has most of its
+energy.)*
 
-### I9. `orb_raster.c`'s performance claim is ~11x optimistic, and it is load bearing
+Fixed by taking the **max** over each band's bin range, and skipping bin 0.
 
-`orb_raster.c:9` states the blitter is "about 11,000 pixel blends, roughly
-1.5 ms". Measured across 5,000 `face_orb` log lines from the serial captures in
-`/tmp` (all predating this review):
+**Max rather than the mean the plan said**, and the difference is not cosmetic.
+`s_spectrum` is in dB, so a mean is a geometric mean of magnitudes: one
+full-scale bin among twenty at the floor averages to **-85.7 dB**, dimmer than
+the single-bin reading it replaced -- it would have made the display *less*
+responsive to exactly the tonal content this finding is about. It would also drag
+every bar down and put `DB_MIN` and the perceptual curve back in play, which is
+the retuning cost the log-spacing option was rejected for. Max keeps the value
+meaning "the level of one bin", so the scale, `DB_MIN` and the `sqrt` curve all
+still mean what they meant. The approved option's text was "take max or mean over
+each band's bin range", so this is inside it, but the wording deserves the note.
+
+Log-spaced band edges remain the larger visual win and remain undone: they need
+`DB_MIN` and the curve re-tuned, and would diverge from `spec_analyzer_radial`,
+which this face was lifted from unchanged.
+
+**Not yet seen on the panel.** This is the one change in the set whose effect is
+visual, and it has been verified only by building. Expect livelier bars,
+especially at the bass end, and band 0 no longer showing DC.
+
+### I9. `orb_raster.c`'s performance claim was ~11x optimistic FIXED
+
+`orb_raster.c` stated the blitter was "about 11,000 pixel blends, roughly
+1.5 ms". Measured across 5,000 `face_orb` log lines from the captures in `/tmp`:
 
 | | min | median | p90 | max |
 |---|---|---|---|---|
 | `raster` us | 9,847 | **16,176** | 16,690 | 22,932 |
 | `geometry` us | 1,762 | 2,249 | -- | 13,110 |
 
-It never once came in under 9.8 ms. 4,977 of the 5,000 samples exceed 16 ms.
+It never once came in under 9.8 ms. From 12,339 orb `TLM` lines: frame period a
+median **40 ms** (fps 25.0), `draw` avg a median **18.5 ms**. So the raster is
+~40% of the frame period and ~88% of the draw callback.
 
-That matters because the paragraph immediately below the claim
-(`orb_raster.c:11-16`) is what justifies the whole design -- hand-rolling the
-blitter, keeping the per-pixel path "obvious", and not building the sprite atlas
-the plan called for. Its argument is that drawing is small next to the panel's
-own cost, so "no amount of rasteriser cleverness" is worth it. From 12,339 orb
-`TLM` lines in the same captures:
+That mattered because the paragraph below the claim was the stated justification
+for hand-rolling the blitter, keeping the per-pixel path "obvious", and rejecting
+the sprite atlas the plan called for -- an argument that drawing is small next to
+the panel's own cost. It also borrowed the *spectrum* face's budget (~16 ms draw
+in a ~55 ms frame); this face's frame is 40 ms, leaving ~21 ms behind the draw
+rather than ~40.
 
-- frame period: median **40 ms** (fps 25.0), not the ~55 ms the comment borrows
-- `draw` avg: median **18.5 ms**
-- raster alone: median **16.2 ms**
+The comment now carries the measured numbers, notes that the estimate looks like
+a mean 5x5 footprint that accounts for neither `blit_dot`'s two passes per box
+nor the `sqrtf` per annulus pixel, and that it predates `SPRITE_MAX` going
+14 -> 20. It states plainly what is and is not undermined: direct-to-canvas still
+beats the pipeline it replaced, but "too cheap to be worth improving" is no
+longer supported, and anyone who wants that conclusion back has numbers to beat.
 
-So the raster is about **40% of the frame period and ~88% of the draw callback** --
-and because the orb's real frame is 40 ms rather than 55 ms, there is roughly
-21 ms of copy-and-flush behind it, not the ~40 ms the comment assumes. The
-premise "a small draw next to a large period" (`ui.c:1055`) does not hold for
-this face, so the conclusion drawn from it should be re-tested rather than
-inherited.
+No code changed. The device was working normally throughout; the defect was a
+comment reporting a budget nobody could reproduce.
 
-Two likely contributors, neither verified:
-
-- The 11,000-blend estimate is consistent with a *mean* footprint of about 5x5 px
-  over the depth ramp. It does not appear to account for `blit_dot()` making
-  **two** passes over each bounding box (coverage accumulation, then blending),
-  nor for the `sqrtf` per pixel in the transition annulus.
-- The stated radius range, "0.3 to 4.2 px", is the un-swelled one.
-  `SPRITE_MAX` was raised 14 -> 20 precisely because listening's `rMul` reaches
-  ~2.6 (`orb_raster.c:45-58`), which grows a dot's footprint *area* by ~2x at
-  amplitude. The estimate looks like it predates that change.
-
-Nothing here is a defect in the code -- the numbers above are the device working
-normally, and the transport drops that prompted this measurement were unrelated
-congestion. The defect is that the comment reports a budget nobody can reproduce,
-which is the one kind of comment in this tree that costs more than it saves.
 
 ---
 
-## Nits
+## Nits, all fixed
 
-- `audio_io.c:273` -- `int16_t al = (l < 0) ? -l : l;` yields `-32768` for
-  `INT16_MIN`, so a full-scale negative sample reads as the quietest possible.
-  Diagnostic meter only. `int32_t al = abs((int32_t)l);`
-- `audio_io.c:165` and `audio_io.c:250` -- partial allocation failure leaks the
-  buffer that did succeed, and the message says "no internal RAM" when the
-  failing request was for PSRAM.
-- `face_spectrum.c:344-393` -- `init()` returns `ESP_ERR_NO_MEM` leaving up to
-  six non-NULL dangling pointers; a retried `ui_set_face` re-allocates over them.
-- `face_orb.c:219` -- "The rasteriser buckets by row band rather than trusting
-  draw order" attributes the bucketing to the wrong file. It is real, but it
-  lives in `cmp_draw_order()` at `orb_geometry.c:1845` and `host/README.md`
-  describes it as the geometry's own sort order. So the "no re-sort" conclusion
-  still broadly holds -- both halves arrive sorted the same way -- but the reason
-  given is not the one that applies.
-- `face_orb.c:436` -- logs from the LVGL task every 60 frames, inside the window
-  `tlm_accumulate_frame()` measures. `ui.c:1046-1048` argues at length that this
-  is exactly what corrupts those timings.
-- `ui.c:552` -- the lazy `a1`/`a2` init is reachable from two audio tasks; a
-  reader can see `a1` set and `a2` still zero, flattening the mid/high split for
-  one block. Compute both in `ui_start()`.
-- `dg_agent.c:125` -- `AUDIO_FRAME_BYTES 2560` silently duplicates
-  `CAPTURE_FRAMES * sizeof(int16_t)` from `audio_io.c`. A `#define` in
-  `audio_io.h` would keep them honest.
-
----
+- `audio_io.c` -- `int16_t al = (l < 0) ? -l : l;` gave `-32768` for `INT16_MIN`,
+  so a full-scale negative sample read as the quietest possible one. The peak
+  accumulators are `int32_t` now. Diagnostic meter only.
+- `audio_io.c` -- both task entry points leaked the buffer that succeeded when its
+  partner failed, and blamed "internal RAM" when the failing request was for
+  PSRAM. Both now free what they got and name the right pool with its size.
+- `face_spectrum.c` -- `init()` returned `ESP_ERR_NO_MEM` leaving up to six
+  non-NULL dangling pointers, and `select_face()` leaves the face un-ready so a
+  second attempt would allocate over them. It now frees and nulls all six.
+- `face_orb.c` -- "The rasteriser buckets by row band" named the wrong file: the
+  bucketing is `cmp_draw_order()` in `orb_geometry.c`, which `host/README.md`
+  describes as the geometry's own sort order. The comment now says what is
+  actually true -- both halves arrive sorted the same way, which is not the same
+  as their concatenation being sorted -- and says to measure the qsort before
+  adding one, since the raster beneath it is the frame's most expensive part.
+- `face_orb.c` -- the geometry/raster log ran on the LVGL task every 60 frames,
+  inside the window `tlm_accumulate_frame()` averages, spoiling one frame every
+  2.4 s. It is behind `ORB_LOG_TIMINGS`, off by default, along with its three
+  `esp_timer_get_time()` calls. Kept rather than deleted because it is where I9's
+  numbers came from.
+- `ui.c` -- the lazy `a1`/`a2` init was reachable from both audio tasks, so one
+  could see `a1` set and `a2` still zero and collapse the mid and high bands into
+  the input for a block. They are file-scope now, resolved in `build_ui()` before
+  any tap is attached.
+- `dg_agent.c` -- `AUDIO_FRAME_BYTES 2560` duplicated `CAPTURE_FRAMES *
+  sizeof(int16_t)` with only a comment tying them together.
+  `AUDIO_IO_CAPTURE_FRAMES` / `_BYTES` are published from `audio_io.h` and both
+  sites derive from them.
+- `dg_agent.c` -- "543 B in use at fourteen colours"; the table has thirteen.
 
 ## Worth keeping
 
