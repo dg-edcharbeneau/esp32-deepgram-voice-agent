@@ -766,7 +766,7 @@ seed, and a saved network beats them. See **[WIFI-SETUP.md](WIFI-SETUP.md)** for
 all four ways credentials get in, and for what to do when it will not connect.
 
 ```bash
-. ~/Documents/source-iot/esp/esp-idf-5.5.5/export.sh
+. /path/to/esp-idf/export.sh          # built and verified against v5.5.5
 idf.py set-target esp32s3
 idf.py menuconfig      # -> "Deepgram Agent Device": API key (SSID/password optional)
 idf.py build
