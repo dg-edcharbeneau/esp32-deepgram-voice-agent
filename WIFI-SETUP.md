@@ -1,4 +1,4 @@
-# Wi-Fi setup
+# Wi-Fi and API key setup
 
 > **Status: A and C confirmed on hardware 2026-08-26**, moving a working board
 > onto a phone hotspot: held BOOT to forget the saved network, then joined the
@@ -22,6 +22,8 @@ want one.
 | Wrong password saved, device will not connect | nothing to do — it offers the portal by itself, see [What happens on its own](#what-happens-on-its-own) |
 | Bench development, same network every time | [B. Menuconfig seed](#b-menuconfig-seed) |
 | Handing the board to someone else | [D. Wipe everything](#d-wipe-everything) |
+| Setting or replacing the Deepgram API key | [A. Setup portal](#a-setup-portal) — it asks for the key too |
+| Device says `check api key` | the key was rejected; re-enter it via [C](#c-forget-and-re-provision) |
 
 Before anything else, two limits that explain most failures:
 
@@ -46,8 +48,13 @@ The normal path. Nothing to install.
    ```
 
 2. **Join the device's network.** Point a phone camera at the QR and it offers to
-   join `dg-agent-A1B2` directly. Otherwise join it by hand from the phone's
-   Wi-Fi list — it is an open network, no password.
+   join `dg-agent-A1B2` directly, passphrase included — nothing to type.
+
+   **The setup network is WPA2, not open.** It used to be open; it is encrypted
+   now because the portal carries your Deepgram API key, which unlike a Wi-Fi
+   password works from anywhere and bills to you. If you cannot scan the QR, the
+   nine-character passphrase is on the panel under the network name. It is
+   random per boot and uses no ambiguous characters — no `0`/`O`, no `1`/`l`/`I`.
 
 3. **The setup page should open by itself.** The device answers every DNS query
    with its own address and redirects every unknown URL to the portal, which is
@@ -59,11 +66,34 @@ The normal path. Nothing to install.
    password. For a hidden network choose **Other / hidden network...** and type
    the name — a hidden AP broadcasts no name, so it can never appear in a scan.
 
-5. **Save and connect.** The page confirms, the device reboots, the setup network
-   disappears. On the way back up you should see `got ip …` and then hear the
-   greeting.
+5. **Enter the Deepgram API key.** Create one at
+   [console.deepgram.com](https://console.deepgram.com). Paste it; **Show key**
+   reveals what you pasted, which is worth a glance because a truncated paste
+   fails identically to a wrong key.
 
-The credentials are stored in NVS and survive reflashing the app.
+   **Blank means keep.** If the device already has a key the page says so, and
+   leaving the field empty keeps it. That is safe for the key specifically
+   because an empty key is never valid — unlike an empty Wi-Fi password, which
+   legitimately means an open network. So re-provisioning Wi-Fi never costs you
+   the key.
+
+   The key is only checked for obvious damage — spaces, control characters. Its
+   real test is the first connection, because the device has no route to Deepgram
+   while it is running the portal.
+
+6. **Save and connect.** The page confirms, the device reboots, the setup network
+   disappears. On the way back up you should see `got ip …` and then hear the
+   greeting. **The greeting is the proof** — it is the first thing that requires
+   the key to have been accepted.
+
+   If the key was wrong the panel reads `check api key` and the device **stops
+   trying** rather than reconnecting forever. That is deliberate: retrying a
+   rejected key never succeeds, and a device that says `error` and keeps
+   reconnecting looks like a network problem.
+
+Credentials and the key are stored in NVS and survive reflashing the app. They
+live in separate namespaces, which is why forgetting the network leaves the key
+alone.
 
 ## B. Menuconfig seed
 
@@ -71,6 +101,7 @@ For a board that never leaves your desk.
 
 ```
 idf.py menuconfig  →  Deepgram Agent Device  →  Wi-Fi SSID / Wi-Fi password
+                                            →  Deepgram API key
 ```
 
 > **NVS wins.** These are a *first-boot seed*, used only when nothing has been
@@ -80,6 +111,10 @@ idf.py menuconfig  →  Deepgram Agent Device  →  Wi-Fi SSID / Wi-Fi password
 >
 > This is the single most confusing thing about the setup. To make the seed take
 > effect again, forget the saved network first (path C or D).
+>
+> **The API key follows the same rule**, with one difference that matters:
+> forgetting the network (path C) does *not* erase the key, so only a full wipe
+> (path D) brings the menuconfig key back.
 
 Leave both empty to go straight to the portal on first boot, which is what you
 want for any device that leaves the bench.
@@ -91,6 +126,13 @@ I (…) wifi_creds: using menuconfig seed "MyNetwork" (nothing saved yet)
 I (…) wifi_creds: saved network "MyNetwork"        ← this one came from NVS
 ```
 
+And the same for the key, which is reported by length and never printed:
+
+```
+I (…) api_key: using the menuconfig seed (nothing saved yet)
+I (…) api_key: using the saved key (40 characters)  ← this one came from NVS
+```
+
 ## C. Forget and re-provision
 
 **Hold the BOOT button for three seconds.** The ring shows `forgetting wi-fi`,
@@ -100,6 +142,15 @@ the device reboots, and comes back up in the setup portal.
 W (…) boot_btn: BOOT held 3000 ms -- forgetting the saved network
 I (…) wifi_creds: credentials erased (ESP_OK)
 ```
+
+**This is also how you replace the API key**, since the portal is where the key
+is entered. The key itself is *not* erased — only the network is — so the portal
+will offer to keep it, and you can either leave the field blank or paste a new
+one over it.
+
+The cost is that changing only the key still means re-picking the network. There
+is no way to reach the portal without forgetting the network first; that is a
+known gap rather than an oversight.
 
 BOOT is the button on GPIO 0; the other one is RESET, wired to the chip's enable
 line, and it cannot do anything but reset. A short click of BOOT starts or stops
@@ -114,7 +165,8 @@ the agent session, exactly like tapping the screen.
 
 ## D. Wipe everything
 
-Erases credentials, saved voice, volume, and Wi-Fi calibration data:
+Erases credentials, the API key, saved voice, volume, and Wi-Fi calibration
+data:
 
 ```sh
 idf.py erase-flash && idf.py flash

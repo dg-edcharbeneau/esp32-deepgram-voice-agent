@@ -54,3 +54,15 @@ void session_ctl_request_reload(void);
 /* True while a session is meant to be up. Reflects intent, not connectivity --
  * a session that is retrying its socket still counts as running. */
 bool session_ctl_is_running(void);
+
+/*
+ * How long the current start/stop has been in flight, 0 if none is.
+ *
+ * This exists as a DEADLOCK BACKSTOP, not as a progress bar. Every request is
+ * refused while an action is busy, so an action that never completes is a device
+ * that never accepts another gesture -- which is what a stop blocked inside the
+ * WebSocket client produced, repeatedly, until the board was physically reset.
+ * A start or stop takes milliseconds on a healthy link and a few seconds on a bad
+ * one; anything past ten times that is not slow, it is stuck.
+ */
+uint32_t session_ctl_busy_for_ms(void);

@@ -253,16 +253,29 @@ starting over.
 
 ## Boot and provisioning
 
-Credentials live in NVS and **NVS wins**: `CONFIG_WIFI_SSID` is a first-boot seed
-only. The portal always ends in a reboot, which is what keeps the AP-to-STA
-transition from having to be unpicked on a live device.
+Credentials live in NVS and **NVS wins**: `CONFIG_WIFI_SSID` and
+`CONFIG_DEEPGRAM_API_KEY` are first-boot seeds only. The portal always ends in a
+reboot, which is what keeps the AP-to-STA transition from having to be unpicked
+on a live device — and, for the key, is also how it gets applied, since
+`dg_agent_init()` reads it once when the client is built.
+
+The two sit in **separate NVS namespaces** (`wifi` and `deepgram`) so forgetting
+a network does not cost the user their key. The AP is WPA2 rather than open
+specifically because the key crosses it; `wifi_prov.h` carries that argument,
+including the one it replaced.
+
+A rejected key is the one failure the client must not retry, so `dg_agent.c`
+reads the upgrade status out of the error event and reports `DG_AGENT_BAD_KEY` on
+a 401. The **stop happens on another task** — `main.c`'s telemetry loop — because
+`on_state()` runs on the WebSocket task and `dg_agent_stop()` waits for that task
+to halt.
 
 ```mermaid
 flowchart TB
     subgraph portal["Captive portal — credentials are NOT erased here"]
-        ap["open SoftAP dg-agent-XXXX"] --> qr["QR on screen:<br/>WIFI:T:nopass;S:…;;"]
+        ap["WPA2 SoftAP dg-agent-XXXX"] --> qr["QR on screen:<br/>WIFI:T:WPA;S:…;P:…;;"]
         qr --> srv["httpd: GET / · GET /scan · POST /save<br/>+ DNS responder, 404 → redirect"]
-        srv --> save["wifi_creds_save → esp_restart"]
+        srv --> save["wifi_creds_save + api_key_save → esp_restart"]
     end
 
     boot0([app_main]) --> nvs["nvs_flash_init<br/><i>erase and retry if stale</i>"]

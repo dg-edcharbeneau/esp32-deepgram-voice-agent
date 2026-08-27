@@ -46,8 +46,20 @@ static TaskHandle_t s_task;
 static dg_agent_callbacks_t s_callbacks;
 static volatile bool s_running; /* written by the worker, read by the status loop */
 static volatile bool s_busy;    /* an action is in progress */
+/* When it started, for session_ctl_busy_for_ms(). 0 while idle. */
+static volatile int64_t s_busy_since_us;
 static volatile int64_t s_ready_at_us; /* earliest time the next request is taken */
 static bool s_logged_hwm;
+
+uint32_t session_ctl_busy_for_ms(void)
+{
+    const int64_t since = s_busy_since_us;   /* one 64-bit read, then work on it */
+    if (since == 0) {
+        return 0;
+    }
+    const int64_t us = esp_timer_get_time() - since;
+    return (us > 0) ? (uint32_t)(us / 1000) : 0;
+}
 
 bool session_ctl_is_running(void)
 {
@@ -128,6 +140,7 @@ static void session_ctl_task(void *arg)
         xTaskNotifyWait(0, UINT32_MAX, &req, portMAX_DELAY);
 
         s_busy = true;
+        s_busy_since_us = esp_timer_get_time();
 
         switch ((request_t)req) {
         case REQ_START:
@@ -172,6 +185,7 @@ static void session_ctl_task(void *arg)
             do_start();
             break;
         default:
+            s_busy_since_us = 0;
             s_busy = false;
             continue;
         }
@@ -179,6 +193,7 @@ static void session_ctl_task(void *arg)
         /* Stamped after the work, so the quiet period is 1.5 s of settled
          * device rather than 1.5 s that a slow stop already spent. */
         s_ready_at_us = esp_timer_get_time() + (COOLDOWN_MS * 1000);
+        s_busy_since_us = 0;
         s_busy = false;
 
         /* Repeated toggling is the thing most likely to leak, and internal RAM

@@ -36,6 +36,23 @@ menu "Deepgram Agent Device"
             Sent as "Authorization: Token <key>" on the WebSocket upgrade request.
             Create one at https://console.deepgram.com.
 
+            A SEED, NOT A SETTING -- the same rule as WIFI_SSID. It is used only
+            when nothing has been saved yet. Once a key has been entered in the
+            setup portal, the saved key wins and editing this appears to do
+            nothing at all.
+
+            Leave it empty for any device that leaves the bench: the portal asks
+            for the key alongside the network, so a device can be handed to
+            someone else without handing over a key or a toolchain.
+
+            To get back here: wipe NVS. Forgetting the network with a BOOT hold
+            does NOT erase the key -- the two live in separate namespaces on
+            purpose, so re-provisioning Wi-Fi does not cost you the key.
+
+            A wrong key is now visible rather than silent: the device says
+            "check api key" and stops retrying, instead of reconnecting forever
+            the way a bad network does.
+
 
     config DEEPGRAM_FLUX_VOICE
         string "Flux TTS voice"

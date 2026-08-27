@@ -758,17 +758,22 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 
 ## Configure and build
 
-The API key lives in Kconfig, not in source, and `sdkconfig` is gitignored.
+**Nothing here needs a toolchain any more.** Leave the SSID, password and API
+key empty and the device raises a setup portal on first boot that asks for all
+three. The Kconfig values are first-boot seeds only, and anything saved beats
+them. See **[WIFI-SETUP.md](WIFI-SETUP.md)** for all four ways credentials get
+in, and for what to do when it will not connect.
 
-**Wi-Fi is chosen at runtime** — leave the SSID and password empty and the device
-raises a setup portal on first boot. The Kconfig values are only a first-boot
-seed, and a saved network beats them. See **[WIFI-SETUP.md](WIFI-SETUP.md)** for
-all four ways credentials get in, and for what to do when it will not connect.
+The provisioning AP is WPA2, and its passphrase reaches the phone inside the QR
+code on the panel — it is encrypted because the portal carries the API key, which
+unlike a Wi-Fi password works from anywhere and bills to you.
+
+`sdkconfig` is gitignored, so a key seeded there does not reach git.
 
 ```bash
 . /path/to/esp-idf/export.sh          # built and verified against v5.5.5
 idf.py set-target esp32s3
-idf.py menuconfig      # -> "Deepgram Agent Device": API key (SSID/password optional)
+idf.py menuconfig      # -> "Deepgram Agent Device" (all of it optional: the portal asks)
 idf.py build
 idf.py flash
 idf.py -b 2000000 monitor
@@ -804,6 +809,7 @@ in.
 | [main/main.c](main/main.c) | boot order, session callbacks, status loop |
 | [main/wifi_sta.c](main/wifi_sta.c) | station bring-up, blocks on `IP_EVENT_STA_GOT_IP` |
 | [main/wifi_creds.c](main/wifi_creds.c) | credentials in NVS, and why a saved network beats Kconfig |
+| [main/api_key.c](main/api_key.c) | the Deepgram API key in NVS, same precedence rule, never logged |
 | [main/wifi_prov.c](main/wifi_prov.c) | setup portal: SoftAP, the page, captive-portal DNS |
 | [main/boot_button.c](main/boot_button.c) | BOOT/GPIO 0: click toggles, 3 s hold forgets the network |
 | [main/dg_agent.c](main/dg_agent.c) | Agent API client: `Settings`, event decoding, KeepAlive |
@@ -821,7 +827,7 @@ in.
 | [main/orb_colors.c](main/orb_colors.c) | the orb colour catalog, same split, for the `set_color` schema |
 | [host/](host/) | off-device harnesses: geometry parity against the upstream TypeScript, and `prompt.sh` to print the assembled prompt |
 | [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
-| [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / name / greeting / audio / prompt override, and the Wi-Fi seed |
+| [main/Kconfig.projbuild](main/Kconfig.projbuild) | name / greeting / audio / display, and the Wi-Fi and API key seeds |
 | [WIFI-SETUP.md](WIFI-SETUP.md) | every way to get credentials onto the device, and why it will not connect |
 | [sdkconfig.defaults](sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
 | [components/tcp_transport/](components/tcp_transport/) | two local patches to IDF's WS transport: the handshake Host header, and dropping a congested audio frame instead of killing the session — see below |
