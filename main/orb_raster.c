@@ -71,11 +71,29 @@
  * What did help was noticing the boxes were 58% larger than they had to be; see
  * blit_dot(). That one is lossless, costs nothing, and cuts the clear as well.
  *
- * The compute/memory split above is an estimate from cache-line counting, not a
- * device measurement, and it is the part to check before anyone spends real
- * effort here. The decisive experiment is cheap: time clear_box() separately
- * from the blit. The clear is pure PSRAM writes with no arithmetic at all, so its
- * share of the frame prices every other pixel in it.
+ * MEASURED ON THE DEVICE, and the estimate held. ORB_RASTER_PHASE_TIMING below
+ * splits the frame; 407 samples across three behaviours say:
+ *
+ *              boxpx   clear    blit   raster    was    saved
+ *   idle       11,575   1,973   9,503   11,476  16,165    29%
+ *   listening  12,076   2,053   9,956   12,010  17,071    30%
+ *   speaking   16,757   2,511  12,726   15,237  19,341    21%
+ *
+ * The box tightening cut box pixels 60% and the frame only 29%, and that gap is
+ * what separates the two costs -- the tightening provably left the BLENDED pixel
+ * count alone, so before-and-after solves for both. It gives ~270 ns per box
+ * pixel and ~939 ns per blended pixel, the latter being 225 cycles at 240 MHz for
+ * a two-byte read-modify-write. About 73% of the frame is that one term.
+ *
+ * TWO INDEPENDENT ROUTES TO THE SAME ANSWER, and the second was an accident. The
+ * clear is pure memset with no arithmetic in it at all, and its cost per pixel
+ * FELL from 170 ns to 150 ns as speech grew the boxes. Arithmetic per pixel
+ * cannot get cheaper when there is more of it; only locality can, because a
+ * bigger box fetches more useful pixels per cache line. A pure-memory signature.
+ *
+ * Which is also why the linear model above over-predicts a loud frame by ~11%:
+ * the per-pixel costs are not constants, they improve with size. Being wrong in
+ * that particular direction is more evidence for the conclusion, not less.
  */
 
 #include "orb_raster.h"

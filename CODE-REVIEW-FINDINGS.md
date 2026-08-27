@@ -309,12 +309,39 @@ frame, so the clear moves 58% less PSRAM. A marginal bonus at high amplitude --
 the clip threshold moves from r > 8.5 to r > 9, so slightly fewer large dots get
 truncated by `SPRITE_MAX`.
 
-**What is still an estimate.** The compute-versus-memory split comes from
-cache-line counting, not from the device. It does not change the atlas verdict --
-an atlas cannot reduce canvas writes under any split -- but it is what to check
-before spending real effort here. The decisive experiment is cheap: time
-`clear_box()` separately from the blit. The clear is pure PSRAM writes with no
-arithmetic at all, so its share of the frame prices every other pixel in it.
+**Measured on the device, and the estimate held.** `ORB_RASTER_PHASE_TIMING`
+splits the frame into its clear and its blit; 407 samples across three behaviours:
+
+| state | boxpx | clear | blit | raster | was | saved |
+|---|---|---|---|---|---|---|
+| idle (n=373) | 11,575 | 1,973 | 9,503 | **11,476** | 16,165 | 29% |
+| listening (n=9) | 12,076 | 2,053 | 9,956 | **12,010** | 17,071 | 30% |
+| speaking (n=25) | 16,757 | 2,511 | 12,726 | **15,237** | 19,341 | 21% |
+
+Box pixels fell 60% and the frame only 29% -- and that gap is what separates the
+two costs, because the tightening provably left the *blended* pixel count alone.
+Solving before-against-after gives **~270 ns per box pixel** and **~939 ns per
+blended pixel**, the latter 225 cycles at 240 MHz for a two-byte
+read-modify-write. **73% of the frame is that one term**, and no atlas touches it.
+
+**A second, accidental confirmation.** The clear is pure `memset` with no
+arithmetic in it at all, and its cost per pixel *fell* from 170 ns to 150 ns as
+speech grew the boxes. Arithmetic per pixel cannot get cheaper when there is more
+of it; only locality can. That is a pure-memory signature, and it arrived from an
+experiment designed to measure something else.
+
+**The prediction, and why it missed.** Before measuring I predicted speaking at
+12,730 us; it came in at 15,237, +20%. Most of the gap was a wrong input -- the
+live session ran hotter than the host test frame (16,757 box pixels against the
+12,631 assumed). Correcting for that the model still over-predicts by ~11%,
+because the per-pixel costs are not constants: they improve with size, exactly as
+the clear's 170→150 ns shows. Being wrong in that direction is more evidence for
+the conclusion rather than less.
+
+Worth recording that the experiment I *designed* for this was inconclusive by its
+own pre-registered criterion -- clear and blit came out 4.8x apart per box pixel,
+which I had said in advance would be ambiguous rather than decisive. The answer
+came from the before/after pair instead.
 
 
 ---
