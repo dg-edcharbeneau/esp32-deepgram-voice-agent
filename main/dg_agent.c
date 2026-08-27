@@ -138,6 +138,13 @@ static TaskHandle_t s_send_task;
  * is TEXT, so transport_ws.c's LOCAL PATCH 2 cannot drop it and it blocks in
  * poll_write holding the lock (see the note in keepalive_task).
  *
+ * BOTH ARE RAISED BEFORE THEIR TASK TESTS s_ready, NOT AFTER, and that ordering
+ * is the property that makes them work at all. dg_agent_stop() clears s_ready
+ * and then waits here; raising a flag after the test leaves a window in which
+ * the sender has committed to a send and the stop cannot see it. Claim first,
+ * test second, and every interleaving ends with either the stop waiting or the
+ * send skipping. The full argument is at the top of audio_send_task().
+ *
  * send_json() is deliberately NOT covered. It runs at session setup and on a
  * function-call response, not on the cadence a stop has to race, and adding it
  * would mean a flag written by two different tasks.
@@ -1134,6 +1141,25 @@ static void audio_send_task(void *arg)
             continue;
         }
 
+        /*
+         * CLAIMED BEFORE THE READINESS TEST, NEVER AFTER IT.
+         *
+         * dg_agent_stop() clears s_ready and then waits for this flag to fall.
+         * Raising it after the test left a window between them: the sender had
+         * already decided to send, the stop saw an idle sender, and
+         * esp_websocket_client_stop() ran underneath a send that was about to
+         * take the client lock -- the exact wedge this task exists to prevent.
+         *
+         * Flag first, test second, and the two orders cannot both miss. Either
+         * the stop observes s_sending and waits, or this observes !s_ready and
+         * skips. There is no third outcome, and both tasks are pinned to core 0
+         * so preemption is the only interleaving there is to cover.
+         *
+         * The cost is that the flag is briefly raised for a frame that is then
+         * discarded, so a stop can spin one extra 10 ms tick in its quiesce
+         * loop. That is the whole price.
+         */
+        s_sending = true;
         if (s_ready && s_client != NULL) {
             /*
              * Ahead of the send, not after it: a send that blocks is exactly when
@@ -1141,10 +1167,8 @@ static void audio_send_task(void *arg)
              * would leave the clock stale for the whole time it was blocked.
              */
             s_last_audio_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            s_sending = true;
             (void)esp_websocket_client_send_bin(s_client, (const char *)frame,
                                                 (int)len, AUDIO_SEND_TIMEOUT);
-            s_sending = false;
 
             /*
              * Stack headroom, reported once with real history behind it.
@@ -1171,6 +1195,7 @@ static void audio_send_task(void *arg)
                          (unsigned)uxTaskGetStackHighWaterMark(NULL), sends);
             }
         }
+        s_sending = false;
         vRingbufferReturnItem(s_audio_rb, frame);
     }
 }
@@ -1185,38 +1210,53 @@ static void keepalive_task(void *arg)
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(KEEPALIVE_PERIOD_MS));
-        if (!s_ready || !esp_websocket_client_is_connected(s_client)) {
-            continue;
-        }
         /*
-         * WHEN this frame goes out matters more than whether it does, because it
-         * is TEXT and transport_ws cannot drop it when the send queue is full --
-         * LOCAL PATCH 2 covers binary only, since Settings must never vanish
-         * silently. A congested TEXT send blocks in poll_write holding the client
-         * lock, stalls the capture task behind it, and finally times out and takes
-         * the session down. Observed twice, as a live session dying with mic=
-         * frozen for the full SEND_TIMEOUT and rx=0.
+         * Claimed before the readiness test, for the reason audio_send_task()
+         * spells out at length: dg_agent_stop() clears s_ready and then waits on
+         * this flag, so a claim that comes after the test leaves a window where
+         * the stop tears the client down under a send that has already been
+         * decided on. This one matters even more than the audio flag -- a
+         * keepalive is TEXT, so transport_ws.c's LOCAL PATCH 2 cannot drop it and
+         * it blocks in poll_write holding the client lock.
          *
-         * So send it only when the uplink is genuinely quiet AND uncongested, and
-         * there is one condition that means exactly that: the mic gate is shut
-         * because the agent is speaking. Nothing is being pushed upstream then, so
-         * the send queue is draining rather than filling, and this is also the one
-         * case the keepalive exists for -- a long reply during which the device
-         * sends no audio at all and Deepgram's ~10 s idle timer is running.
-         *
-         * Any other time, either audio is flowing and doing the job already, or
-         * the uplink is stalled -- and a stall is precisely when adding a
-         * blocking TEXT write is worst. An earlier version keyed on "no audio for
-         * 2 s" and did exactly that to itself: the stall aged the clock, the clock
-         * fired the keepalive, the keepalive killed the session.
+         * Which is why the guard below became a positive condition rather than a
+         * pair of `continue`s: the flag has to wrap the whole test, and a
+         * `continue` would skip past the lowering.
          */
-        uint32_t quiet_ms = (uint32_t)(esp_timer_get_time() / 1000) - s_last_audio_ms;
-        if (!audio_io_playback_active() && quiet_ms < KEEPALIVE_QUIET_MS) {
-            continue;
-        }
         s_sending_ka = true;
-        esp_websocket_client_send_text(s_client, KEEPALIVE, sizeof(KEEPALIVE) - 1,
-                                       SEND_TIMEOUT);
+        if (s_ready && esp_websocket_client_is_connected(s_client)) {
+            /*
+             * WHEN this frame goes out matters more than whether it does, because it
+             * is TEXT and transport_ws cannot drop it when the send queue is full --
+             * LOCAL PATCH 2 covers binary only, since Settings must never vanish
+             * silently. A congested TEXT send blocks in poll_write holding the client
+             * lock, stalls the capture task behind it, and finally times out and takes
+             * the session down. Observed twice, as a live session dying with mic=
+             * frozen for the full SEND_TIMEOUT and rx=0.
+             *
+             * So send it only when the uplink is genuinely quiet AND uncongested, and
+             * there is one condition that means exactly that: the mic gate is shut
+             * because the agent is speaking. Nothing is being pushed upstream then, so
+             * the send queue is draining rather than filling, and this is also the one
+             * case the keepalive exists for -- a long reply during which the device
+             * sends no audio at all and Deepgram's ~10 s idle timer is running.
+             *
+             * Any other time, either audio is flowing and doing the job already, or
+             * the uplink is stalled -- and a stall is precisely when adding a
+             * blocking TEXT write is worst. An earlier version keyed on "no audio for
+             * 2 s" and did exactly that to itself: the stall aged the clock, the clock
+             * fired the keepalive, the keepalive killed the session.
+             */
+            uint32_t quiet_ms = (uint32_t)(esp_timer_get_time() / 1000) -
+                                s_last_audio_ms;
+            /* The same rule as the `continue` this replaced, stated the other way
+             * round: send iff the mic gate is shut, or the uplink has been quiet
+             * long enough that nothing else is holding the session open. */
+            if (audio_io_playback_active() || quiet_ms >= KEEPALIVE_QUIET_MS) {
+                esp_websocket_client_send_text(s_client, KEEPALIVE,
+                                               sizeof(KEEPALIVE) - 1, SEND_TIMEOUT);
+            }
+        }
         s_sending_ka = false;
     }
 }

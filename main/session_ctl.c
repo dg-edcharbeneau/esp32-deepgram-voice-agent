@@ -46,19 +46,54 @@ static TaskHandle_t s_task;
 static dg_agent_callbacks_t s_callbacks;
 static volatile bool s_running; /* written by the worker, read by the status loop */
 static volatile bool s_busy;    /* an action is in progress */
-/* When it started, for session_ctl_busy_for_ms(). 0 while idle. */
-static volatile int64_t s_busy_since_us;
+/*
+ * When the current action started, for session_ctl_busy_for_ms(). 0 while idle.
+ *
+ * MILLISECONDS IN 32 BITS, and that is the whole point rather than a unit
+ * preference. This is written by the worker below and read by app_main, and a
+ * 32-bit CPU stores a 64-bit value in TWO HALVES -- so a reader that landed
+ * between them saw a timestamp that never existed. Same fault as the one
+ * audio_io.c fixed for s_speech_us, and the same remedy: narrow to 32-bit ms,
+ * where a store is indivisible and there is nothing left to tear.
+ *
+ * It mattered here more than most. main.c reboots the device when this reports
+ * more than 30 s, so a torn read did not degrade a measurement -- it restarted
+ * a healthy board mid-toggle and logged EVT sessionstuck about a session that
+ * was never stuck. Past 2^32 us of uptime (~71 min) the high word is nonzero,
+ * which is all a tear needs to invent minutes of busy time out of a stamp that
+ * had just been cleared.
+ */
+static volatile uint32_t s_busy_since_ms;
 static volatile int64_t s_ready_at_us; /* earliest time the next request is taken */
 static bool s_logged_hwm;
 
+/* Milliseconds since boot, truncated. One 32-bit store, so no writer can tear
+ * it and no reader can catch it half-updated. */
+static inline uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
 uint32_t session_ctl_busy_for_ms(void)
 {
-    const int64_t since = s_busy_since_us;   /* one 64-bit read, then work on it */
-    if (since == 0) {
+    /*
+     * THE FLAG FIRST, THE STAMP SECOND, and the ordering is load bearing: the
+     * worker writes the stamp before raising the flag and lowers the flag before
+     * clearing the stamp, so a reader that sees s_busy is guaranteed a stamp
+     * that belongs to the action it is asking about.
+     */
+    if (!s_busy) {
         return 0;
     }
-    const int64_t us = esp_timer_get_time() - since;
-    return (us > 0) ? (uint32_t)(us / 1000) : 0;
+    const uint32_t since = s_busy_since_ms;
+    if (since == 0) {
+        /* The action completed between the two reads. Not busy, and reporting
+         * "since boot" here is exactly the false positive above. */
+        return 0;
+    }
+    /* Unsigned subtraction, so this stays correct across the 49.7-day wrap in a
+     * way that comparing the stamps themselves would not. */
+    return now_ms() - since;
 }
 
 bool session_ctl_is_running(void)
@@ -139,8 +174,10 @@ static void session_ctl_task(void *arg)
         uint32_t req = 0;
         xTaskNotifyWait(0, UINT32_MAX, &req, portMAX_DELAY);
 
+        /* Stamp before flag, so a reader that sees s_busy cannot see a stale or
+         * zeroed stamp behind it. The clear paths below do the reverse. */
+        s_busy_since_ms = now_ms();
         s_busy = true;
-        s_busy_since_us = esp_timer_get_time();
 
         switch ((request_t)req) {
         case REQ_START:
@@ -185,16 +222,18 @@ static void session_ctl_task(void *arg)
             do_start();
             break;
         default:
-            s_busy_since_us = 0;
             s_busy = false;
+            s_busy_since_ms = 0;
             continue;
         }
 
         /* Stamped after the work, so the quiet period is 1.5 s of settled
          * device rather than 1.5 s that a slow stop already spent. */
         s_ready_at_us = esp_timer_get_time() + (COOLDOWN_MS * 1000);
-        s_busy_since_us = 0;
+        /* Flag down before the stamp is cleared -- the mirror of the order on
+         * the way in, and what makes both orders safe for the reader. */
         s_busy = false;
+        s_busy_since_ms = 0;
 
         /* Repeated toggling is the thing most likely to leak, and internal RAM
          * is what runs out first. Largest-block matters more than the total. */
