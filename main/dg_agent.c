@@ -34,10 +34,18 @@ static const char *TAG = "dg_agent";
 /* Deepgram closes an idle Agent socket after ~10 s of no audio. */
 #define KEEPALIVE_PERIOD_MS 5000
 
-/* Skip the keepalive if audio went upstream this recently -- the audio has
- * already done its job. Well under KEEPALIVE_PERIOD_MS so a genuinely quiet
- * uplink still gets one on the very next tick. */
-#define KEEPALIVE_SKIP_MS 2000
+/*
+ * Long-quiet fallback for the keepalive. NOT the primary rule -- see the task.
+ *
+ * This was 2000 and that was actively harmful: a congested socket blocks the
+ * capture task, which stops the audio, which ages this clock past the threshold,
+ * which fires the keepalive INTO the congestion that caused it. The stall
+ * manufactured its own trigger, and killed a live session doing it.
+ *
+ * 6 s leaves margin under Deepgram's ~10 s while being longer than any stall
+ * actually observed, so an ordinary congestion episode no longer trips it.
+ */
+#define KEEPALIVE_QUIET_MS 6000
 
 #define WS_OPCODE_CONT   0x00
 #define WS_OPCODE_TEXT   0x01
@@ -1047,26 +1055,29 @@ static void keepalive_task(void *arg)
             continue;
         }
         /*
-         * Act on the paragraph above: while the microphone is streaming, the
-         * audio IS the keepalive, and this frame is not merely redundant -- it is
-         * harmful. It is TEXT, so transport_ws cannot drop it when the send queue
-         * is full (LOCAL PATCH 2 covers binary only, because Settings must never
-         * be dropped silently). It therefore blocks in poll_write holding the
-         * client lock, stalls the capture task behind it, and finally times out
-         * and takes the session down -- observed as a live session dying with
-         * mic= frozen for the full SEND_TIMEOUT.
+         * WHEN this frame goes out matters more than whether it does, because it
+         * is TEXT and transport_ws cannot drop it when the send queue is full --
+         * LOCAL PATCH 2 covers binary only, since Settings must never vanish
+         * silently. A congested TEXT send blocks in poll_write holding the client
+         * lock, stalls the capture task behind it, and finally times out and takes
+         * the session down. Observed twice, as a live session dying with mic=
+         * frozen for the full SEND_TIMEOUT and rx=0.
          *
-         * Congestion only happens when audio is flowing, which is precisely when
-         * this frame is unnecessary. So skip it then, and send it when the uplink
-         * really is quiet -- the mic gate during a long agent reply, which is the
-         * case the keepalive exists for.
+         * So send it only when the uplink is genuinely quiet AND uncongested, and
+         * there is one condition that means exactly that: the mic gate is shut
+         * because the agent is speaking. Nothing is being pushed upstream then, so
+         * the send queue is draining rather than filling, and this is also the one
+         * case the keepalive exists for -- a long reply during which the device
+         * sends no audio at all and Deepgram's ~10 s idle timer is running.
          *
-         * Worst case with no traffic at all: audio stops just after a check, the
-         * next check is KEEPALIVE_PERIOD_MS later and sends. Comfortably inside
-         * Deepgram's ~10 s.
+         * Any other time, either audio is flowing and doing the job already, or
+         * the uplink is stalled -- and a stall is precisely when adding a
+         * blocking TEXT write is worst. An earlier version keyed on "no audio for
+         * 2 s" and did exactly that to itself: the stall aged the clock, the clock
+         * fired the keepalive, the keepalive killed the session.
          */
         uint32_t quiet_ms = (uint32_t)(esp_timer_get_time() / 1000) - s_last_audio_ms;
-        if (quiet_ms < KEEPALIVE_SKIP_MS) {
+        if (!audio_io_playback_active() && quiet_ms < KEEPALIVE_QUIET_MS) {
             continue;
         }
         esp_websocket_client_send_text(s_client, KEEPALIVE, sizeof(KEEPALIVE) - 1,
