@@ -20,8 +20,48 @@
 #include "errno.h"
 #include "esp_tls_crypto.h"
 #include <arpa/inet.h>
+#include "esp_idf_version.h"
+
+#include "transport_ws_local.h"
+
+/*
+ * THIS FILE IS ESP-IDF 5.5.5's transport_ws.c PLUS TWO LOCAL PATCHES.
+ *
+ * Its sibling sources and BOTH include directories come straight out of
+ * $IDF_PATH -- see the CMakeLists beside it -- and it uses the private
+ * esp_transport_internal.h. So on an IDF upgrade everything around this file
+ * moves and this file does not, which either fails to build (fine) or compiles
+ * against a changed private interface and misbehaves (not fine).
+ *
+ * Gated on MAJOR.MINOR rather than PATCH: 5.5.x is the same interface and passes
+ * silently, 5.6 or 6.x stops here and asks for a human.
+ */
+#if ESP_IDF_VERSION_MAJOR != 5 || ESP_IDF_VERSION_MINOR != 5
+#error "Vendored transport_ws.c was forked from ESP-IDF 5.5.5 and the exported \
+IDF is a different minor version. Its siblings and private headers come from \
+$IDF_PATH, so they have moved and this file has not. To re-derive: run \
+components/tcp_transport/check-patch.sh to see what upstream changed, re-apply \
+the two LOCAL PATCH hunks to the new upstream file, regenerate local.patch, then \
+bump this guard."
+#endif
 
 static const char *TAG = "transport_ws";
+
+/*
+ * Frames LOCAL PATCH 2 has dropped, cumulative since boot. See the patch in
+ * _ws_write() for what qualifies, and transport_ws_local.h for why this is
+ * reachable from outside the component at all.
+ *
+ * File scope and atomic rather than a static inside _ws_write(): one counter is
+ * shared by every ws transport in the image, and the binary send path is only
+ * single-writer by accident of this project's task layout.
+ */
+static uint32_t s_local_dropped_frames;
+
+uint32_t transport_ws_local_dropped_frames(void)
+{
+    return __atomic_load_n(&s_local_dropped_frames, __ATOMIC_RELAXED);
+}
 
 #define WS_BUFFER_SIZE              CONFIG_WS_BUFFER_SIZE
 #define WS_FIN                      0x80
@@ -246,6 +286,18 @@ static int ws_connect(esp_transport_handle_t t, const char *host, int port, int 
      * to "Host: agent.deepgram.com" on the very same path, so a stock ESP-IDF
      * WebSocket client cannot reach the Deepgram Agent API at all.
      *
+     * THE TEST IS THE PORT, NOT THE SCHEME, and strictly that is approximate:
+     * the default port belongs to the scheme, so 80 is default for ws and 443
+     * for wss, and only those two pairings may omit it. This omits both, so
+     * ws://host:443 and wss://host:80 would send a Host header that RFC 7230
+     * says should carry the port. Neither combination is reachable here and
+     * neither is a thing anyone deploys.
+     *
+     * Not fixed rather than not noticed: ws_connect() is handed only host and
+     * port, and transport_ws_t carries no scheme or TLS flag, so telling the two
+     * apart means plumbing a new field through the transport for a case nothing
+     * uses.
+     *
      * Delete this whole component once upstream omits the default port. */
     char port_suffix[8] = "";
     if (port != 80 && port != 443) {
@@ -447,6 +499,13 @@ static int _ws_write(esp_transport_handle_t t, int opcode, int mask_flag, const 
      * Nothing has been written to the wire at the drop: this check precedes the
      * header write, so the frame stream stays correctly framed.
      *
+     * ONE SEMANTIC CHANGE THIS MAKES, recorded rather than fixed: a negative
+     * timeout_ms means "block until writable", and for a self-contained binary
+     * frame that now becomes a 150 ms poll like any other. Nothing in this
+     * project passes one -- dg_agent's AUDIO_SEND_TIMEOUT is 2000 ms -- so
+     * changing it back would be a change for a hypothetical caller. Worth
+     * knowing before adding one.
+     *
      * Delete this once esp_websocket_client distinguishes a full send queue from a
      * broken socket. */
 #define WS_AUDIO_POLL_MS 150
@@ -460,10 +519,14 @@ static int _ws_write(esp_transport_handle_t t, int opcode, int mask_flag, const 
     int poll_write;
     if ((poll_write = esp_transport_poll_write(ws->parent, poll_timeout_ms)) <= 0) {
         if (poll_write == 0 && self_contained_binary) {
-            static uint32_t dropped;
-            dropped++;
+            /* add_fetch returns the new value, so the rate limit below reads it
+             * without a second load. See s_local_dropped_frames. */
+            const uint32_t dropped =
+                __atomic_add_fetch(&s_local_dropped_frames, 1, __ATOMIC_RELAXED);
             /* First of a burst, then sparsely -- at 12.5 frames/s a line per drop
-             * would bury the log that diagnoses the burst. */
+             * would bury the log that diagnoses the burst. The full count also
+             * rides the TLM line as txdrop=, which is the signal to read: this
+             * log says a burst happened, that number says how much was lost. */
             if (dropped == 1 || (dropped % 25) == 0) {
                 ESP_LOGW(TAG, "send queue full, dropped %d byte audio frame "
                               "(%" PRIu32 " since boot)", len, dropped);

@@ -933,6 +933,7 @@ void app_main(void)
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
+                 " txdrop=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
                  " ialloc=%u",
                  (double)esp_timer_get_time() / 1000000.0,
@@ -944,7 +945,7 @@ void app_main(void)
                  t.mid_avg, t.mid_max, t.high_avg, t.high_max,
                  t.peak_mic, t.peak_agent,
                  s_turns, captured, s_audio_bytes, played, dropped,
-                 dg_agent_audio_dropped(),
+                 dg_agent_audio_dropped(), dg_agent_transport_dropped(),
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),

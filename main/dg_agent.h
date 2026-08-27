@@ -163,8 +163,26 @@ bool dg_agent_is_ready(void);
  * that one is a frame the socket refused, this one is a frame that never got
  * offered because the queue ahead of it was still full. Both mean the same
  * thing about the uplink; this is the earlier and cheaper signal.
+ *
+ * That other count is dg_agent_transport_dropped() below. It used to be
+ * unreachable, which made this the only one on the TLM line and the line
+ * misleading -- a device shedding 7% of its audio at the socket read updrop=0.
  */
 uint32_t dg_agent_audio_dropped(void);
+
+/*
+ * The other half: frames the TRANSPORT dropped because the socket was not
+ * writable inside its deadline, cumulative since boot.
+ *
+ * Forwarded from transport_ws.c's local patch rather than read directly by
+ * main.c, so the telemetry loop keeps taking its uplink numbers from one place
+ * and nothing above this layer has to know the transport is patched at all.
+ *
+ * Read them as a pair. updrop rising means the queue never drained; txdrop
+ * rising means it drained into a socket that would not take it. The second is
+ * the network, and it is the one that was invisible.
+ */
+uint32_t dg_agent_transport_dropped(void);
 
 /* Streams captured microphone audio. No-op unless the session is ready. */
 esp_err_t dg_agent_send_audio(const void *pcm, size_t len);

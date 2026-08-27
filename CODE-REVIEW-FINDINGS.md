@@ -1,20 +1,23 @@
 # Code review findings, 2026-08-27
 
-A full review of `main/*.c` -- 19 files, ~11.2k lines. `managed_components/` and
-`components/tcp_transport/` are vendored and were not in scope.
+A full review of `main/*.c` -- 19 files, ~11.2k lines -- and a second pass over
+`components/tcp_transport/transport_ws.c`, the one vendored file this project
+has deliberately modified. `managed_components/` is upstream and untouched.
 
-All twelve findings and all eight nits are now fixed, across four commits. They
-are kept here rather than deleted so the reasoning survives the diff: each entry
-names the failure scenario it was fixed for, which is what stops a future change
-quietly reinstating it.
+All twelve findings from the main/ review and all eight nits are fixed, across
+four commits, plus two findings and three nits from a later pass over the
+vendored transport -- see the end. They are kept here rather than deleted so the
+reasoning survives the diff: each entry names the failure scenario it was fixed
+for, which is what stops a future change quietly reinstating it.
 
 Nothing below is speculative. Where a number appears it was measured, and two
 entries record corrections to the review as originally written -- I4's failure
 mode and I8's band arithmetic -- because both were wrong in ways that mattered.
 
 Severity is the review's own: **B** blocked a merge, **I** should be fixed,
-**N** was a nit. One thing remains unseen rather than unfixed: I8 changes what
-the panel draws and has been verified only by building.
+**N** was a nit. One thing remains unseen rather than unfixed: `txdrop=` only
+moves on a link that cannot drain the uplink, so its presence is build-verified
+and its value is not.
 
 ---
 
@@ -302,6 +305,90 @@ comment reporting a budget nobody could reproduce.
   `AUDIO_IO_CAPTURE_FRAMES` / `_BYTES` are published from `audio_io.h` and both
   sites derive from them.
 - `dg_agent.c` -- "543 B in use at fourteen colours"; the table has thirteen.
+
+## The vendored transport, reviewed separately
+
+`components/tcp_transport/transport_ws.c` is ESP-IDF 5.5.5's copy plus two local
+patches. Reviewed by diffing against upstream -- three hunks at the time -- and
+tracing every load-bearing assumption through both the transport and
+`esp_websocket_client`.
+
+### Both patches are correct, for stronger reasons than they claimed
+
+- **The `FIN + BINARY` guard is airtight.** `esp_websocket_client_send_bin` routes
+  through `send_with_opcode`, which ORs in FIN, so single-frame audio is
+  droppable. For a *fragmented* send, `send_with_exact_opcode` clears FIN on the
+  first chunk, sends middles as CONT, and gives the last chunk `0 | FIN` = `0x80`
+  -- whose low nibble is CONT, not BINARY. So **no chunk of a fragmented message
+  can ever be dropped**. `send_bin_partial` never sets FIN at all. TEXT is `0x01`.
+  PING/CLOSE are excluded by `len > 0`, PONG by opcode.
+- **`return len` matches the success contract.** `_ws_write` returns the payload
+  write's return value on success, so the drop is indistinguishable to the caller.
+- **`dg_agent.c`'s 401 reasoning is exactly right.** `http_status_code` has one
+  assignment site, reached only after the response header parses, and is never
+  cleared between attempts -- the truncated-header path returns without touching
+  it. "401 means a 401 was really read, absence proves nothing" holds.
+
+### T1. The drop was invisible to the telemetry that would show it FIXED
+
+The counter was a function-local `static`, and `TLM`'s `updrop=` is the *ring
+buffer* counter. Two different loss mechanisms, one on the line. Observed during
+this branch's testing: the log showed `send queue full ... (100 since boot)` while
+`updrop=` read `0`.
+
+Fixed by promoting the counter to file scope with an atomic increment
+(`__atomic_add_fetch` returns the new value, so the existing burst-logging reads
+it without a second load), publishing one accessor from a new
+`components/tcp_transport/include/transport_ws_local.h`, forwarding it through
+`dg_agent_transport_dropped()`, and adding `txdrop=` to the TLM line beside
+`updrop=`. Read as a pair: `updrop` says the queue never drained, `txdrop` says it
+drained into a socket that would not take it.
+
+The header is named `transport_ws_local_*` rather than `esp_transport_ws_*` so a
+call site that outlives the patches is obvious at the point of use.
+
+### T2. Nothing recorded which IDF the file was forked from FIXED
+
+It includes the private `esp_transport_internal.h`, and the CMakeLists takes the
+sibling sources *and* both include directories from `$ENV{IDF_PATH}` -- so a file
+pinned at 5.5.5 compiled against whatever IDF was exported.
+
+Two guards, because they catch different things:
+
+- an `#error` in `transport_ws.c` gated on MAJOR.MINOR, so 5.5.x passes and 5.6+
+  stops the build naming the re-derivation steps. Verified to fire at 5.6, 6.0 and
+  5.4, and stay silent at 5.5.
+- `local.patch` plus `check-patch.sh`, which regenerates the diff against
+  `$IDF_PATH` and byte-compares. This catches upstream editing the file *in place*
+  within 5.5.x, which the version guard cannot see. The diff is generated with
+  explicit `--label`s so it carries no mtimes and is byte-stable. Verified against
+  all three paths: clean pass, detected drift, and `--update` re-baselining.
+
+### Nits, fixed
+
+- The counter's non-atomic increment, folded into T1.
+- The `Host` patch tests the *port*, but the default port belongs to the
+  *scheme* -- `ws://h:443` and `wss://h:80` would get a technically wrong header.
+  Comment only: `ws_connect()` receives just host and port and `transport_ws_t`
+  carries no scheme flag, so fixing it means plumbing a field for a combination
+  nothing deploys.
+- The CMakeLists had silently dropped upstream's
+  `if(${IDF_TARGET} STREQUAL "linux")` esp_timer linkage. Restored verbatim, so
+  the override is a true single-file diff again.
+
+### Recorded, not changed
+
+- **The infinite-timeout capping.** A caller passing `timeout_ms < 0` means "block
+  until writable" and now gets a 150 ms poll for self-contained binary. No caller
+  here does that, so changing it back would be a change for a hypothetical. It has
+  a comment.
+- **An upstream bug.** `_ws_write` masks the caller's buffer in place and, on a
+  header-write failure, returns `-1` without reverting it, leaving the caller's
+  data XORed. Unreachable here only because `esp_websocket_client` always
+  `memcpy`s into its own `tx_buffer` first -- which is also why passing a `const`
+  rodata string like `KEEPALIVE` is safe. Not fixed: diverging further from
+  upstream to fix a bug we cannot hit works against the single-file-diff
+  discipline that makes this vendoring maintainable.
 
 ## Worth keeping
 

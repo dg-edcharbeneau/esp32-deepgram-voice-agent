@@ -12,6 +12,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
+/* The local patches' one accessor; see components/tcp_transport. */
+#include "transport_ws_local.h"
 
 #include "agent_name.h"
 #include "agent_prompt.h"
@@ -1636,6 +1638,11 @@ esp_err_t dg_agent_send_audio(const void *pcm, size_t len)
 uint32_t dg_agent_audio_dropped(void)
 {
     return s_audio_dropped;
+}
+
+uint32_t dg_agent_transport_dropped(void)
+{
+    return transport_ws_local_dropped_frames();
 }
 
 esp_err_t dg_agent_inject_user_message(const char *text)
