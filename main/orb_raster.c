@@ -47,10 +47,35 @@
  * getting them wrong is not cosmetic.
  *
  * Normalising total coverage to the disc's true area fixes it outright, and makes
- * the atlas pointless: accumulate the raw edge function over the bounding box,
- * then scale so the coverage sums to pi*r^2. The edge shape is preserved where it
- * matters and the ink is exactly right at every radius, with no table, no 80 kB
- * of PSRAM, no boot-time precompute, and exact sub-pixel positioning for free.
+ * the atlas pointless FOR CORRECTNESS: accumulate the raw edge function over the
+ * bounding box, then scale so the coverage sums to pi*r^2. The edge shape is
+ * preserved where it matters and the ink is exactly right at every radius, with
+ * no table, no 80 kB of PSRAM, no boot-time precompute, and exact sub-pixel
+ * positioning for free.
+ *
+ * AND THE ATLAS WAS RE-EXAMINED FOR SPEED, once the 1.5 ms above turned out to be
+ * 16.2 ms. That is the number that had made the question moot, so it deserved
+ * asking again rather than inheriting the old answer.
+ *
+ * The answer is still no, for a reason the first pass never reached: AN ATLAS
+ * CANNOT TOUCH WHAT THIS COSTS. Counted over the real dot lists in
+ * host/port.tsv, a shell frame is ~30k box pixels, ~5.7k of them needing the
+ * sqrtf, and ~10k that actually blend -- so the old "about 11,000 pixel blends"
+ * was roughly RIGHT. What was wrong by an order of magnitude is the cost of each
+ * one, and the canvas is 434 kB in PSRAM. The blends are scattered
+ * read-modify-writes into it, and clear_box() moves the boxes again before them;
+ * at ~5k distinct cache lines per pass that is the shape of the bill. An atlas
+ * removes coverage ARITHMETIC and adds atlas READS. It cannot remove a single
+ * canvas write.
+ *
+ * What did help was noticing the boxes were 58% larger than they had to be; see
+ * blit_dot(). That one is lossless, costs nothing, and cuts the clear as well.
+ *
+ * The compute/memory split above is an estimate from cache-line counting, not a
+ * device measurement, and it is the part to check before anyone spends real
+ * effort here. The decisive experiment is cheap: time clear_box() separately
+ * from the blit. The clear is pure PSRAM writes with no arithmetic at all, so its
+ * share of the frame prices every other pixel in it.
  */
 
 #include "orb_raster.h"
@@ -195,10 +220,31 @@ static void clear_box(const int16_t *b)
 static void blit_dot(const orb_dot_t *d, int16_t *box, float tr, float tg, float tb)
 {
     float r = d->r;
-    int32_t x0 = (int32_t)floorf(d->x - r - 1.0f);
-    int32_t y0 = (int32_t)floorf(d->y - r - 1.0f);
-    int32_t x1 = (int32_t)ceilf(d->x + r + 1.0f);
-    int32_t y1 = (int32_t)ceilf(d->y + r + 1.0f);
+    /*
+     * THE EXACT PIXEL-CENTRE BOUND, not a margin around the radius.
+     *
+     * Coverage is zero at d >= r + 0.5 -- the outer2 test below returns 0 there
+     * -- and a pixel is sampled at its CENTRE, ix + 0.5. So pixel ix can only
+     * carry ink when |ix + 0.5 - x| <= r + 0.5, which is x - r - 1 <= ix <= x + r.
+     * That is this box, and nothing outside it can ever be non-zero.
+     *
+     * It replaces floor(x-r-1)..ceil(x+r+1), which was up to two whole columns
+     * and rows of guaranteed-zero pixels on every dot. Measured over the 12,343
+     * dots in host/port.tsv: 58% fewer box pixels, and the rendered canvas is
+     * BYTE-IDENTICAL, because every pixel dropped had coverage exactly zero and
+     * so contributed nothing to `sum` either -- the area normalisation below is
+     * unchanged along with the ink.
+     *
+     * It pays three times over: pass one does 58% less arithmetic, pass two
+     * iterates 58% fewer pixels for the same number of blends, and the box is
+     * what clear_box() erases next frame, so the clear moves 58% less PSRAM.
+     * See the frame-cost note at the top of this file for why that last one is
+     * the part that matters.
+     */
+    int32_t x0 = (int32_t)ceilf(d->x - r - 1.0f);
+    int32_t y0 = (int32_t)ceilf(d->y - r - 1.0f);
+    int32_t x1 = (int32_t)floorf(d->x + r);
+    int32_t y1 = (int32_t)floorf(d->y + r);
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;

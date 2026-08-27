@@ -268,8 +268,53 @@ nor the `sqrtf` per annulus pixel, and that it predates `SPRITE_MAX` going
 beats the pipeline it replaced, but "too cheap to be worth improving" is no
 longer supported, and anyone who wants that conclusion back has numbers to beat.
 
-No code changed. The device was working normally throughout; the defect was a
-comment reporting a budget nobody could reproduce.
+No code changed *in that pass*. The device was working normally throughout; the
+defect was a comment reporting a budget nobody could reproduce.
+
+### I9a. The atlas question I9 reopened, answered ANSWERED
+
+The sprite atlas the plan originally called for was rejected partly on the
+strength of the 1.5 ms figure. With the real number an order of magnitude higher,
+the question had to be asked again rather than inherited.
+
+**Still no, for a reason the first pass never reached.** Counted over the 12,343
+real dots in `host/port.tsv`, a shell frame is ~30k box pixels, ~5.7k needing the
+`sqrtf`, and ~10k that actually blend. So the old "about 11,000 pixel blends" was
+roughly *right* -- what is wrong by an order of magnitude is the cost of each one.
+The canvas is 434 kB in PSRAM, the blends are scattered read-modify-writes into
+it, and `clear_box()` moves the same boxes again beforehand; at ~5k distinct cache
+lines per pass, that is the shape of the bill. **An atlas removes coverage
+arithmetic and adds atlas reads. It cannot remove a single canvas write.**
+
+**What did help: the bounding boxes were 58% larger than they had to be.**
+Coverage is zero at `d >= r + 0.5` and pixels sample at their centre, so a pixel
+can only carry ink when `x - r - 1 <= ix <= x + r`. The box was
+`floor(x-r-1)..ceil(x+r+1)` -- up to two whole rows and columns of
+guaranteed-zero pixels on every dot.
+
+Verified by extracting the shipped `blit_dot` verbatim into a host harness,
+building both variants, and rendering all 12,343 dots through each:
+
+```
+  box pixels    : old 835472 -> new 348422  (58% fewer)
+  canvas differs: 0 of 217156 pixels
+  RESULT: byte-identical canvas
+```
+
+Byte-identical because every dropped pixel had coverage exactly zero, so it
+contributed nothing to `sum` and the area normalisation is unchanged too. It pays
+three times: pass one does 58% less arithmetic, pass two iterates 58% fewer
+pixels for the same blends, and the stored box is what `clear_box()` erases next
+frame, so the clear moves 58% less PSRAM. A marginal bonus at high amplitude --
+the clip threshold moves from r > 8.5 to r > 9, so slightly fewer large dots get
+truncated by `SPRITE_MAX`.
+
+**What is still an estimate.** The compute-versus-memory split comes from
+cache-line counting, not from the device. It does not change the atlas verdict --
+an atlas cannot reduce canvas writes under any split -- but it is what to check
+before spending real effort here. The decisive experiment is cheap: time
+`clear_box()` separately from the blit. The clear is pure PSRAM writes with no
+arithmetic at all, so its share of the frame prices every other pixel in it.
 
 
 ---
