@@ -9,6 +9,20 @@
 > Hotspot note earned the hard way: an iPhone defaults its hotspot to 5 GHz on
 > recent models, and the S3 has no 5 GHz radio, so the network never appears in
 > the scan. Turn on **Maximize Compatibility** first.
+>
+> **And do not fill in the portal from the same phone whose hotspot the device
+> will join.** This one cost most of a day on 2026-08-27. To reach the setup page
+> the phone has to leave its own hotspot and join `dg-agent-XXXX`; when it hands
+> the network back it re-establishes the hotspot, and the device -- which reboots
+> the moment you press Save -- tries to associate with an access point that is
+> still coming up. What follows is a link that cannot drain the uplink: dropped
+> audio frames, `Could not lock ws-client`, and stop paths that hang on writes
+> that never complete.
+>
+> Use a second device for the portal, or provision onto an ordinary access point.
+> The same session that failed repeatedly on a hotspot did not hang once against
+> a normal AP -- that comparison is what identified it, and it is the cheap
+> experiment to reach for before suspecting the firmware.
 
 Credentials are chosen at runtime. Nothing here needs a toolchain unless you
 want one.

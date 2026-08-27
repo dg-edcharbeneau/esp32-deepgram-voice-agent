@@ -51,6 +51,19 @@ Reproduced repeatedly on 2026-08-27 against a phone hotspot that could not drain
 the uplink -- ~50 dropped audio frames per minute at the transport, then a stop
 that never completed.
 
+**On what triggered it, so the report is not read as narrower than it is.** The
+congestion in our case came from provisioning the device *through* the same phone
+whose hotspot it then joined: the phone leaves its hotspot to reach the setup
+portal, re-establishes it afterwards, and the device reboots into an access point
+that is still coming up. The identical firmware never hung against an ordinary
+access point.
+
+That makes the trigger environmental and the hang a robustness bug on top of it.
+The upstream defect stands on its own regardless: any socket that cannot accept a
+write -- conference Wi-Fi, a saturated uplink, a link in the middle of a roam --
+puts a caller of `esp_websocket_client_close()` into an unbounded wait, and the
+signature says otherwise.
+
 ## Why the obvious workarounds do not work
 
 Both were tried on hardware before settling on the third.
