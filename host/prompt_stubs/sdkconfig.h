@@ -1,14 +1,8 @@
 /*
- * Host stub for the build-gated blocks. Defaults match sdkconfig.defaults, and
- * run.sh overrides them with -D to dump the other builds.
+ * Host stub for sdkconfig.h. agent_prompt.c still includes it, but the prompt
+ * no longer has build-gated blocks -- the speech-stack choice, the mic-gate
+ * toggle and the one-line prompt override were all removed -- so there is
+ * nothing left to define. Kept as the include target, and as the place any
+ * future gate's host default would go.
  */
 #pragma once
-#ifndef CONFIG_DEEPGRAM_AGENT_PROMPT
-#define CONFIG_DEEPGRAM_AGENT_PROMPT ""
-#endif
-#ifndef CONFIG_SPEECH_STACK_FLUX
-#define CONFIG_SPEECH_STACK_FLUX 1
-#endif
-#ifndef CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
-#define CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS 1
-#endif

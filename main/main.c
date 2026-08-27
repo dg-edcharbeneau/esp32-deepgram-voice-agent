@@ -76,6 +76,28 @@ static volatile uint32_t s_turns;
  */
 static volatile int64_t s_activity_us;
 
+/*
+ * Set when the server rejects the API key, cleared when a socket comes up.
+ *
+ * It exists because the stop CANNOT happen where the rejection is noticed:
+ * on_state() runs on the WebSocket task and dg_agent_stop() only returns once
+ * that task has halted, so calling it there would be the same lock-ordering
+ * deadlock sdkconfig.defaults records as wedging this client permanently. The
+ * telemetry loop picks it up on its next pass instead -- the same trick the idle
+ * timeout uses, and dg_agent.h asks for explicitly.
+ */
+static volatile bool s_bad_key;
+
+/*
+ * Held while the panel should read "check api key".
+ *
+ * Separate from s_bad_key because they answer different questions: s_bad_key
+ * means "a stop is owed", and this means "the reason is still worth showing".
+ * Cleared when a socket comes up, or when the user touches the device -- at that
+ * point they have seen it and are acting on it.
+ */
+static volatile bool s_bad_key_notice;
+
 /* Follow-up interval after a face switch -- long enough for a frame or two to
  * land in the window, short enough not to smear the transition. */
 #define TELEMETRY_SWITCH_MS 200
@@ -162,6 +184,74 @@ static void end_interrupt(const char *why)
     ESP_LOGI(TAG, "EVT interrupt-end (%s)", why);
 }
 
+/*
+ * How long after an interrupt a tap still refuses to toggle the session.
+ *
+ * The interrupt and the toggle now share the button, and the branch between them
+ * is "is the speaker busy" -- which the interrupt itself makes false, within
+ * PLAYBACK_TAIL_MS of the flush. So the second tap of a double-tap arrives at a
+ * quiet device and reads as "end the conversation". One impatient finger, and the
+ * gesture that means "stop talking" has hung up instead.
+ *
+ * 1500 ms, matching session_ctl's COOLDOWN_MS, and for the same reason it gives:
+ * with a touch panel as the only control, ignoring a press someone meant costs
+ * far less than acting on one they did not. It delays nothing real -- the tap
+ * that ends a conversation is a considered one, and it still works a beat later.
+ */
+#define INTERRUPT_GRACE_MS 1500
+static volatile uint32_t s_interrupt_grace_ms;
+
+static bool in_interrupt_grace(void)
+{
+    if (s_interrupt_grace_ms == 0) {
+        return false;
+    }
+    /* Wrap-safe, like the mute deadline below: the difference is compared against
+     * half the range rather than the deadline against now. */
+    return (now_ms() - s_interrupt_grace_ms) >= (UINT32_MAX / 2);
+}
+
+/*
+ * Silence the reply, and stop the rest of it from arriving.
+ *
+ * The flush silences the ring. Whether that is the whole job depends on something
+ * the flush cannot see: is the reply still ARRIVING?
+ *
+ * If it is, the mute is the other half -- Deepgram has no interrupt message and
+ * keeps sending, so a flush alone just makes the agent pause and resume mid-word a
+ * moment later. Measured: 410 kB of story kept arriving over the 14 s after one
+ * tap, every byte of it discarded.
+ *
+ * If it is not -- a tap after the last byte has landed, with only the ring left to
+ * empty -- there is nothing to mute. Flush and stop.
+ *
+ * Either way the microphone stays open and the user can talk immediately, which is
+ * both what the feature promised and what releases the mute.
+ *
+ * Deliberately NOT routed through session_ctl: request() drops anything arriving
+ * while busy or inside COOLDOWN_MS, which is exactly when someone interrupts.
+ * Every call here is a single flag store, safe on the LVGL task.
+ *
+ * The caller has already established that playback is active, which is what makes
+ * this the interrupt arm rather than the toggle arm.
+ */
+static void do_interrupt(void)
+{
+    audio_io_flush();
+    note_activity();
+    s_interrupt_grace_ms = now_ms() + INTERRUPT_GRACE_MS;
+
+    if (s_turn_inbound) {
+        ESP_LOGI(TAG, "EVT interrupt");
+        audio_io_mute_playback(true);
+        s_mute_deadline_ms = now_ms() + MUTE_MAX_MS;
+    } else {
+        /* Distinct from the line above so a serial capture shows which path ran
+         * -- the tail tap arms no mute and gets no end event. */
+        ESP_LOGI(TAG, "EVT interrupt (tail)");
+    }
+}
+
 static const char *state_name(dg_agent_state_t state)
 {
     switch (state) {
@@ -169,6 +259,7 @@ static const char *state_name(dg_agent_state_t state)
     case DG_AGENT_CONNECTED:    return "connected";
     case DG_AGENT_READY:        return "ready";
     case DG_AGENT_ERROR:        return "error";
+    case DG_AGENT_BAD_KEY:      return "check api key";
     }
     return "?";
 }
@@ -177,6 +268,9 @@ static void on_state(dg_agent_state_t state, void *ctx)
 {
     ESP_LOGI(TAG, "agent session %s", state_name(state));
     if (state == DG_AGENT_CONNECTED) {
+        /* A socket that opened is a key the server accepted, so the warning has
+         * nothing left to warn about. */
+        s_bad_key_notice = false;
         /* A new socket is a new conversation, so the status line should describe
          * this one rather than every session since boot. */
         s_audio_bytes = 0;
@@ -186,6 +280,8 @@ static void on_state(dg_agent_state_t state, void *ctx)
          * but a stale true would arm a mute on the first tap of a session that
          * has nothing to mute. */
         s_turn_inbound = false;
+        /* A socket that opened is a key the server accepted. */
+        s_bad_key = false;
         /*
          * And the same for a pending mute, which is NOT belt and braces: a
          * deliberate stop goes through session_ctl and logs "session stopped"
@@ -230,6 +326,17 @@ static void on_state(dg_agent_state_t state, void *ctx)
         /* Frozen, not merely dim: this one has stopped trying. */
         ui_set_failed(true);
         ui_set_behaviour(UI_BEHAVIOUR_DISCONNECTED);
+        break;
+    case DG_AGENT_BAD_KEY:
+        /* Same teardown as ERROR -- the stream is just as gone -- but the panel
+         * is already saying "check api key" from state_name(), and the flag is
+         * what gets the retry actually stopped on a task that may do it. */
+        audio_io_note_stream_gap();
+        s_turn_inbound = false;
+        end_interrupt("key rejected");
+        ui_set_failed(true);
+        ui_set_behaviour(UI_BEHAVIOUR_DISCONNECTED);
+        s_bad_key = true;
         break;
     case DG_AGENT_DISCONNECTED:
         /* Between attempts. session_ctl reports a deliberate stop separately, so
@@ -360,54 +467,56 @@ static void on_agent_audio_done(void *ctx)
 /* Runs on the LVGL task with the LVGL lock held: signal only, never block. */
 static void on_gesture(ui_gesture_t gesture)
 {
+    /*
+     * Any deliberate touch retires the bad-key warning. The user has seen it and
+     * is acting, and leaving it armed would let the 1 Hz re-assert in the status
+     * loop paint it back over session_ctl's "connecting" a beat after a tap
+     * asked for a session.
+     */
+    s_bad_key_notice = false;
+
     switch (gesture) {
     case UI_TAP:
-        ESP_LOGI(TAG, "EVT tap");
-        session_ctl_request_toggle();
+        /*
+         * ONE TARGET, TWO MEANINGS, AND EXACTLY ONE OF THEM PER TAP.
+         *
+         * Interrupting used to have a target of its own -- everything outside the
+         * 70 px button, which is most of a 466 px panel -- and that is why it is
+         * here instead: the gesture nobody aimed at collected every brush of the
+         * bezel, and each one cost a sentence.
+         *
+         * The two meanings can share the button because they are never both
+         * plausible. Agent speaking means "stop talking"; anything else means
+         * "start or end the conversation". So the split is this if/else and
+         * nothing more: an if/else cannot fall through into the toggle, which is
+         * the property being bought -- an interrupt must never be able to also
+         * hang up.
+         *
+         * audio_io_playback_active() rather than a state of our own. It is true
+         * while the ring holds audio and for PLAYBACK_TAIL_MS past the last write,
+         * which is the same thing as "you can still hear it" -- and being wrong in
+         * the generous direction is the safe way to be wrong here, since the worst
+         * case is a tap that interrupts nothing instead of a tap that ends the
+         * conversation.
+         */
+        if (audio_io_playback_active()) {
+            do_interrupt();
+        } else if (in_interrupt_grace()) {
+            /*
+             * The second tap of an impatient double-tap, landing after the flush
+             * has already silenced the speaker. Without this it reads as a toggle
+             * and hangs up -- the exact failure the if/else above exists to
+             * prevent, arriving a beat late instead of on the same press.
+             */
+            ESP_LOGI(TAG, "EVT tap ignored (interrupt grace)");
+        } else {
+            ESP_LOGI(TAG, "EVT tap");
+            session_ctl_request_toggle();
+        }
         break;
     case UI_HOLD:
         ESP_LOGI(TAG, "EVT hold");
         session_ctl_request_restart();
-        break;
-
-    case UI_INTERRUPT:
-        /*
-         * The flush silences the ring. Whether that is the whole job depends on
-         * something the flush cannot see: is the reply still ARRIVING?
-         *
-         * If it is, the mute is the other half -- Deepgram has no interrupt
-         * message and keeps sending, so a flush alone just makes the agent pause
-         * and resume mid-word a moment later. Measured: 410 kB of story kept
-         * arriving over the 14 s after one tap, every byte of it discarded.
-         *
-         * If it is not -- a tap after the last byte has landed, with only the ring
-         * left to empty -- there is nothing to mute. Flush and stop.
-         *
-         * Either way the microphone stays open and the user can talk immediately,
-         * which is both what the feature promised and what releases the mute.
-         *
-         * Deliberately NOT routed through session_ctl: request() drops anything
-         * arriving while busy or inside COOLDOWN_MS, which is exactly when someone
-         * interrupts. Every call here is a single flag store, safe on the LVGL
-         * task.
-         */
-        if (audio_io_playback_active()) {
-            audio_io_flush();
-            note_activity();
-            if (s_turn_inbound) {
-                ESP_LOGI(TAG, "EVT interrupt");
-                audio_io_mute_playback(true);
-                s_mute_deadline_ms = now_ms() + MUTE_MAX_MS;
-            } else {
-                /* Distinct from the line above so a serial capture shows which
-                 * path ran -- the tail tap arms no mute and gets no end event. */
-                ESP_LOGI(TAG, "EVT interrupt (tail)");
-            }
-        } else {
-            /* Nothing to stop. Logged because a ring tap that appears to do
-             * nothing is otherwise indistinguishable from a dead touch panel. */
-            ESP_LOGI(TAG, "EVT interrupt (nothing playing)");
-        }
         break;
 
     case UI_TEST_DONE:
@@ -450,10 +559,21 @@ static const dg_agent_callbacks_t s_callbacks = {
 static void enter_provisioning(void) __attribute__((noreturn));
 static void enter_provisioning(void)
 {
-    /* The ring has nothing to visualise with no session, and a calm screen
-     * showing the network name is the instruction. */
+    /*
+     * The ring has nothing to visualise with no session, and a calm screen
+     * showing the network name is the instruction.
+     *
+     * Two lines now: the AP is WPA2, so the passphrase has to be legible to
+     * anyone whose camera will not act on the QR below. update_qr() moves this
+     * label under the code for exactly that purpose.
+     *
+     * Static storage because ui keeps the pointer, not the bytes.
+     */
+    static char panel[48];
+    snprintf(panel, sizeof(panel), "%s\n%s",
+             wifi_prov_ap_name(), wifi_prov_ap_password());
     ui_set_stopped(true);
-    ui_set_status(wifi_prov_ap_name(), false);
+    ui_set_status(panel, false);
 
     if (wifi_prov_start() != ESP_OK) {
         ESP_LOGE(TAG, "could not start the setup portal");
@@ -463,13 +583,16 @@ static void enter_provisioning(void)
 
     /*
      * The AP as something a camera can act on. A phone that scans this joins
-     * the network directly, which skips the one step of this whole flow that
+     * the network directly -- passphrase included, so encrypting the AP costs
+     * the user nothing -- which skips the one step of this whole flow that
      * involves reading characters off a 466 px round panel and retyping them.
      *
-     * Static storage because ui keeps the pointer, not the bytes.
+     * The payload needs no escaping because the passphrase alphabet excludes
+     * every character WIFI: treats as reserved. See AP_PASS_ALPHABET.
      */
-    static char qr[64];
-    snprintf(qr, sizeof(qr), "WIFI:T:nopass;S:%s;;", wifi_prov_ap_name());
+    static char qr[80];
+    snprintf(qr, sizeof(qr), "WIFI:T:WPA;S:%s;P:%s;;",
+             wifi_prov_ap_name(), wifi_prov_ap_password());
     ui_show_qr(qr);
 
     wifi_prov_run();
@@ -540,8 +663,6 @@ void app_main(void)
     audio_io_capture_set_enabled(false);
     ESP_ERROR_CHECK(audio_io_capture_start(mic_to_agent));
 
-    ESP_ERROR_CHECK(session_ctl_start(&s_callbacks));
-
     err = wifi_sta_wait_connected(WIFI_CONNECT_TIMEOUT_MS);
     if (err != ESP_OK) {
         /*
@@ -559,6 +680,24 @@ void app_main(void)
         wifi_sta_stop();
         enter_provisioning();
     }
+
+    /*
+     * AFTER THE LINK IS UP, not before it.
+     *
+     * session_ctl_start() calls dg_agent_init(), which reads the API key out of
+     * NVS -- a flash access, and on this config a flash access briefly disables
+     * the cache on both cores (SPIRAM_FETCH_INSTRUCTIONS / SPIRAM_RODATA). Doing
+     * that while the station is still trying to associate puts an avoidable
+     * hiccup inside the one window where the driver is timing-sensitive. Nothing
+     * needed it earlier: the session is not requested until the line below, and
+     * every session_ctl_request_*() is a no-op while s_task is NULL, so a tap
+     * during "connecting" is ignored rather than starting a doomed session.
+     *
+     * The unreachable-network path above never reaches this at all now, which is
+     * the small bonus: a device on its way to the portal no longer reads the key
+     * the portal is about to overwrite.
+     */
+    ESP_ERROR_CHECK(session_ctl_start(&s_callbacks));
     session_ctl_request_start();
 
     /*
@@ -668,6 +807,76 @@ void app_main(void)
         }
         was_ready = ready_now;
 
+        /*
+         * DEADLOCK BACKSTOP, and the last line of defence rather than a fix.
+         *
+         * session_ctl refuses every request while an action is busy, so an action
+         * that never finishes is a device that never accepts another gesture: the
+         * panel sits on "stopping" and only a physical reset recovers it. That
+         * happened repeatedly on 2026-08-27, and the cause -- an upstream CLOSE
+         * with an infinite deadline -- is fixed in dg_agent_stop(). This exists
+         * because the NEXT such blocker should cost a reboot rather than a trip
+         * to the bench.
+         *
+         * The threshold is deliberately far above any legitimate stop. A healthy
+         * one is ~150 ms; the worst measured on a congested link was 5.4 s, and
+         * the structural worst case is AUDIO_SEND_TIMEOUT plus the client's
+         * network_timeout_ms, about 7 s. Thirty seconds cannot be anything but
+         * stuck.
+         *
+         * A reboot is the right answer and not a cop-out: it is what this project
+         * already does for the AP-to-STA transition, on the grounds that it costs
+         * ~2 s and is impossible to get subtly wrong. NVS holds the network, the
+         * key, the voice and the volume, so nothing the user set is lost.
+         */
+        const uint32_t busy_ms = session_ctl_busy_for_ms();
+        if (busy_ms > 30000) {
+            ESP_LOGE(TAG, "EVT sessionstuck busy=%" PRIu32 "ms -- rebooting; a "
+                          "session action has not completed and no gesture can be "
+                          "accepted until it does", busy_ms);
+            /* Straight to the log, then out: nothing else can run on this task,
+             * and anything that could has already had thirty seconds. */
+            fflush(stdout);
+            esp_restart();
+        }
+
+        /*
+         * A rejected key is the one failure reconnecting cannot fix, so stop
+         * rather than retry it every 5 s for as long as the board is powered.
+         */
+        if (s_bad_key && session_ctl_is_running()) {
+            ESP_LOGE(TAG, "EVT badkey -- stopping; fix the key via the setup portal "
+                          "(hold BOOT 3 s) or menuconfig");
+            s_bad_key = false;   /* one stop per rejection, not one per second */
+            s_bad_key_notice = true;
+            session_ctl_request_stop();
+        }
+
+        /*
+         * AND KEEP PUTTING THE REASON BACK. session_ctl narrates its own
+         * teardown -- "stopping", then "stopped" -- which would otherwise bury
+         * the only message that says what to fix under one that says nothing.
+         *
+         * Re-asserted every pass rather than once, because do_stop() clears
+         * s_running one line BEFORE it paints "stopped": a single re-assert
+         * would lose that race. Cheap to repeat -- update_status_label()
+         * compares literals by pointer, so an unchanged status costs no render
+         * pass.
+         *
+         * ONLY WHILE THE SESSION IS DOWN, and this is the part worth getting
+         * right. An earlier version cleared the notice whenever a session was
+         * running, which looked equivalent and was not: s_running stays TRUE for
+         * the whole of do_stop(), so a stop that blocked -- and one can, see
+         * stop_wait_task()'s portMAX_DELAY in esp_websocket_client -- threw the
+         * reason away and left "stopping" on screen instead. Observed on
+         * hardware. Holding the notice and asserting it only once the session is
+         * actually down keeps the two cases apart: "stopping" while it is
+         * stopping, the reason once it has stopped.
+         */
+        if (s_bad_key_notice && !session_ctl_is_running()) {
+            ui_set_status("check api key", false);
+        }
+
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
             ready_now && s_activity_us != 0) {
             int64_t quiet_us = esp_timer_get_time() - s_activity_us;
@@ -700,7 +909,7 @@ void app_main(void)
                  "frames=%" PRIu32 " fps=%.1f draw=%.1f/%.1f "
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
-                 " played=%" PRIu32 " drop=%" PRIu32
+                 " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
                  " ialloc=%u",
                  (double)esp_timer_get_time() / 1000000.0,
@@ -712,6 +921,7 @@ void app_main(void)
                  t.mid_avg, t.mid_max, t.high_avg, t.high_max,
                  t.peak_mic, t.peak_agent,
                  s_turns, captured, s_audio_bytes, played, dropped,
+                 dg_agent_audio_dropped(),
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),

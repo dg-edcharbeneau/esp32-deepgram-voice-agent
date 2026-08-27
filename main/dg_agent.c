@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/ringbuf.h"
 #include "freertos/task.h"
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -14,6 +15,7 @@
 
 #include "agent_name.h"
 #include "agent_prompt.h"
+#include "api_key.h"
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "faces.h"
@@ -94,6 +96,66 @@ static dg_agent_callbacks_t s_cb;
 static volatile bool s_ready;
 static TaskHandle_t s_keepalive_task;
 static volatile bool s_suppress_state;
+
+/*
+ * THE UPLINK QUEUE, AND WHY THE SEND IS NOT ON THE CAPTURE TASK ANY MORE.
+ *
+ * esp_websocket_client takes its client lock for the duration of a send, with
+ * AUDIO_SEND_TIMEOUT as the deadline (see the note on it above). While the
+ * capture task owned that send, a congested socket meant the capture task was
+ * the thing holding the lock -- and dg_agent_stop() had no way to know it, or to
+ * wait for it. esp_websocket_client_stop() waits on STOPPED_BIT with
+ * portMAX_DELAY (stop_wait_task() in the component), so a stop issued while a
+ * send was wedged never returned: session_ctl's do_stop() stalled after painting
+ * "stopping", s_busy latched, and every gesture was refused from then on. The
+ * device kept rendering at 22 fps with the panel stuck on "stopping". Measured on
+ * hardware, 2026-08-27.
+ *
+ * With the send on its own task, "no send is in flight" becomes something
+ * dg_agent_stop() can assert before it touches the client -- which is the
+ * property that was missing, and the reason this is worth the extra task.
+ *
+ * Four frames of slack. Each is 80 ms, so this is 320 ms -- enough to ride out a
+ * retransmission burst, short enough that what finally goes out is still worth
+ * hearing. Overflowing drops the NEWEST frame rather than growing a backlog of
+ * stale speech, which is the same trade transport_ws.c's LOCAL PATCH 2 already
+ * makes one layer down: drop a frame, never a session.
+ */
+#define AUDIO_QUEUE_FRAMES 4
+#define AUDIO_FRAME_BYTES  2560            /* 1280 samples x int16, see audio_io.c */
+#define AUDIO_QUEUE_BYTES  (AUDIO_QUEUE_FRAMES * (AUDIO_FRAME_BYTES + 16))
+
+/* PSRAM: it is 10 kB that nothing touches from an ISR, and internal RAM is what
+ * runs out first on this board once the display is up. */
+static RingbufHandle_t s_audio_rb;
+static TaskHandle_t s_send_task;
+/*
+ * Raised around a send that holds the client lock; what dg_agent_stop() waits on.
+ *
+ * One flag per sending task, because a shared counter would need atomics that
+ * a volatile ++ does not give on this target. Covers the two sends that can be
+ * in flight while a stop arrives: the audio frames, and the keepalive -- which
+ * is TEXT, so transport_ws.c's LOCAL PATCH 2 cannot drop it and it blocks in
+ * poll_write holding the lock (see the note in keepalive_task).
+ *
+ * send_json() is deliberately NOT covered. It runs at session setup and on a
+ * function-call response, not on the cadence a stop has to race, and adding it
+ * would mean a flag written by two different tasks.
+ */
+static volatile bool s_sending;
+static volatile bool s_sending_ka;
+
+/*
+ * No congestion heuristic lives here any more, and that is deliberate.
+ *
+ * Two were tried. The first read the send's return value, which is wrong for a
+ * reason transport_ws.c states outright: LOCAL PATCH 2 drops a congested audio
+ * frame and reports it as sent -- "strictly bounded, because the drop lies to
+ * the caller" -- so it read healthy while fifty frames a minute went in the bin.
+ * The second measured send duration, which does not lie, but was still a guess
+ * guarding a call that must not be made at all. See dg_agent_stop().
+ */
+static volatile uint32_t s_audio_dropped;
 
 /* Reassembly buffer for JSON messages split across several DATA events. */
 static char *s_json;
@@ -536,7 +598,6 @@ static esp_err_t send_settings(void)
         cJSON_AddObjectToObject(agent, "listen"), "provider");
     cJSON_AddStringToObject(listen_provider, "type", "deepgram");
 
-#if CONFIG_SPEECH_STACK_FLUX
     /*
      * Flux. `version` is what selects it -- the model name alone is not enough,
      * and v1 is assumed when the field is absent.
@@ -555,10 +616,6 @@ static esp_err_t send_settings(void)
 #if CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS > 0
     cJSON_AddNumberToObject(listen_provider, "eot_timeout_ms",
                             CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS);
-#endif
-#else
-    cJSON_AddStringToObject(agent, "language", "en");
-    cJSON_AddStringToObject(listen_provider, "model", "nova-3");
 #endif
 
     cJSON *think = cJSON_AddObjectToObject(agent, "think");
@@ -767,7 +824,6 @@ static esp_err_t send_settings(void)
     cJSON_AddObjectToObject(tparams, "properties");
     cJSON_AddItemToArray(functions, set_test);
 
-#if CONFIG_SPEECH_STACK_FLUX
     /* The catalog goes in the description because JSON Schema has nowhere to
      * hang a per-enum-value note, and without it the model is choosing from
      * bare first names. */
@@ -801,20 +857,15 @@ static esp_err_t send_settings(void)
     cJSON_AddStringToObject(reset_params, "type", "object");
     cJSON_AddObjectToObject(reset_params, "properties");
     cJSON_AddItemToArray(functions, reset_voice);
-#endif
 
     cJSON *speak_provider = cJSON_AddObjectToObject(
         cJSON_AddObjectToObject(agent, "speak"), "provider");
     cJSON_AddStringToObject(speak_provider, "type", "deepgram");
-#if CONFIG_SPEECH_STACK_FLUX
     /* Same story as listen: "v2" is what picks Flux TTS. Omitting agent.speak
      * entirely would also get Flux with flux-kit-en, but being explicit keeps
      * the voice configurable. */
     cJSON_AddStringToObject(speak_provider, "version", "v2");
     cJSON_AddStringToObject(speak_provider, "model", voices_current_model());
-#else
-    cJSON_AddStringToObject(speak_provider, "model", "aura-2-thalia-en");
-#endif
     /*
      * Replayed context, and the greeting only when there is none. Resuming a
      * conversation should not open with "Hi! I am running on an ESP32" -- and
@@ -1018,7 +1069,30 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
          */
         ESP_LOGE(TAG, "transport error: %.*s",
                  ev->data_len, ev->data_ptr ? ev->data_ptr : "(no detail)");
-        set_state(DG_AGENT_ERROR);
+        /*
+         * ONE FIELD OF error_handle IS WORTH READING, and it is the one that
+         * tells a rejected API key apart from a bad network. That distinction
+         * did not matter while the key came from menuconfig; it matters now that
+         * someone types it into the setup portal and can mistype it.
+         *
+         * GATE ON THE STATUS CODE, NOT error_type. This path sets
+         * error_type = WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT after filling the
+         * status code in just above it (esp_websocket_client.c), so a test for
+         * ..._HANDSHAKE would never fire despite this being a handshake failure.
+         *
+         * AND 401 IS A POSITIVE SIGNAL ONLY. transport_ws.c assigns
+         * http_status_code only once a response header has actually been read,
+         * and never clears it between attempts, so a later non-HTTP failure can
+         * still be carrying an old one. Seeing 401 means a 401 was really read.
+         * NOT seeing it proves nothing about the key, so nothing here may treat
+         * its absence as the key being good.
+         */
+        if (ev->error_handle.esp_ws_handshake_status_code == 401) {
+            ESP_LOGE(TAG, "the Deepgram API key was rejected (HTTP 401)");
+            set_state(DG_AGENT_BAD_KEY);
+        } else {
+            set_state(DG_AGENT_ERROR);
+        }
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
@@ -1041,6 +1115,66 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
  * This lives in its own task rather than an esp_timer callback because sending
  * a frame takes the client's transmit lock and can block.
  */
+/*
+ * Drains the queue into the socket, and is the ONLY caller of send_bin.
+ *
+ * Persistent, like keepalive_task: it outlives any one session, so nothing has
+ * to join or delete it on a teardown path. While stopped, s_ready is false and
+ * it simply discards what it dequeues -- which also drains anything the capture
+ * task queued in the moments before the stop.
+ */
+static void audio_send_task(void *arg)
+{
+    while (1) {
+        size_t len = 0;
+        /* The timeout is a liveness tick, not a deadline: it is what lets this
+         * task notice a queue that has been deleted or a session that ended. */
+        void *frame = xRingbufferReceive(s_audio_rb, &len, pdMS_TO_TICKS(100));
+        if (frame == NULL) {
+            continue;
+        }
+
+        if (s_ready && s_client != NULL) {
+            /*
+             * Ahead of the send, not after it: a send that blocks is exactly when
+             * the keepalive must stay out of the way, and stamping afterwards
+             * would leave the clock stale for the whole time it was blocked.
+             */
+            s_last_audio_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            s_sending = true;
+            (void)esp_websocket_client_send_bin(s_client, (const char *)frame,
+                                                (int)len, AUDIO_SEND_TIMEOUT);
+            s_sending = false;
+
+            /*
+             * Stack headroom, reported once with real history behind it.
+             *
+             * Two things this deliberately is NOT. Not on entry -- this task's
+             * stack has to cover send_bin down through mbedtls, and a mark taken
+             * before the first send measures none of it. And not on the FIRST
+             * send either: that lands ~4 s after boot, before a serial capture
+             * reliably has the port back (the board re-enumerates after a reset),
+             * so the one number worth having was the one that always got lost.
+             *
+             * 200 frames is ~16 s of session, which is late enough to be
+             * capturable and long enough to have met a congested send or two.
+             * Not more: CONFIG_SESSION_IDLE_TIMEOUT_S ends a session after 15 s
+             * of quiet, so a threshold set for a minute of continuous talking is
+             * a threshold that never fires.
+             * 4 kB here is INTERNAL RAM, the scarce resource on this board, so
+             * this is what says whether 4 kB was the right guess.
+             */
+            static uint32_t sends;
+            if (++sends == 200) {
+                ESP_LOGI(TAG, "uplink task stack high water mark: %u B free of 4096"
+                              " after %" PRIu32 " frames",
+                         (unsigned)uxTaskGetStackHighWaterMark(NULL), sends);
+            }
+        }
+        vRingbufferReturnItem(s_audio_rb, frame);
+    }
+}
+
 static void keepalive_task(void *arg)
 {
     /* A constant string, so there is nothing to build and nothing to free. The
@@ -1080,8 +1214,10 @@ static void keepalive_task(void *arg)
         if (!audio_io_playback_active() && quiet_ms < KEEPALIVE_QUIET_MS) {
             continue;
         }
+        s_sending_ka = true;
         esp_websocket_client_send_text(s_client, KEEPALIVE, sizeof(KEEPALIVE) - 1,
                                        SEND_TIMEOUT);
+        s_sending_ka = false;
     }
 }
 
@@ -1089,10 +1225,6 @@ static void keepalive_task(void *arg)
 
 esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
 {
-    if (strlen(CONFIG_DEEPGRAM_API_KEY) == 0) {
-        ESP_LOGE(TAG, "CONFIG_DEEPGRAM_API_KEY is empty -- run `idf.py menuconfig`");
-        return ESP_ERR_INVALID_STATE;
-    }
     if (s_client != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1105,10 +1237,51 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
         return ESP_ERR_NO_MEM;
     }
 
+    /*
+     * THE AUTH HEADER IS BUILT AT RUNTIME, because the key is no longer a
+     * compile-time constant -- it comes from NVS, written by the setup portal,
+     * with CONFIG_DEEPGRAM_API_KEY as a first-boot seed. See api_key.h.
+     *
+     * Both buffers are heap, not stack, deliberately. This function is 640 B of
+     * frame before them and the two together are ~290 B more; the pattern this
+     * project settled on for transient buffers of that size is the heap, in
+     * PSRAM where it can be -- see .claude/skills/esp-stack-budget/.
+     *
+     * The client STRDUPS the header (esp_websocket_client.c, cfg->headers), so
+     * it does not have to outlive esp_websocket_client_init(). That is the only
+     * reason this can be freed a few lines down instead of living forever.
+     */
+    char *key = heap_caps_malloc(DG_API_KEY_LEN, MALLOC_CAP_SPIRAM);
+    char *auth = heap_caps_malloc(sizeof("Authorization: Token \r\n") + DG_API_KEY_LEN,
+                                  MALLOC_CAP_SPIRAM);
+    if (key == NULL || auth == NULL) {
+        free(key);
+        free(auth);
+        free(s_json);
+        s_json = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (!api_key_load(key)) {
+        ESP_LOGE(TAG, "no Deepgram API key: set one through the setup portal, "
+                      "or seed CONFIG_DEEPGRAM_API_KEY with `idf.py menuconfig`");
+        free(key);
+        free(auth);
+        free(s_json);
+        s_json = NULL;
+        return ESP_ERR_INVALID_STATE;
+    }
+    snprintf(auth, sizeof("Authorization: Token \r\n") + DG_API_KEY_LEN,
+             "Authorization: Token %s\r\n", key);
+    /* Done with the plaintext copy; the header keeps the only one this function
+     * needs, and that is freed below too. */
+    memset(key, 0, DG_API_KEY_LEN);
+    free(key);
+
     const esp_websocket_client_config_t cfg = {
         .uri = DG_AGENT_URI,
         /* The Agent endpoint authenticates on the upgrade request only. */
-        .headers = "Authorization: Token " CONFIG_DEEPGRAM_API_KEY "\r\n",
+        .headers = auth,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .buffer_size = WS_RX_BUFFER,
         /* JSON handling plus a user callback per frame needs more than the
@@ -1126,6 +1299,9 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
     };
 
     s_client = esp_websocket_client_init(&cfg);
+    /* Copied by now, whether init succeeded or not. */
+    memset(auth, 0, strlen(auth));
+    free(auth);
     if (s_client == NULL) {
         free(s_json);
         s_json = NULL;
@@ -1149,6 +1325,41 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
 
     if (xTaskCreate(keepalive_task, "dg_keepalive", 3072, NULL, 4, &s_keepalive_task) != pdPASS) {
         ESP_LOGW(TAG, "keepalive task not created; idle sessions will drop");
+    }
+
+    /*
+     * The uplink queue and its sender. Created here, once, for the life of the
+     * process -- see the note on AUDIO_QUEUE_FRAMES.
+     *
+     * Priority 5, between the capture task (7, must never wait on this) and the
+     * keepalive (4). Core 0 with the rest of the network work, deliberately NOT
+     * core 1 where the audio tasks live: this one blocks on the socket by design
+     * and must not share a core with the task feeding it.
+     *
+     * 4096 rather than the keepalive's 3072 because this runs send_bin down
+     * through mbedtls 12.5 times a second rather than once every five seconds --
+     * the same depth, far more often, so the margin is worth 1 kB.
+     */
+    s_audio_rb = xRingbufferCreateWithCaps(AUDIO_QUEUE_BYTES, RINGBUF_TYPE_NOSPLIT,
+                                           MALLOC_CAP_SPIRAM);
+    if (s_audio_rb == NULL) {
+        ESP_LOGE(TAG, "no PSRAM for the uplink queue");
+        esp_websocket_client_destroy(s_client);
+        s_client = NULL;
+        free(s_json);
+        s_json = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreatePinnedToCore(audio_send_task, "dg_uplink", 4096, NULL, 5,
+                                &s_send_task, 0) != pdPASS) {
+        ESP_LOGE(TAG, "uplink task not created");
+        vRingbufferDeleteWithCaps(s_audio_rb);
+        s_audio_rb = NULL;
+        esp_websocket_client_destroy(s_client);
+        s_client = NULL;
+        free(s_json);
+        s_json = NULL;
+        return ESP_FAIL;
     }
     return ESP_OK;
 }
@@ -1179,16 +1390,83 @@ esp_err_t dg_agent_stop(void)
     s_ready = false;
 
     /*
+     * QUIESCE THE UPLINK BEFORE TOUCHING THE CLIENT. This is the whole reason
+     * the audio send lives on its own task.
+     *
+     * s_ready is already false, so audio_send_task() will not START another
+     * send; what is left is a send that is already in flight, holding the client
+     * lock. esp_websocket_client_stop() cannot survive that -- it waits on
+     * STOPPED_BIT with portMAX_DELAY -- so waiting here, where the wait is
+     * BOUNDED, is what turns a permanent hang into a delay.
+     *
+     * The bound is AUDIO_SEND_TIMEOUT plus a margin, because that is the deadline
+     * the in-flight send is itself running against: it has to return by then,
+     * successfully or not. Proceeding anyway on expiry is deliberate -- it leaves
+     * us exactly where the old code always was, rather than adding a second way
+     * to hang.
+     */
+    const int64_t quiesce_deadline = esp_timer_get_time() +
+                                     (int64_t)pdTICKS_TO_MS(AUDIO_SEND_TIMEOUT) * 1000 + 500000;
+    while ((s_sending || s_sending_ka) && esp_timer_get_time() < quiesce_deadline) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (s_sending || s_sending_ka) {
+        ESP_LOGW(TAG, "still sending at the stop deadline (audio=%d keepalive=%d) "
+                      "-- stopping anyway", (int)s_sending, (int)s_sending_ka);
+    }
+
+    /* Nothing queued is worth sending now, and leaving it would have the sender
+     * push stale audio into the next session's socket. */
+    if (s_audio_rb != NULL) {
+        size_t len = 0;
+        void *frame;
+        while ((frame = xRingbufferReceive(s_audio_rb, &len, 0)) != NULL) {
+            vRingbufferReturnItem(s_audio_rb, frame);
+        }
+    }
+
+    /*
      * The CLOSE frame is worth sending: Deepgram bills on session duration, and
      * a half-open socket only finalises at the server's idle timeout. But only
      * when connected -- otherwise close() is a guaranteed no-op that just logs
      * an error. Neither call is checked: close() returns ESP_FAIL if the client
      * is already down, and stop() returns ESP_FAIL when a successful close has
      * already stopped the task. Both are expected, not failures.
+     *
+     * EXCEPT THAT THE CLOSE FRAME IS NOT SENT AT ALL ANY MORE, and the reason is
+     * an upstream bug rather than a decision about billing.
+     *
+     * esp_websocket_client_close() TAKES A TIMEOUT AND IGNORES IT. It forwards
+     * portMAX_DELAY to esp_websocket_client_send_close() -- see
+     * esp_websocket_client_close_with_optional_body() in the managed component --
+     * so the 1000 ms this used to pass never meant anything. On a socket that is
+     * not draining, that write never returns; and because it runs BEFORE
+     * esp_websocket_client_stop(), it hangs the caller outright. session_ctl's
+     * do_stop() stalls with "stopping" on the panel, s_busy latches, and every
+     * gesture is refused until the board is physically reset.
+     *
+     * Measured on hardware 2026-08-27, repeatedly, on an access point that could
+     * not drain the uplink.
+     *
+     * TWO ATTEMPTS AT SENDING IT ONLY WHEN SAFE BOTH FAILED, and the second is
+     * why this is now unconditional: the first read the send's return value,
+     * which lies by design (transport_ws.c LOCAL PATCH 2), and the second timed
+     * the send, which does not lie but is still a guess -- and a guess whose
+     * failure mode is a device that needs a reset is not a guess worth making.
+     *
+     * Skipping it costs a few seconds of billing per session: without a CLOSE the
+     * socket is half-open and Deepgram finalises it at its own idle timer instead
+     * of immediately. That is the whole price, and it buys a stop bounded by
+     * esp_websocket_client_stop() alone -- ~4 s on a congested link, measured,
+     * and it completes.
+     *
+     * The way back, if that billing ever matters more than this did: vendor
+     * esp_websocket_client the way components/tcp_transport already vendors its
+     * upstream, and make close_with_optional_body() honour its own timeout. Worth
+     * knowing before anyone tries -- on a congested socket the frame will not go
+     * out even with a correct deadline, so the payoff is failing in 1 s rather
+     * than hanging, which is what this line already achieves for free.
      */
-    if (esp_websocket_client_is_connected(s_client)) {
-        (void)esp_websocket_client_close(s_client, pdMS_TO_TICKS(1000));
-    }
     (void)esp_websocket_client_stop(s_client);
 
     ESP_LOGI(TAG, "session stopped");
@@ -1202,16 +1480,30 @@ bool dg_agent_is_ready(void)
 
 esp_err_t dg_agent_send_audio(const void *pcm, size_t len)
 {
-    if (!s_ready || len == 0) {
+    if (!s_ready || len == 0 || s_audio_rb == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* Ahead of the send, not after it: a send that blocks is exactly when the
-     * keepalive must stay out of the way, and stamping afterwards would leave
-     * the clock stale for the whole time it was blocked. */
-    s_last_audio_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    int sent = esp_websocket_client_send_bin(s_client, (const char *)pcm, (int)len,
-                                            AUDIO_SEND_TIMEOUT);
-    return sent < 0 ? ESP_FAIL : ESP_OK;
+
+    /*
+     * NON-BLOCKING, AND THAT IS THE ENTIRE POINT. This runs on the capture task,
+     * which also drives the display tap and must come back for the next 80 ms
+     * chunk whatever the network is doing. A zero wait means a congested uplink
+     * costs one frame here instead of stalling the task that owns the microphone
+     * -- and, more importantly, means this task never holds the client lock that
+     * dg_agent_stop() needs.
+     */
+    if (xRingbufferSend(s_audio_rb, pcm, len, 0) != pdTRUE) {
+        /* Counted rather than logged: at 12.5 frames/s a log line per drop is
+         * its own denial of service, and the count rides the TLM line. */
+        s_audio_dropped++;
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+uint32_t dg_agent_audio_dropped(void)
+{
+    return s_audio_dropped;
 }
 
 esp_err_t dg_agent_inject_user_message(const char *text)

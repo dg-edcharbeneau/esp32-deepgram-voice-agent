@@ -251,7 +251,9 @@ static void capture_task(void *arg)
         vTaskDelete(NULL);
     }
 
+#if CONFIG_MIC_LEVEL_LOG
     int64_t next_level_log = 0;
+#endif
 
     while (1) {
         int err = esp_codec_dev_read(s_mic, stereo, (int)stereo_bytes);
@@ -289,9 +291,9 @@ static void capture_task(void *arg)
         }
 #endif
 
-#if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
         /*
-         * Half duplex. The speaker and mic sit centimetres apart with no echo
+         * Half duplex, and NOT OPTIONAL -- there is no build flag for this any
+         * more. The speaker and mic sit centimetres apart with no echo
          * cancellation in this project, so anything the agent says is captured
          * and sent straight back, and the agent starts answering itself.
          * Dropping capture while it speaks is the crude fix; it also disables
@@ -313,7 +315,8 @@ static void capture_task(void *arg)
          * reply saturates the TCP send queue until a 1,630 B DMA allocation fails
          * and the session drops, and even while that audio reached Deepgram it
          * never distinguished a person talking over the agent from the residual
-         * echo. The interrupt on this device is the tap on the display ring.
+         * echo. The interrupt on this device is a tap on the centre button while the
+         * agent is speaking -- see on_gesture() in main.c.
          *
          * The whole investigation, the numbers and where the removed code lives
          * are in AEC-FINDINGS.md. Read it before removing this gate again.
@@ -331,7 +334,6 @@ static void capture_task(void *arg)
         if (audio_io_playback_active()) {
             continue;
         }
-#endif
 
         /*
          * Session gate. Ahead of the tap as well as the sink, so a stopped

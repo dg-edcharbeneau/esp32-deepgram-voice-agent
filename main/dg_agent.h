@@ -39,6 +39,16 @@ typedef enum {
     DG_AGENT_CONNECTED,     /* socket up, Settings sent, not acknowledged yet */
     DG_AGENT_READY,         /* SettingsApplied received: safe to send audio */
     DG_AGENT_ERROR,         /* transport or handshake failure */
+    /*
+     * The server rejected the API key (HTTP 401 on the upgrade). Distinct from
+     * DG_AGENT_ERROR because it is the one failure retrying cannot fix: the
+     * client would otherwise reconnect every 5 s against a key that will never
+     * work, and the panel would say "error" as though the network were at fault.
+     *
+     * Whoever observes this is expected to stop the session -- from another
+     * task, per the note below.
+     */
+    DG_AGENT_BAD_KEY,
 } dg_agent_state_t;
 
 /*
@@ -144,6 +154,17 @@ void dg_agent_suppress_state_events(bool suppress);
 
 /* True once SettingsApplied has been received. */
 bool dg_agent_is_ready(void);
+
+/*
+ * Frames the uplink queue had to drop because the socket could not keep up,
+ * cumulative since boot.
+ *
+ * Distinct from transport_ws.c's own "send queue full" count one layer down:
+ * that one is a frame the socket refused, this one is a frame that never got
+ * offered because the queue ahead of it was still full. Both mean the same
+ * thing about the uplink; this is the earlier and cheaper signal.
+ */
+uint32_t dg_agent_audio_dropped(void);
 
 /* Streams captured microphone audio. No-op unless the session is ready. */
 esp_err_t dg_agent_send_audio(const void *pcm, size_t len);

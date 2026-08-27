@@ -231,11 +231,12 @@ it copies and frees. Three properties are worth keeping:
   mangles a name starting with a digit into an extra leading underscore, so
   `10-formatting.md` would be a trap; the C table is the single place the shape
   of the prompt is stated.
-- **Two blocks are build-gated**, for the same reason `send_settings()` gates its
-  Flux fields: a prompt describing a build you did not make is worse than a
-  shorter one, because the model asserts it confidently. `substance-flux.md`
-  needs the Flux stack, and `half-duplex.md` / `barge-in.md` follow
-  `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS`.
+- **Nothing is build-gated any more**, but the rule that governed the gates
+  still governs any new block: a prompt describing a build you did not make is
+  worse than a shorter one, because the model asserts it confidently. Both
+  former gates were removed with their Kconfig options — the build is Flux-only,
+  so `substance-flux.md` is unconditional, and `half-duplex.md` is the only
+  duplex block left now that barge-in is settled (`AEC-FINDINGS.md`).
 - **The frame does not grow with the prompt.** `agent_prompt_build()` measures
   80 bytes of stack against an 11 kB result, which matters because
   `send_settings()` already sits at 2,944 B of the WebSocket task's 6,144 — see
@@ -250,22 +251,31 @@ A reopened session — every voice change is one — appends a note saying the
 replayed history is the same conversation, which is what stops the model
 starting over.
 
-`CONFIG_DEEPGRAM_AGENT_PROMPT` still exists as a one-line override for bench
-experiments. It is empty by default and logs a warning when set, because a
-forgotten override looks exactly like a prompt with no effect.
-
 ## Boot and provisioning
 
-Credentials live in NVS and **NVS wins**: `CONFIG_WIFI_SSID` is a first-boot seed
-only. The portal always ends in a reboot, which is what keeps the AP-to-STA
-transition from having to be unpicked on a live device.
+Credentials live in NVS and **NVS wins**: `CONFIG_WIFI_SSID` and
+`CONFIG_DEEPGRAM_API_KEY` are first-boot seeds only. The portal always ends in a
+reboot, which is what keeps the AP-to-STA transition from having to be unpicked
+on a live device — and, for the key, is also how it gets applied, since
+`dg_agent_init()` reads it once when the client is built.
+
+The two sit in **separate NVS namespaces** (`wifi` and `deepgram`) so forgetting
+a network does not cost the user their key. The AP is WPA2 rather than open
+specifically because the key crosses it; `wifi_prov.h` carries that argument,
+including the one it replaced.
+
+A rejected key is the one failure the client must not retry, so `dg_agent.c`
+reads the upgrade status out of the error event and reports `DG_AGENT_BAD_KEY` on
+a 401. The **stop happens on another task** — `main.c`'s telemetry loop — because
+`on_state()` runs on the WebSocket task and `dg_agent_stop()` waits for that task
+to halt.
 
 ```mermaid
 flowchart TB
     subgraph portal["Captive portal — credentials are NOT erased here"]
-        ap["open SoftAP dg-agent-XXXX"] --> qr["QR on screen:<br/>WIFI:T:nopass;S:…;;"]
+        ap["WPA2 SoftAP dg-agent-XXXX"] --> qr["QR on screen:<br/>WIFI:T:WPA;S:…;P:…;;"]
         qr --> srv["httpd: GET / · GET /scan · POST /save<br/>+ DNS responder, 404 → redirect"]
-        srv --> save["wifi_creds_save → esp_restart"]
+        srv --> save["wifi_creds_save + api_key_save → esp_restart"]
     end
 
     boot0([app_main]) --> nvs["nvs_flash_init<br/><i>erase and retry if stale</i>"]
@@ -278,8 +288,9 @@ flowchart TB
     assoc --> uistart["ui_start<br/><i>~1.2 s CO5300 reset,<br/>overlapped with association</i>"]
 
     uistart2 --> ap
-    uistart --> capstart["capture task started, gated"] --> ctl[session_ctl_start] --> wait{"wifi_sta_wait_connected<br/>30 s"}
-    wait -->|"ok"| run["session_ctl_request_start<br/>→ telemetry loop, 1 line/s"]
+    uistart --> capstart["capture task started, gated"] --> wait{"wifi_sta_wait_connected<br/>30 s"}
+    wait -->|"ok"| ctl["session_ctl_start<br/><i>after the link: it reads the API key,<br/>and a flash read stalls the cache</i>"]
+    ctl --> run["session_ctl_request_start<br/>→ telemetry loop, 1 line/s"]
     wait -->|"unreachable"| ap
 
     save -.->|"reboot"| boot0
@@ -289,6 +300,84 @@ Holding BOOT for 3 seconds erases the saved network and reboots straight into
 the portal. `GPIO 0` is polled after startup rather than sampled at reset — held
 low *through* a reset it puts the ROM into USB download mode, so "hold BOOT while
 pressing RESET" is emphatically not a Wi-Fi reset.
+
+### From link-up to the first word
+
+The chart above ends at `got ip`. What follows is five tasks coming up in an
+order that matters, and the diagram below is the local half — the wire half is
+the Agent API sequence earlier in this document.
+
+```mermaid
+sequenceDiagram
+    participant M as main task
+    participant S as session_ctl
+    participant G as dg_agent
+    participant W as ws client task
+    participant U as dg_uplink
+    participant C as audio_cap
+
+    Note over M: got ip
+
+    M->>S: session_ctl_start
+    S->>G: dg_agent_init
+    G->>G: api_key_load — NVS, else the Kconfig seed
+    Note over G: the only read of the key, ever
+    G->>G: header built in PSRAM, client strdups it, both freed
+    G->>U: create dg_uplink + PSRAM ring buffer
+    G->>G: create dg_keepalive
+
+    M->>S: session_ctl_request_start
+    S->>G: dg_agent_start
+    G->>W: client_start → TLS, cert bundle
+    Note over W: 401 here means BAD_KEY, not a bad network
+    W-->>S: CONNECTED → Settings sent
+    W-->>S: SettingsApplied → READY
+    S->>C: capture ungated
+
+    loop while ready
+        C->>U: enqueue 80 ms frame, never blocks
+        U->>W: send_bin, holds the client lock
+        W-->>C: agent PCM → playback, mic gated while it talks
+    end
+
+    Note over M: idle 15 s, or a tap
+    M->>S: session_ctl_request_stop
+    S->>G: dg_agent_stop
+    G->>G: s_ready = false, wait for the in-flight send
+    G->>G: drain the queue, no CLOSE frame
+    G->>W: client_stop
+    W-->>S: stopped
+```
+
+Four properties of this are load bearing, and three of them were bought the
+expensive way.
+
+- **The key is read once.** `dg_agent_init()` is the only caller of
+  `api_key_load()`, so a new key takes effect on the reboot the portal always
+  performs. Nothing applies one to a live session.
+- **`session_ctl_start()` happens after the link is up.** It reads NVS, and on
+  this config a flash read briefly disables the cache on both cores — which is
+  the one thing not to do while the station is still associating. Nothing needed
+  it earlier: every `session_ctl_request_*()` is a no-op while the task does not
+  exist, so a tap during "connecting" is ignored rather than starting a session
+  with no network.
+- **The audio send is not on the capture task.** `audio_cap` enqueues and returns;
+  `dg_uplink` owns every `send_bin` and therefore the client lock. That is what
+  makes "no send is in flight" something `dg_agent_stop()` can assert before it
+  touches the client, and it is what keeps a congested uplink from stalling the
+  task that owns the microphone. Overflow drops the newest frame — `updrop` in the
+  telemetry line — because 80 ms of stale speech is worth less than latency.
+- **No CLOSE frame is sent.** `esp_websocket_client_close()` takes a timeout and
+  forwards `portMAX_DELAY` to the frame send, so on a socket that cannot accept a
+  write it never returns — and it runs *before* the stop it precedes. That hung
+  the control task with "stopping" on the panel until the board was reset. The
+  session now finalises at Deepgram's idle timer instead, which costs a few
+  seconds of billing. See `esp-websocket-close-ignores-timeout.md`, and the long
+  comment in `dg_agent_stop()` for the two workarounds that failed first.
+
+A stop is ~150 ms on a healthy link and a second or two on a bad one. If one ever
+fails to finish, main's loop reboots the device after 30 s rather than leaving it
+unable to accept a gesture.
 
 ## Display
 

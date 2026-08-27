@@ -113,8 +113,8 @@ ahead and finish while the speaker was still talking. The tap sits in
 90 ms, the depth of the I2S DMA.
 
 **The mic tap sits after the half-duplex gate**, so the display shows what
-actually goes upstream. With `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` set, that also
-means the two sources are never live at once.
+actually goes upstream. Because that gate is unconditional, the two sources are
+never live at once.
 
 **There is no FFT in the default path.** The orb needs a scalar RMS for gesture
 depth and three bands — from two cascaded one-pole crossovers at 250 Hz and
@@ -170,23 +170,72 @@ listening pose, because the old test was "did a PCM block arrive recently" and
 the capture tap fires every 80 ms whether or not anyone is speaking.
 `CONFIG_UI_TELEMETRY_MS` turns it down.
 
-## Ending and starting a conversation
+## Ending, starting, and interrupting a conversation
 
-The **inner circle** is the control, about 70 px in radius. **Tap** it to
-toggle: end the current conversation, or open a new one. **Hold it for a second**
-to force a restart from either state, for when a session is up but wedged.
-Touches outside the circle are ignored — the whole panel used to be live, and
-brushing the bezel was enough to end a conversation.
+The **inner circle** is the control, about 70 px in radius, and it is the only
+live part of the screen. **Tap** it and one of two things happens:
+
+| when you tap | what happens |
+| --- | --- |
+| the agent is speaking | **interrupt** — the reply stops and the mic stays open |
+| anything else | **toggle** — end the current conversation, or open a new one |
+
+**Hold it for a second** to force a restart from either state, for when a session
+is up but wedged. Touches outside the circle are ignored.
+
+**One target, two meanings, and never both.** The interrupt used to have a target
+of its own: everything *outside* the button, which is most of a 466 px panel. That
+was backwards. The gesture nobody aims at collected every brush of the bezel, and
+each stray touch cost a sentence — the same complaint AEC-FINDINGS.md records from
+the other side, that "`UI_INTERRUPT` fired on any short click outside the centre
+button". Moving it onto the button is what makes it safe, because the two meanings
+are never both plausible at once: while the agent is talking a tap can only mean
+*stop talking*, and the rest of the time it can only mean *start or end this*. The
+split is a single `if`/`else` in `on_gesture()` — an `if`/`else` cannot fall
+through into the toggle, which is the property being bought. An interrupt must
+never be able to also hang up.
+
+The branch tests `audio_io_playback_active()`, not a state of the UI's own: true
+while the ring holds audio and for `PLAYBACK_TAIL_MS` past the last write, which is
+the same thing as "you can still hear it". Being wrong in the generous direction is
+the safe way to be wrong here — the worst case is a tap that interrupts nothing,
+against a tap that ends the conversation.
+
+There is one timer behind it. The interrupt makes its own branch condition false
+within ~300 ms of the flush, so the second tap of an impatient double-tap arrives
+at a quiet device and reads as *hang up*. `INTERRUPT_GRACE_MS` (1.5 s, matching
+`session_ctl`'s cooldown) refuses the toggle for that window and logs
+`EVT tap ignored (interrupt grace)`. Ending a conversation is a considered gesture;
+it still works a beat later.
+
+The **BOOT button diverges here on purpose**: its click is an unconditional
+toggle, whatever the audio is doing. It is the escape hatch — the thing that still
+works on a device whose display or session is misbehaving — so what it does must
+not depend on the state of the audio path. The interrupt lives on the screen.
+
+### Seeing the button
+
+`CONFIG_UI_SHOW_INDICATORS` (default off) draws the touch target as a thin ring at
+exactly the hit radius, and puts a line under the status word naming what a tap
+does right now — `interrupt`, `stop`, `start`, or `advance` during the display
+test. The ring changes colour with it, so the affordance and the action agree.
+
+It shows; it does not change. Every gesture behaves identically with the flag off.
+The cost is a frame: the ring is drawn after the face and invalidates its own
+bounding box, which the orb otherwise avoids — it invalidates only the dots it
+moved. Measured, it adds 176 B to `frame_timer_cb`'s stack frame (192 → 368 B
+against an 8 kB LVGL task stack) and about 480 B of flash.
 
 A press has to show, because a tap landing during the cooldown otherwise gives no
 sign it was seen. Each face signals it in its own grammar: the spectrum lights
 its inner ring cyan, and the orb lifts the whole shell's amplitude, which reuses
 the "event" coupling every one of its behaviours already has.
 
-One rough edge, recorded rather than fixed: the spectrum draws a ring at exactly
-the hit radius, so its affordance and its target coincide. The orb paints across
-about 410 px with no centre landmark at all, so it looks like a much larger
-button than it is.
+One rough edge, half fixed: the spectrum draws a ring at exactly the hit radius,
+so its affordance and its target coincide. The orb paints across about 410 px with
+no centre landmark at all, so it looks like a much larger button than it is.
+`CONFIG_UI_SHOW_INDICATORS` answers this on the bench, but not on a shipped
+device, where the orb is still a 466 px picture wrapped around a 70 px control.
 
 There is also a **1.5 s cooldown** after each action completes, and requests are
 refused outright while one is in progress rather than queued. Queueing was the
@@ -224,8 +273,10 @@ BOOT is now wired up in [main/boot_button.c](main/boot_button.c) — click to
 start/stop, hold three seconds to forget the saved network — which works because
 [main/session_ctl.c](main/session_ctl.c) takes plain `toggle()` / `restart()`
 requests from any task. The screen keeps the gestures below unchanged; a
-"hold even longer" gesture was never an option, because `LONG_PRESSED` fires at
-~400 ms and would trip restart on the way past.
+"hold even longer" gesture was never an option, because `LONG_PRESSED` would trip
+restart on the way past. (The threshold is 1000 ms, set by
+`lv_indev_set_long_press_time()` in `ui.c`. LVGL's own default is 400 ms, which is
+well inside an ordinary tap.)
 
 **GPIO 0 is a strapping pin.** Held low *through* a reset it puts the ROM into
 USB download mode and the app never starts, so BOOT-held-while-pressing-RESET is
@@ -608,14 +659,16 @@ one-flag change.
 and after an NVS erase. `ESP_ERR_NVS_NOT_FOUND` on read is the ordinary
 first-boot case, not an error.
 
-## Speech stack: Flux or Nova-3 + Aura
+## Speech stack: Flux
 
-`menuconfig` -> "Speech stack" picks between:
+The build is Flux-only: `flux-general-en` STT with model-integrated end-of-turn
+detection, and Flux TTS (`CONFIG_DEEPGRAM_FLUX_VOICE`, default `flux-kit-en`).
 
-- **Flux** (default) — `flux-general-en` STT with model-integrated end-of-turn
-  detection, and Flux TTS (`CONFIG_DEEPGRAM_FLUX_VOICE`, default `flux-kit-en`).
-- **Nova-3 + Aura** — the previous stack, kept so the two can be compared on one
-  build.
+A `menuconfig` choice used to offer Nova-3 + Aura as a fallback, and it was
+removed because it could not be selected — `CONFIG_DEEPGRAM_FLUX_VOICE` was
+declared `depends on SPEECH_STACK_FLUX` while `voices.c` referenced it
+unguarded, so picking the fallback failed the build. A fallback that has never
+compiled is worse than no fallback, because it is believed.
 
 Both halves of Flux live inside the Agent API, so this is a `Settings` change
 rather than a second set of sockets. What selects Flux is
@@ -644,9 +697,9 @@ one.
 ### Two things that differ from v1
 
 - **No `agent.language` on the Flux path.** `language` is a v1 listen-provider
-  option; Flux uses `language_hints`, and `flux-general-en` implies English. The
-  field is still sent on the Nova branch. If `SettingsApplied` ever stops
-  arriving after a Settings change, this is the first thing to check.
+  option; Flux uses `language_hints`, and `flux-general-en` implies English. If
+  `SettingsApplied` ever stops arriving after a Settings change, this is the
+  first thing to check.
 - **Turn events stay internal.** Flux's `TurnInfo` / `StartOfTurn` /
   `EndOfTurn` belong to `/v2/listen`. Inside the Agent API they are consumed by
   the orchestrator and are *not* surfaced to the client, so the event decoding in
@@ -705,24 +758,49 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 
 ## Configure and build
 
-The API key lives in Kconfig, not in source, and `sdkconfig` is gitignored.
+**Nothing here needs a toolchain any more.** Leave the SSID, password and API
+key empty and the device raises a setup portal on first boot that asks for all
+three. The Kconfig values are first-boot seeds only, and anything saved beats
+them. See **[WIFI-SETUP.md](WIFI-SETUP.md)** for all four ways credentials get
+in, and for what to do when it will not connect.
 
-**Wi-Fi is chosen at runtime** — leave the SSID and password empty and the device
-raises a setup portal on first boot. The Kconfig values are only a first-boot
-seed, and a saved network beats them. See **[WIFI-SETUP.md](WIFI-SETUP.md)** for
-all four ways credentials get in, and for what to do when it will not connect.
+The provisioning AP is WPA2, and its passphrase reaches the phone inside the QR
+code on the panel — it is encrypted because the portal carries the API key, which
+unlike a Wi-Fi password works from anywhere and bills to you.
+
+`sdkconfig` is gitignored, so a key seeded there does not reach git.
 
 ```bash
-. ~/Documents/source-iot/esp/esp-idf-5.5.5/export.sh
+. /path/to/esp-idf/export.sh          # built and verified against v5.5.5
 idf.py set-target esp32s3
-idf.py menuconfig      # -> "Deepgram Agent Device": API key (SSID/password optional)
+idf.py menuconfig      # -> "Deepgram Agent Device" (all of it optional: the portal asks)
 idf.py build
-idf.py -p /dev/cu.usbmodem* flash
-idf.py -p /dev/cu.usbmodem* -b 2000000 monitor
+idf.py flash
+idf.py -b 2000000 monitor
 ```
 
 The console runs at **2 000 000 baud**, matching `spec_analyzer_radial` so the
 same monitor command works for both projects.
+
+**No `-p` above on purpose.** ESP-IDF finds the port itself when one board is
+attached, which is the only form that reads the same on every OS. With more than
+one attached, name it once rather than on every command:
+
+| OS | Name the port once |
+|---|---|
+| macOS | `export ESPPORT=/dev/cu.usbmodem101` |
+| Linux | `export ESPPORT=/dev/ttyACM0` |
+| Windows (PowerShell) | `$env:ESPPORT = "COM3"` |
+| Windows (cmd) | `set ESPPORT=COM3` |
+
+This board is **native USB CDC**, not a UART bridge, so on Linux it appears as
+`ttyACM*` — `ttyUSB*` is for boards with a CP210x or FTDI chip, and looking for
+it here finds nothing. Same reason the macOS name is `cu.usbmodem*` rather than
+`cu.SLAB_USBtoUART`. A port that exists but will not open on Linux is almost
+always group membership: `sudo usermod -aG dialout $USER`, then log out and back
+in.
+
+`-p` still works per command and beats `ESPPORT` when set.
 
 ## Layout
 
@@ -731,6 +809,7 @@ same monitor command works for both projects.
 | [main/main.c](main/main.c) | boot order, session callbacks, status loop |
 | [main/wifi_sta.c](main/wifi_sta.c) | station bring-up, blocks on `IP_EVENT_STA_GOT_IP` |
 | [main/wifi_creds.c](main/wifi_creds.c) | credentials in NVS, and why a saved network beats Kconfig |
+| [main/api_key.c](main/api_key.c) | the Deepgram API key in NVS, same precedence rule, never logged |
 | [main/wifi_prov.c](main/wifi_prov.c) | setup portal: SoftAP, the page, captive-portal DNS |
 | [main/boot_button.c](main/boot_button.c) | BOOT/GPIO 0: click toggles, 3 s hold forgets the network |
 | [main/dg_agent.c](main/dg_agent.c) | Agent API client: `Settings`, event decoding, KeepAlive |
@@ -748,7 +827,7 @@ same monitor command works for both projects.
 | [main/orb_colors.c](main/orb_colors.c) | the orb colour catalog, same split, for the `set_color` schema |
 | [host/](host/) | off-device harnesses: geometry parity against the upstream TypeScript, and `prompt.sh` to print the assembled prompt |
 | [main/session_ctl.c](main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
-| [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / name / greeting / audio / prompt override, and the Wi-Fi seed |
+| [main/Kconfig.projbuild](main/Kconfig.projbuild) | name / greeting / audio / display, and the Wi-Fi and API key seeds |
 | [WIFI-SETUP.md](WIFI-SETUP.md) | every way to get credentials onto the device, and why it will not connect |
 | [sdkconfig.defaults](sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
 | [components/tcp_transport/](components/tcp_transport/) | two local patches to IDF's WS transport: the handshake Host header, and dropping a congested audio frame instead of killing the session — see below |
@@ -959,9 +1038,10 @@ misalign the first sample of the next reply.
 
 Speaker and mic sit centimetres apart and there is no echo cancellation here, so
 anything the agent says is captured and sent straight back — and the agent starts
-answering itself. `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` (default **on**) drops
-capture while playback is active, plus a 300 ms tail for audio already in the I2S
-DMA.
+answering itself. Capture is dropped while playback is active, plus a 300 ms
+tail for audio already in the I2S DMA. This is unconditional — the build option
+that used to switch it off was removed once `AEC-FINDINGS.md` closed the
+question.
 
 It is a crude fix and it costs barge-in: with it on you cannot interrupt the
 agent, and `UserStartedSpeaking` will not fire mid-reply.
@@ -1049,8 +1129,9 @@ were sixteen in twenty-four seconds.
 reasons: streaming the microphone through the agent's reply saturates the TCP send
 queue until a TLS allocation fails and the session drops, and even while that
 audio was reaching Deepgram it never distinguished a person talking over the agent
-from the residual echo. The interrupt on this device is the **tap on the display
-ring**, which works in any room and needs no canceller.
+from the residual echo. The interrupt on this device is a **tap on the centre
+button while the agent is speaking**, which works in any room and needs no
+canceller.
 
 The whole investigation, including the negative result and the measurement errors
 made along the way, is in [AEC-FINDINGS.md](AEC-FINDINGS.md). The canceller,
@@ -1086,6 +1167,5 @@ default. This is the order `bsp_extra` uses.
 | Option | Default | When to change it |
 |---|---|---|
 | `CONFIG_MIC_IN_GAIN` | 24 dB | raise if mic peaks stay near zero while you talk |
-| `CONFIG_AUDIO_OUT_VOLUME` | 80 | speaker too quiet or clipping |
+| `CONFIG_AUDIO_OUT_VOLUME` | 100 | speaker too quiet or clipping |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
-| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | on | off once the AFE runs — the reference channel it needs is proven, see above |

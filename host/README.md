@@ -70,8 +70,6 @@ unimplemented and throws rather than guess, since nothing here supplies one.
 
     ./prompt.sh                 as this build's sdkconfig would send it
     ./prompt.sh --resumed       what a session reopened by a voice change sends
-    ./prompt.sh --nova          the Nova-3 + Aura build
-    ./prompt.sh --barge-in      with MIC_GATE_WHILE_AGENT_SPEAKS off
 
 A prompt edit is a words change, and waiting on a flash to read the words back is
 the slowest possible way to review one.

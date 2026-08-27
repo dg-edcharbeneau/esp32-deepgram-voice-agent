@@ -51,8 +51,8 @@ typedef struct {
  * if the allocation failed -- callers should fall back rather than abandon the
  * session, because a session with no persona still works.
  *
- * ctx may be NULL. If CONFIG_DEEPGRAM_AGENT_PROMPT is non-empty it wins over
- * everything here, which is the bench-experiment escape hatch; leave it empty
- * to use the files.
+ * ctx may be NULL. The files are always in charge -- the one-line Kconfig
+ * override that used to pre-empt them is gone, because a forgotten override
+ * looked exactly like a prompt with no effect.
  */
 char *agent_prompt_build(const agent_prompt_ctx_t *ctx);
