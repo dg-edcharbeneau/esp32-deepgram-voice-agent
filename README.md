@@ -770,12 +770,32 @@ all four ways credentials get in, and for what to do when it will not connect.
 idf.py set-target esp32s3
 idf.py menuconfig      # -> "Deepgram Agent Device": API key (SSID/password optional)
 idf.py build
-idf.py -p /dev/cu.usbmodem* flash
-idf.py -p /dev/cu.usbmodem* -b 2000000 monitor
+idf.py flash
+idf.py -b 2000000 monitor
 ```
 
 The console runs at **2 000 000 baud**, matching `spec_analyzer_radial` so the
 same monitor command works for both projects.
+
+**No `-p` above on purpose.** ESP-IDF finds the port itself when one board is
+attached, which is the only form that reads the same on every OS. With more than
+one attached, name it once rather than on every command:
+
+| OS | Name the port once |
+|---|---|
+| macOS | `export ESPPORT=/dev/cu.usbmodem101` |
+| Linux | `export ESPPORT=/dev/ttyACM0` |
+| Windows (PowerShell) | `$env:ESPPORT = "COM3"` |
+| Windows (cmd) | `set ESPPORT=COM3` |
+
+This board is **native USB CDC**, not a UART bridge, so on Linux it appears as
+`ttyACM*` — `ttyUSB*` is for boards with a CP210x or FTDI chip, and looking for
+it here finds nothing. Same reason the macOS name is `cu.usbmodem*` rather than
+`cu.SLAB_USBtoUART`. A port that exists but will not open on Linux is almost
+always group membership: `sudo usermod -aG dialout $USER`, then log out and back
+in.
+
+`-p` still works per command and beats `ESPPORT` when set.
 
 ## Layout
 
