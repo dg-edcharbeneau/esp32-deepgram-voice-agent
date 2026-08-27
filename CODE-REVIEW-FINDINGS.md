@@ -3,7 +3,7 @@
 A full review of `main/*.c` -- 19 files, ~11.2k lines. `managed_components/` and
 `components/tcp_transport/` are vendored and were not in scope.
 
-Six of the twelve findings are fixed, across two commits. The rest are recorded
+Seven of the twelve findings are fixed, across three commits. The rest are recorded
 here rather than fixed, so the next person to open one of these files does not
 have to re-derive them. Nothing below is speculative: each one names the failure
 scenario, and where a number appears it was measured or verified.
@@ -138,6 +138,47 @@ call with `ESP_ERR_INVALID_STATE`. Defence for a caller that does not exist yet,
 but `audio_io.h` already stated "the task cannot be created twice" as a property
 of the module, and now something enforces it.
 
+### I6. `send_settings()` kept 2,880 B of catalog buffers in one frame FIXED
+
+`faces[512] + face_desc[700] + catalog[768] + description[900]` all coexisted in
+a single frame on the 6144-byte WebSocket task, above cJSON's own recursion.
+
+The comment beside `set_color` recorded that adding a *third* such pair tripped
+the stack canary and put the device in a boot loop -- recovery needed BOOT held
+while RESET was tapped, because the board rebooted faster than esptool could
+sync -- and then solved it only for `set_color`. The two older pairs were left in
+place, so the trap the comment warned about was still armed.
+
+Both now use the one-buffer PSRAM pattern `set_color` introduced: the prefix is
+written with `snprintf`, the catalog appended into the tail of the same
+allocation, and the string freed immediately since cJSON copies it. The wire text
+is byte-identical -- including the trailing full stop the single `snprintf` used
+to supply, which is re-appended explicitly so this is a move off the stack and
+not a change to what the model reads.
+
+Measured with `.claude/skills/esp-stack-budget/stackcheck.py` either side:
+
+| | before | after |
+|---|---|---|
+| `send_settings` frame | 2,944 B | no such symbol -- inlined |
+| `on_ws_event` frame (its caller) | 192 B | 192 B |
+| deepest point on that path | **3,136 B of 6,144** (51%) | **192 B** (3%) |
+
+With the buffers gone the function is small enough that GCC inlines it into
+`on_ws_event` outright, so there is no `send_settings` frame in the image at all.
+`stackcheck.py --fail-over 3500` passes, and the largest first-party frame is now
+`blit_dot` at 1,728 B.
+
+Buffer sizes are set for growth rather than for today, since PSRAM is not the
+constrained resource: 1024 B for faces (377 B in use) and 2048 B for voices
+(705 B in use at thirteen featured). `voices.c` keeps the other twenty-three
+catalog entries specifically so widening the offer is "a one-flag change" -- all
+thirty-six would be 1,743 B, so that flag can now be flipped without landing on
+`voices_describe()`'s truncation path.
+
+
+---
+
 ### I7. The oversized-JSON drop path corrupted the *following* message FIXED
 
 `dg_agent.c`. On overflow the buffer was reset and the slice dropped, but the
@@ -151,23 +192,7 @@ rather than at the next message's first slice, so a following message that never
 presents an offset-0 TEXT slice still starts clean. Also cleared on socket close
 and in `dg_agent_start()`, alongside the existing `s_json_len` resets.
 
-
----
-
 ## Open
-
-### I6. `send_settings()` keeps 2,880 B of catalog buffers live in one frame
-
-`dg_agent.c:694` and `dg_agent.c:837`. `faces[512] + face_desc[700] +
-catalog[768] + description[900]` all coexist in a single frame on the 6144-byte
-WebSocket task, above cJSON's own recursion.
-
-The comment at `dg_agent.c:726-742` records that adding a *third* such pair
-tripped the stack canary and put the device in a boot loop -- and then solves it
-only for `set_color`, via a PSRAM buffer with the prefix written first and the
-catalog appended into its tail. The two older pairs were left as they were. That
-pattern applies to both unchanged, and doing it removes the trap the comment
-warns the next person about.
 
 ### I8. The spectrum point-samples 24 of 512 FFT bins
 
@@ -262,7 +287,6 @@ which is the one kind of comment in this tree that costs more than it saves.
 - `dg_agent.c:125` -- `AUDIO_FRAME_BYTES 2560` silently duplicates
   `CAPTURE_FRAMES * sizeof(int16_t)` from `audio_io.c`. A `#define` in
   `audio_io.h` would keep them honest.
-- `dg_agent.c:739` -- "543 B in use at fourteen colours"; the table has thirteen.
 
 ---
 

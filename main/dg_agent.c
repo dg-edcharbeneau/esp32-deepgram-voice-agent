@@ -702,18 +702,43 @@ static esp_err_t send_settings(void)
      * does it -- JSON Schema has nowhere to hang a per-enum-value note, and
      * without one the model is choosing between two bare nouns.
      */
-    char faces[512];
-    faces_describe(faces, sizeof(faces));
-    char face_desc[700];
-    snprintf(face_desc, sizeof(face_desc),
-             "Change what the device's screen shows. Use when the user asks for a "
-             "different look, mentions the display, or names one of these. "
-             "Faces: %s.",
-             faces);
+    /*
+     * PSRAM and ONE buffer, the pattern set_color introduced below and the
+     * reason this function's frame no longer grows with the catalog. This was
+     * the stack pair the canary note further down describes -- 512 + 700 = 1,212
+     * B of the frame for two faces. See .claude/skills/esp-stack-budget/.
+     *
+     * 377 B in use at two faces. Rounded up because it is PSRAM and free, so a
+     * few more faces cannot quietly reach faces_describe()'s truncation path.
+     */
+    enum { FACE_DESC_LEN = 1024 };
+    char *face_desc = heap_caps_malloc(FACE_DESC_LEN, MALLOC_CAP_SPIRAM);
+    /* Losing the catalog is survivable -- the enum still constrains the model to
+     * valid names. Losing the function is not. */
+    const char *face_desc_str = "Change what the device's screen shows.";
+    if (face_desc != NULL) {
+        int n = snprintf(face_desc, FACE_DESC_LEN,
+                         "Change what the device's screen shows. Use when the user asks for a "
+                         "different look, mentions the display, or names one of these. "
+                         "Faces: ");
+        if (n > 0 && (size_t)n < FACE_DESC_LEN) {
+            faces_describe(face_desc + n, FACE_DESC_LEN - (size_t)n);
+            /* The trailing stop the one-shot snprintf used to supply, kept so
+             * this is a move off the stack and not a change to what the model
+             * reads. */
+            size_t used = strlen(face_desc);
+            if (used + 2 <= FACE_DESC_LEN) {
+                face_desc[used] = '.';
+                face_desc[used + 1] = '\0';
+            }
+            face_desc_str = face_desc;
+        }
+    }
 
     cJSON *set_face = cJSON_CreateObject();
     cJSON_AddStringToObject(set_face, "name", "set_face");
-    cJSON_AddStringToObject(set_face, "description", face_desc);
+    cJSON_AddStringToObject(set_face, "description", face_desc_str);
+    free(face_desc); /* cJSON copied it; free(NULL) is fine */
     cJSON *fparams = cJSON_AddObjectToObject(set_face, "parameters");
     cJSON_AddStringToObject(fparams, "type", "object");
     cJSON *fprops = cJSON_AddObjectToObject(fparams, "properties");
@@ -736,18 +761,34 @@ static esp_err_t send_settings(void)
     /*
      * PSRAM, and ONE buffer rather than a catalog-plus-description pair.
      *
-     * NOT A STYLE CHOICE -- MEASURED. This task has task_stack = 6144, and the
-     * two existing pairs above already put 2,880 B of it on the stack (1,212 for
-     * faces, 1,668 for voices under Flux). Adding a third pair of 1,280 tripped
+     * NOT A STYLE CHOICE -- MEASURED. This task has task_stack = 6144. This
+     * function once gave every described catalog a stack PAIR, a buffer for the
+     * catalog and another for the description around it: 1,212 B for faces,
+     * 1,668 for voices. Adding a third pair of 1,280 for these colours tripped
      * the stack canary on the first session and put the device in a boot loop,
-     * before cJSON's own recursion is even counted.
+     * before cJSON's own recursion is even counted. Recovering it needed BOOT
+     * held while RESET was tapped -- the board rebooted faster than esptool
+     * could sync.
      *
      * So the prefix is written first and the catalog appended into the tail of
      * the same allocation, which costs no stack at all. cJSON copies the string,
-     * so it is freed immediately. If a fourth function ever wants a described
-     * catalog, do this rather than the pattern above it.
+     * so it is freed immediately.
+     *
+     * ALL THREE USE THIS NOW, which is the part worth keeping. The pair pattern
+     * was the trap rather than the colour function that sprang it: its cost was
+     * O(n) in declared functions with no budget written down anywhere, so it was
+     * going to fail for whoever added the third one, whatever it happened to be.
+     * Measured either side of moving faces and voices across: this function had
+     * a 2,944 B frame and was called from on_ws_event's 192 B one, so the path
+     * cost 3,136 B of the 6,144 available before cJSON recursed at all. With the
+     * buffers gone it is small enough that the compiler inlines it into
+     * on_ws_event outright -- there is no send_settings frame in the image any
+     * more, and that caller is still 192 B. 3,136 -> 192.
+     *
+     * A new described catalog should cost nothing here; if one ever appears to,
+     * measure with .claude/skills/esp-stack-budget/ before enlarging anything.
      */
-    /* 543 B in use at fourteen colours (201 prefix + 341 catalog + NUL). Rounded
+    /* 543 B in use at thirteen colours (201 prefix + 341 catalog + NUL). Rounded
      * up because it is PSRAM and free, so a couple more colours cannot quietly
      * run into orb_colors_describe()'s truncation path. */
     enum { COLOR_DESC_LEN = 1024 };
@@ -845,17 +886,39 @@ static esp_err_t send_settings(void)
     /* The catalog goes in the description because JSON Schema has nowhere to
      * hang a per-enum-value note, and without it the model is choosing from
      * bare first names. */
-    char catalog[768];
-    voices_describe(catalog, sizeof(catalog));
-    char description[900];
-    snprintf(description, sizeof(description),
-             "Change the voice you speak in. Use when the user asks you to sound "
-             "different, or asks for a particular accent or gender. Voices: %s.",
-             catalog);
+    /*
+     * The last of the three stack pairs, and the largest at 768 + 900 = 1,668 B.
+     * Same one-buffer PSRAM pattern as the two above.
+     *
+     * 2048 rather than the 1024 the others use, and sized for growth rather than
+     * for today: 705 B is in use at thirteen featured voices, and voices.c keeps
+     * the other twenty-three precisely so widening the offer is "a one-flag
+     * change". All thirty-six would be 1,743 B, so that flag can be flipped
+     * without landing on voices_describe()'s truncation path -- which is the
+     * whole point of the catalog not living on the stack any more.
+     */
+    enum { VOICE_DESC_LEN = 2048 };
+    char *description = heap_caps_malloc(VOICE_DESC_LEN, MALLOC_CAP_SPIRAM);
+    const char *description_str = "Change the voice you speak in.";
+    if (description != NULL) {
+        int n = snprintf(description, VOICE_DESC_LEN,
+                         "Change the voice you speak in. Use when the user asks you to sound "
+                         "different, or asks for a particular accent or gender. Voices: ");
+        if (n > 0 && (size_t)n < VOICE_DESC_LEN) {
+            voices_describe(description + n, VOICE_DESC_LEN - (size_t)n);
+            size_t used = strlen(description);
+            if (used + 2 <= VOICE_DESC_LEN) {
+                description[used] = '.';
+                description[used + 1] = '\0';
+            }
+            description_str = description;
+        }
+    }
 
     cJSON *set_voice = cJSON_CreateObject();
     cJSON_AddStringToObject(set_voice, "name", "set_voice");
-    cJSON_AddStringToObject(set_voice, "description", description);
+    cJSON_AddStringToObject(set_voice, "description", description_str);
+    free(description); /* cJSON copied it; free(NULL) is fine */
     cJSON *params = cJSON_AddObjectToObject(set_voice, "parameters");
     cJSON_AddStringToObject(params, "type", "object");
     cJSON *props = cJSON_AddObjectToObject(params, "properties");
