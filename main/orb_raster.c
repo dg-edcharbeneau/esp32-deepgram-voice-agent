@@ -87,6 +87,31 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+/*
+ * BENCH ONLY: split the frame into its clear and blit phases and log both.
+ *
+ * This is the measurement the header's cost note asks for and does not have.
+ * The clear is pure PSRAM writes with no arithmetic in it at all, so its cost
+ * per box pixel prices every other pixel in the frame -- which is what decides
+ * whether this rasteriser is memory-bound or compute-bound, and therefore
+ * whether optimising the per-pixel path could ever pay.
+ *
+ * Off by default for the same reason face_orb.c's ORB_LOG_TIMINGS is: ESP_LOGI
+ * on the LVGL task blocks on the UART for most of a frame, so the log spoils one
+ * frame in every 60 and corrupts ui.c's telemetry alongside it. Turn both on
+ * together, read the numbers knowing the frames they landed in are not
+ * representative, and turn them off again.
+ *
+ * The only cost inside the measured path is one integer add per DOT for the box
+ * accounting -- deliberately not per pixel, so the inner loops are untouched.
+ */
+#define ORB_RASTER_PHASE_TIMING 0
+
+#if ORB_RASTER_PHASE_TIMING
+#include "esp_timer.h"
+static uint32_t s_dbg_boxpx;   /* box pixels this frame, summed over dots */
+#endif
+
 static const char *TAG = "orb_raster";
 
 /*
@@ -265,6 +290,10 @@ static void blit_dot(const orb_dot_t *d, int16_t *box, float tr, float tg, float
         x1 = x0 + bw - 1;
         y1 = y0 + bh - 1;
     }
+
+#if ORB_RASTER_PHASE_TIMING
+    s_dbg_boxpx += (uint32_t)(bw * bh);
+#endif
 
     /* Pass one: the raw edge function, and its total. */
     float cov[SPRITE_MAX * SPRITE_MAX];
@@ -484,6 +513,11 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
         return;
     }
 
+#if ORB_RASTER_PHASE_TIMING
+    const int64_t t_start = esp_timer_get_time();
+    s_dbg_boxpx = 0;
+#endif
+
     /* Once per frame, not once per dot: the colour cannot change mid-frame. */
     float tr = (float)((rgb >> 16) & 0xFF) / 255.0f;
     float tg = (float)((rgb >> 8) & 0xFF) / 255.0f;
@@ -526,6 +560,11 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
         if (b[2] > ux1) ux1 = b[2];
         if (b[3] > uy1) uy1 = b[3];
     }
+
+#if ORB_RASTER_PHASE_TIMING
+    /* Everything above erased last frame; everything below draws this one. */
+    const int64_t t_cleared = esp_timer_get_time();
+#endif
 
     /*
      * This frame's strokes, UNDER the dots -- paintFrame's order, and the reason
@@ -579,6 +618,34 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
         if (b[3] > uy1) uy1 = b[3];
     }
     s_prev_count = n;
+
+#if ORB_RASTER_PHASE_TIMING
+    {
+        const int64_t t_drawn = esp_timer_get_time();
+        static int64_t clear_sum, draw_sum;
+        static uint32_t boxpx_sum, frames;
+        clear_sum += t_cleared - t_start;
+        draw_sum  += t_drawn - t_cleared;
+        boxpx_sum += s_dbg_boxpx;
+        if (++frames >= 60) {
+            /*
+             * clear/ is the same box pixels as blit/ walks, written with memset
+             * and no arithmetic. If the two are close, this rasteriser is bound
+             * by the PSRAM canvas and the per-pixel path is not worth touching;
+             * if clear is a small fraction, the arithmetic is worth attacking.
+             */
+            ESP_LOGI(TAG, "phase clear=%lld us blit=%lld us boxpx=%u dots=%u "
+                          "-> clear %.1f ns/px, blit %.1f ns/px",
+                     (long long)(clear_sum / frames), (long long)(draw_sum / frames),
+                     (unsigned)(boxpx_sum / frames), (unsigned)n,
+                     1000.0 * (double)clear_sum / (double)boxpx_sum,
+                     1000.0 * (double)draw_sum / (double)boxpx_sum);
+            clear_sum = draw_sum = 0;
+            boxpx_sum = 0;
+            frames = 0;
+        }
+    }
+#endif
 
     if (ux1 < ux0 || uy1 < uy0) {
         return; /* nothing drawn and nothing to clean up */
