@@ -251,7 +251,9 @@ static void capture_task(void *arg)
         vTaskDelete(NULL);
     }
 
+#if CONFIG_MIC_LEVEL_LOG
     int64_t next_level_log = 0;
+#endif
 
     while (1) {
         int err = esp_codec_dev_read(s_mic, stereo, (int)stereo_bytes);
@@ -289,9 +291,9 @@ static void capture_task(void *arg)
         }
 #endif
 
-#if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
         /*
-         * Half duplex. The speaker and mic sit centimetres apart with no echo
+         * Half duplex, and NOT OPTIONAL -- there is no build flag for this any
+         * more. The speaker and mic sit centimetres apart with no echo
          * cancellation in this project, so anything the agent says is captured
          * and sent straight back, and the agent starts answering itself.
          * Dropping capture while it speaks is the crude fix; it also disables
@@ -332,7 +334,6 @@ static void capture_task(void *arg)
         if (audio_io_playback_active()) {
             continue;
         }
-#endif
 
         /*
          * Session gate. Ahead of the tap as well as the sink, so a stopped

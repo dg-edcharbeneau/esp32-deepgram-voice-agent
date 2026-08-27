@@ -30,7 +30,6 @@ idf_component_register(
         prompt/substance.md
         prompt/substance-flux.md
         prompt/half-duplex.md
-        prompt/barge-in.md
         prompt/boundaries.md
         prompt/session.md
     REQUIRES

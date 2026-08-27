@@ -665,9 +665,10 @@ void ui_feed_agent(const int16_t *mono, size_t samples)
 void ui_feed_mic(const int16_t *mono, size_t samples)
 {
     /*
-     * Agent audio wins, so only one task is ever inside feed(). With
-     * CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS the capture task is already stopped
-     * here; without it, this is what keeps the two writers apart. The residual
+     * Agent audio wins, so only one task is ever inside feed(). The half-duplex
+     * gate in audio_io.c already stops the capture task before it gets here, so
+     * this is belt and braces -- kept because it is what would keep the two
+     * writers apart if that gate ever moved. The residual
      * sliver -- playback ending between this check and the tap firing -- costs
      * at worst one garbled window, which is not worth a mutex on a priority-7
      * audio task.

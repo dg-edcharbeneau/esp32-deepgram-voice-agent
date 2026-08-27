@@ -113,8 +113,8 @@ ahead and finish while the speaker was still talking. The tap sits in
 90 ms, the depth of the I2S DMA.
 
 **The mic tap sits after the half-duplex gate**, so the display shows what
-actually goes upstream. With `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` set, that also
-means the two sources are never live at once.
+actually goes upstream. Because that gate is unconditional, the two sources are
+never live at once.
 
 **There is no FFT in the default path.** The orb needs a scalar RMS for gesture
 depth and three bands — from two cascaded one-pole crossovers at 250 Hz and
@@ -659,14 +659,16 @@ one-flag change.
 and after an NVS erase. `ESP_ERR_NVS_NOT_FOUND` on read is the ordinary
 first-boot case, not an error.
 
-## Speech stack: Flux or Nova-3 + Aura
+## Speech stack: Flux
 
-`menuconfig` -> "Speech stack" picks between:
+The build is Flux-only: `flux-general-en` STT with model-integrated end-of-turn
+detection, and Flux TTS (`CONFIG_DEEPGRAM_FLUX_VOICE`, default `flux-kit-en`).
 
-- **Flux** (default) — `flux-general-en` STT with model-integrated end-of-turn
-  detection, and Flux TTS (`CONFIG_DEEPGRAM_FLUX_VOICE`, default `flux-kit-en`).
-- **Nova-3 + Aura** — the previous stack, kept so the two can be compared on one
-  build.
+A `menuconfig` choice used to offer Nova-3 + Aura as a fallback, and it was
+removed because it could not be selected — `CONFIG_DEEPGRAM_FLUX_VOICE` was
+declared `depends on SPEECH_STACK_FLUX` while `voices.c` referenced it
+unguarded, so picking the fallback failed the build. A fallback that has never
+compiled is worse than no fallback, because it is believed.
 
 Both halves of Flux live inside the Agent API, so this is a `Settings` change
 rather than a second set of sockets. What selects Flux is
@@ -695,9 +697,9 @@ one.
 ### Two things that differ from v1
 
 - **No `agent.language` on the Flux path.** `language` is a v1 listen-provider
-  option; Flux uses `language_hints`, and `flux-general-en` implies English. The
-  field is still sent on the Nova branch. If `SettingsApplied` ever stops
-  arriving after a Settings change, this is the first thing to check.
+  option; Flux uses `language_hints`, and `flux-general-en` implies English. If
+  `SettingsApplied` ever stops arriving after a Settings change, this is the
+  first thing to check.
 - **Turn events stay internal.** Flux's `TurnInfo` / `StartOfTurn` /
   `EndOfTurn` belong to `/v2/listen`. Inside the Agent API they are consumed by
   the orchestrator and are *not* surfaced to the client, so the event decoding in
@@ -1010,9 +1012,10 @@ misalign the first sample of the next reply.
 
 Speaker and mic sit centimetres apart and there is no echo cancellation here, so
 anything the agent says is captured and sent straight back — and the agent starts
-answering itself. `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` (default **on**) drops
-capture while playback is active, plus a 300 ms tail for audio already in the I2S
-DMA.
+answering itself. Capture is dropped while playback is active, plus a 300 ms
+tail for audio already in the I2S DMA. This is unconditional — the build option
+that used to switch it off was removed once `AEC-FINDINGS.md` closed the
+question.
 
 It is a crude fix and it costs barge-in: with it on you cannot interrupt the
 agent, and `UserStartedSpeaking` will not fire mid-reply.
@@ -1138,6 +1141,5 @@ default. This is the order `bsp_extra` uses.
 | Option | Default | When to change it |
 |---|---|---|
 | `CONFIG_MIC_IN_GAIN` | 24 dB | raise if mic peaks stay near zero while you talk |
-| `CONFIG_AUDIO_OUT_VOLUME` | 80 | speaker too quiet or clipping |
+| `CONFIG_AUDIO_OUT_VOLUME` | 100 | speaker too quiet or clipping |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
-| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | on | off once the AFE runs — the reference channel it needs is proven, see above |

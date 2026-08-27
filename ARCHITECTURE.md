@@ -231,11 +231,12 @@ it copies and frees. Three properties are worth keeping:
   mangles a name starting with a digit into an extra leading underscore, so
   `10-formatting.md` would be a trap; the C table is the single place the shape
   of the prompt is stated.
-- **Two blocks are build-gated**, for the same reason `send_settings()` gates its
-  Flux fields: a prompt describing a build you did not make is worse than a
-  shorter one, because the model asserts it confidently. `substance-flux.md`
-  needs the Flux stack, and `half-duplex.md` / `barge-in.md` follow
-  `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS`.
+- **Nothing is build-gated any more**, but the rule that governed the gates
+  still governs any new block: a prompt describing a build you did not make is
+  worse than a shorter one, because the model asserts it confidently. Both
+  former gates were removed with their Kconfig options — the build is Flux-only,
+  so `substance-flux.md` is unconditional, and `half-duplex.md` is the only
+  duplex block left now that barge-in is settled (`AEC-FINDINGS.md`).
 - **The frame does not grow with the prompt.** `agent_prompt_build()` measures
   80 bytes of stack against an 11 kB result, which matters because
   `send_settings()` already sits at 2,944 B of the WebSocket task's 6,144 — see
@@ -249,10 +250,6 @@ copied through verbatim and logged, so a typo shows up rather than vanishing.
 A reopened session — every voice change is one — appends a note saying the
 replayed history is the same conversation, which is what stops the model
 starting over.
-
-`CONFIG_DEEPGRAM_AGENT_PROMPT` still exists as a one-line override for bench
-experiments. It is empty by default and logs a warning when set, because a
-forgotten override looks exactly like a prompt with no effect.
 
 ## Boot and provisioning
 

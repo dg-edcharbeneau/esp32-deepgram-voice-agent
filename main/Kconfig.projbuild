@@ -36,38 +36,9 @@ menu "Deepgram Agent Device"
             Sent as "Authorization: Token <key>" on the WebSocket upgrade request.
             Create one at https://console.deepgram.com.
 
-    choice DEEPGRAM_SPEECH_STACK
-        prompt "Speech stack"
-        default SPEECH_STACK_FLUX
-        help
-            Which Deepgram STT and TTS models the Settings message asks for.
-
-            Both are selectable so the two stacks can be compared on one build.
-            The transport work in this project is sensitive to timing and write
-            cadence, so being able to fall back to the known-good stack without
-            editing code is worth keeping.
-
-        config SPEECH_STACK_FLUX
-            bool "Flux (conversational) -- flux-general-en + Flux TTS"
-            help
-                Deepgram's conversational stack. STT has model-integrated
-                end-of-turn detection instead of server-side VAD, and the TTS is
-                built to stream into an agent pipeline.
-
-                Both halves run at 16 kHz linear16, which is what makes this
-                usable here: the ES7210 and ES8311 share one duplex I2S and
-                cannot be clocked differently, so anything needing a second rate
-                would need resampling on-device.
-
-        config SPEECH_STACK_NOVA_AURA
-            bool "Nova-3 + Aura -- nova-3 + aura-2-thalia-en"
-            help
-                The previous stack. Keep for comparison.
-    endchoice
 
     config DEEPGRAM_FLUX_VOICE
         string "Flux TTS voice"
-        depends on SPEECH_STACK_FLUX
         default "flux-kit-en"
         help
             The FACTORY DEFAULT voice. It is used on first boot and after an NVS
@@ -81,7 +52,6 @@ menu "Deepgram Agent Device"
 
     config DEEPGRAM_FLUX_EOT_THRESHOLD
         string "Flux end-of-turn confidence threshold"
-        depends on SPEECH_STACK_FLUX
         default ""
         help
             0.0-1.0, as a string (e.g. "0.7"). Higher waits for more confidence
@@ -92,7 +62,6 @@ menu "Deepgram Agent Device"
 
     config DEEPGRAM_FLUX_EOT_TIMEOUT_MS
         int "Flux end-of-turn timeout (ms)"
-        depends on SPEECH_STACK_FLUX
         default 0
         range 0 10000
         help
@@ -127,19 +96,6 @@ menu "Deepgram Agent Device"
             31 characters -- long enough for a name, too short to be a paragraph
             of smuggled instructions.
 
-    config DEEPGRAM_AGENT_PROMPT
-        string "Agent system prompt (override)"
-        default ""
-        help
-            AN OVERRIDE, AND NORMALLY EMPTY. The real prompt is main/prompt/*.md,
-            embedded into the firmware and assembled at session start -- see
-            main/agent_prompt.h for the layout and why it lives in files.
-
-            Anything typed here REPLACES all of it. Kconfig strings are one line
-            with no newlines, so this is for a quick bench experiment ("You only
-            speak in questions") and nothing longer. It logs a warning when set,
-            because a forgotten override looks exactly like a prompt that has no
-            effect.
 
     config DEEPGRAM_AGENT_GREETING
         string "Agent greeting"
@@ -237,32 +193,6 @@ menu "Deepgram Agent Device"
             combined meter would just look quiet instead of showing which
             channel is live.
 
-    config MIC_GATE_WHILE_AGENT_SPEAKS
-        bool "Drop microphone audio while the agent is speaking"
-        default y
-        help
-            Speaker and mic are centimetres apart with no echo cancellation, so
-            without this the agent hears its own voice and answers itself. The
-            cost is that barge-in stops working -- you cannot interrupt the
-            agent.
-
-            Do not turn this off expecting barge-in. Deepgram supplies the
-            detection, not the cancellation, so with the gate off it fires on the
-            agent's own voice and the agent interrupts itself -- worse than no
-            barge-in, because it corrupts the conversation rather than limiting
-            it.
-
-            A canceller WAS built against the board's echo reference and it works
-            -- esp-sr's standalone AEC, 17.3 dB of ERLE, and with it the device
-            stops answering itself in an empty room. It still does not give
-            barge-in: the microphone stream saturates the TCP send queue until TLS
-            cannot allocate, and Deepgram never distinguished a person talking over
-            the agent from the residual echo. The interrupt on this device is a
-            tap on the centre button while the agent is speaking.
-
-            AEC-FINDINGS.md has the measurements and where the removed code lives.
-            The ~70 kB figure that used to appear here was esp-sr's AFE, not its
-            canceller, and it sent this project down the wrong road once already.
 
     config SESSION_IDLE_TIMEOUT_S
         int "Stop the session after this many idle seconds (0 = never)"
@@ -298,8 +228,8 @@ menu "Deepgram Agent Device"
 
             Turning it on removes that gate, which is the only practical way to
             calibrate the microphone: with a live session, speaking makes the
-            agent answer, and CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS then deafens the
-            mic for most of the measurement. In one acoustic session ten of twelve
+            agent answer, and the half-duplex mic gate then deafens the mic
+            for most of the measurement. In one acoustic session ten of twelve
             recorded segments were the agent's own voice and only two were the
             microphone. With this on you can stop the session -- so nothing can
             talk back -- and still read microphone levels off the telemetry.

@@ -36,7 +36,6 @@ PROMPT_BLOCK(speaking_md);
 PROMPT_BLOCK(substance_md);
 PROMPT_BLOCK(substance_flux_md);
 PROMPT_BLOCK(half_duplex_md);
-PROMPT_BLOCK(barge_in_md);
 PROMPT_BLOCK(boundaries_md);
 PROMPT_BLOCK(session_md);
 
@@ -51,9 +50,10 @@ typedef struct {
 
 /*
  * THE ORDER OF THE PROMPT. Filenames carry none of it on purpose -- see the
- * header. Blocks gated on Kconfig are gated for the same reason send_settings()
- * gates its Flux fields: a prompt that describes a build you did not make is
- * worse than a shorter one, because the model states it confidently.
+ * header. Nothing here is build-gated any more, but the rule that governed the
+ * gates still governs any new block: a prompt that describes a build you did
+ * not make is worse than a shorter one, because the model states it
+ * confidently.
  */
 static const block_t s_blocks[] = {
     { formatting_md_start,   formatting_md_end,   false },
@@ -61,17 +61,13 @@ static const block_t s_blocks[] = {
     { conversation_md_start, conversation_md_end, false },
     { speaking_md_start,     speaking_md_end,     false },
     { substance_md_start,    substance_md_end,    false },
-#if CONFIG_SPEECH_STACK_FLUX
-    /* Model-integrated end-of-turn detection is a Flux property; Nova-3 gets it
-     * from server-side VAD, which is a different claim. Continues the list of
-     * true things substance.md ends with. */
+    /* Model-integrated end-of-turn detection, which is a Flux property rather
+     * than server-side VAD. Continues the list of true things substance.md ends
+     * with, hence the flag. */
     { substance_flux_md_start, substance_flux_md_end, true },
-#endif
-#if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS
+    /* Half duplex: the mic is deaf while the agent speaks, and the interrupt is
+     * the centre button. See the gate in audio_io.c and AEC-FINDINGS.md. */
     { half_duplex_md_start,  half_duplex_md_end,  false },
-#else
-    { barge_in_md_start,     barge_in_md_end,     false },
-#endif
     { boundaries_md_start,   boundaries_md_end,   false },
     { session_md_start,      session_md_end,      false },
 };
@@ -97,20 +93,12 @@ static void expand_voice(char *out, size_t cap)
 
 static void expand_listen_model(char *out, size_t cap)
 {
-#if CONFIG_SPEECH_STACK_FLUX
     snprintf(out, cap, "Flux");
-#else
-    snprintf(out, cap, "Nova-3");
-#endif
 }
 
 static void expand_speak_model(char *out, size_t cap)
 {
-#if CONFIG_SPEECH_STACK_FLUX
     snprintf(out, cap, "Flux TTS");
-#else
-    snprintf(out, cap, "Aura-2");
-#endif
 }
 
 static const struct {
@@ -212,14 +200,6 @@ static size_t append_block(char *out, size_t cap, size_t len, const block_t *b)
 
 char *agent_prompt_build(const agent_prompt_ctx_t *ctx)
 {
-    /* The escape hatch wins outright, so a one-line experiment in menuconfig
-     * does not need a file edit -- and an empty value, the default, means the
-     * files are in charge. */
-    if (strlen(CONFIG_DEEPGRAM_AGENT_PROMPT) > 0) {
-        ESP_LOGW(TAG, "CONFIG_DEEPGRAM_AGENT_PROMPT is set; main/prompt is ignored");
-        return strdup(CONFIG_DEEPGRAM_AGENT_PROMPT);
-    }
-
     const size_t nblocks = sizeof(s_blocks) / sizeof(s_blocks[0]);
     size_t cap = EXPANSION_SLACK + 1;
     for (size_t i = 0; i < nblocks; i++) {

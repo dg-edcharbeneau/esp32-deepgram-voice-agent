@@ -536,7 +536,6 @@ static esp_err_t send_settings(void)
         cJSON_AddObjectToObject(agent, "listen"), "provider");
     cJSON_AddStringToObject(listen_provider, "type", "deepgram");
 
-#if CONFIG_SPEECH_STACK_FLUX
     /*
      * Flux. `version` is what selects it -- the model name alone is not enough,
      * and v1 is assumed when the field is absent.
@@ -555,10 +554,6 @@ static esp_err_t send_settings(void)
 #if CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS > 0
     cJSON_AddNumberToObject(listen_provider, "eot_timeout_ms",
                             CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS);
-#endif
-#else
-    cJSON_AddStringToObject(agent, "language", "en");
-    cJSON_AddStringToObject(listen_provider, "model", "nova-3");
 #endif
 
     cJSON *think = cJSON_AddObjectToObject(agent, "think");
@@ -767,7 +762,6 @@ static esp_err_t send_settings(void)
     cJSON_AddObjectToObject(tparams, "properties");
     cJSON_AddItemToArray(functions, set_test);
 
-#if CONFIG_SPEECH_STACK_FLUX
     /* The catalog goes in the description because JSON Schema has nowhere to
      * hang a per-enum-value note, and without it the model is choosing from
      * bare first names. */
@@ -801,20 +795,15 @@ static esp_err_t send_settings(void)
     cJSON_AddStringToObject(reset_params, "type", "object");
     cJSON_AddObjectToObject(reset_params, "properties");
     cJSON_AddItemToArray(functions, reset_voice);
-#endif
 
     cJSON *speak_provider = cJSON_AddObjectToObject(
         cJSON_AddObjectToObject(agent, "speak"), "provider");
     cJSON_AddStringToObject(speak_provider, "type", "deepgram");
-#if CONFIG_SPEECH_STACK_FLUX
     /* Same story as listen: "v2" is what picks Flux TTS. Omitting agent.speak
      * entirely would also get Flux with flux-kit-en, but being explicit keeps
      * the voice configurable. */
     cJSON_AddStringToObject(speak_provider, "version", "v2");
     cJSON_AddStringToObject(speak_provider, "model", voices_current_model());
-#else
-    cJSON_AddStringToObject(speak_provider, "model", "aura-2-thalia-en");
-#endif
     /*
      * Replayed context, and the greeting only when there is none. Resuming a
      * conversation should not open with "Hi! I am running on an ESP32" -- and
