@@ -317,6 +317,16 @@ static void capture_task(void *arg)
          *
          * The whole investigation, the numbers and where the removed code lives
          * are in AEC-FINDINGS.md. Read it before removing this gate again.
+         *
+         * THE MUTE DELIBERATELY DOES NOT GATE THIS. It used to, to keep the
+         * microphone out of the reply's inbound tail after an interruption. Two
+         * things killed that: the release for the mute is the user SPEAKING AGAIN
+         * (AgentAudioDone does not arrive reliably -- measured 0 times across a
+         * 12-minute run), so a gated mic can never hear its own release; and the
+         * session-death that motivated the gating is handled properly now, in
+         * transport_ws.c LOCAL PATCH 2, which drops a congested audio frame
+         * instead of tearing the socket down. Full duplex here costs dropped
+         * frames, not the conversation.
          */
         if (audio_io_playback_active()) {
             continue;
@@ -599,8 +609,12 @@ esp_err_t audio_io_play(const uint8_t *pcm, size_t len)
     if (s_play_muted) {
         /*
          * Interrupted turn: drop the rest of it. Deliberately does NOT stamp the
-         * queue clock -- the whole point is that playback goes quiet, so
-         * audio_io_playback_active() must be allowed to fall and reopen the mic.
+         * queue clock, so audio_io_playback_active() is allowed to fall -- the
+         * speaker IS silent, and the display must stop radiating at it.
+         *
+         * The microphone stays OPEN through all of this, deliberately. The mute
+         * is released by the user speaking again -- see main.c -- so gating the
+         * mic on it would make the device deaf to its own release condition.
          */
         return ESP_OK;
     }
@@ -708,9 +722,9 @@ void audio_io_note_stream_gap(void)
 void audio_io_mute_playback(bool muted)
 {
     /*
-     * Scoped to a turn by the caller, never latched here. main.c clears it on
-     * AgentAudioDone and on a hard deadline, because a turn that never reports
-     * done would otherwise leave the device permanently and silently deaf.
+     * Scoped by the caller, never latched here. main.c releases it when the user
+     * speaks again, with a long backstop for a tap that is never followed by
+     * speech -- left set forever, the agent would simply stop being audible.
      */
     s_play_muted = muted;
     if (muted) {

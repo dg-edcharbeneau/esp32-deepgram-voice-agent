@@ -1,9 +1,14 @@
 # Wi-Fi setup
 
-> **Status: implemented, not yet walked on hardware.** Every flow below is
-> described from the code as written, and the firmware builds clean, but no
-> board was attached when this was written so none of it has been confirmed on
-> the device. Delete this note once you have been through it.
+> **Status: A and C confirmed on hardware 2026-08-26**, moving a working board
+> onto a phone hotspot: held BOOT to forget the saved network, then joined the
+> portal and picked the new one. B (menuconfig seed) and D (wipe everything) are
+> still described from the code as written and have not been walked. Narrow this
+> note as you go rather than deleting it.
+>
+> Hotspot note earned the hard way: an iPhone defaults its hotspot to 5 GHz on
+> recent models, and the S3 has no 5 GHz radio, so the network never appears in
+> the scan. Turn on **Maximize Compatibility** first.
 
 Credentials are chosen at runtime. Nothing here needs a toolchain unless you
 want one.

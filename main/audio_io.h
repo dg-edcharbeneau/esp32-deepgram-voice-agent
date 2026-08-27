@@ -93,7 +93,11 @@ void audio_io_note_stream_gap(void);
  * message and keeps sending the rest of a reply regardless -- so a flush on its
  * own just makes the agent pause and then resume mid-word.
  *
- * MUST BE SCOPED TO A TURN by the caller. Left set, the device is silently deaf.
+ * The microphone is NOT gated by this -- see the gate in capture_task(). main.c
+ * releases the mute when the user speaks again, so a device that could not hear
+ * would never hear its own release.
+ *
+ * MUST BE SCOPED BY THE CALLER. Left set, the agent stops being audible.
  */
 void audio_io_mute_playback(bool muted);
 

@@ -57,6 +57,19 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 # preallocation: the memory is only used when the link is actually backed up.
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=23040
 
+# CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK IS DELIBERATELY LEFT OFF. Do not turn it
+# on to cure "Could not lock ws-client" -- it was tried here and it HANGS THE
+# CLIENT PERMANENTLY. Its send-error path (esp_websocket_client.c, the
+# CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK branch) releases tx_lock and then takes
+# client->lock with portMAX_DELAY, an unbounded wait the single-lock path does
+# not have because it already holds that lock. On the device this wedged the
+# client after a send error: Settings, PING and then CLOSE all timing out every
+# 2 s forever, with no recovery short of a reboot.
+#
+# The lock timeouts that motivated it were self-inflicted anyway -- they came
+# from a 200 ms AUDIO_SEND_TIMEOUT, which is also the lock deadline. See the
+# comment on AUDIO_SEND_TIMEOUT in main/dg_agent.c.
+
 # --- LVGL / display --------------------------------------------------------
 # CLIB malloc is not about the 434 kB canvas (those pixels are heap_caps_malloc'd
 # directly). It is about LVGL's builtin allocator, which with the default

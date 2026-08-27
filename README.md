@@ -751,7 +751,7 @@ same monitor command works for both projects.
 | [main/Kconfig.projbuild](main/Kconfig.projbuild) | API key / name / greeting / audio / prompt override, and the Wi-Fi seed |
 | [WIFI-SETUP.md](WIFI-SETUP.md) | every way to get credentials onto the device, and why it will not connect |
 | [sdkconfig.defaults](sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
-| [components/tcp_transport/](components/tcp_transport/) | one-line override of IDF's WS handshake — see below |
+| [components/tcp_transport/](components/tcp_transport/) | two local patches to IDF's WS transport: the handshake Host header, and dropping a congested audio frame instead of killing the session — see below |
 
 ## Protocol notes worth keeping
 
