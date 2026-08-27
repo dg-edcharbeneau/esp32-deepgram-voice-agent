@@ -3,7 +3,7 @@
 A full review of `main/*.c` -- 19 files, ~11.2k lines. `managed_components/` and
 `components/tcp_transport/` are vendored and were not in scope.
 
-Two findings were fixed in the same commit as this file. The rest are recorded
+Six of the twelve findings are fixed, across two commits. The rest are recorded
 here rather than fixed, so the next person to open one of these files does not
 have to re-derive them. Nothing below is speculative: each one names the failure
 scenario, and where a number appears it was measured or verified.
@@ -53,61 +53,108 @@ condition so the flag could wrap the whole test.
 
 Cost: `s_sending` is briefly raised for a frame that is then discarded, so a stop
 can spin one extra 10 ms tick in its quiesce loop.
+### I3. Six cross-task 64-bit clocks tore FIXED
 
----
-
-## Open
-
-### I3. Six cross-task 64-bit clocks still tear
-
-`audio_io.c` and `ui.c` both carry good notes on narrowing a shared clock to
-32-bit ms. These were missed, and they are the same defect B1 was:
+`audio_io.c` and `ui.c` both carried good notes on narrowing a shared clock to
+32-bit ms. These six were missed, and they were the same defect B1 was -- two
+`l32i` loads with a preemption point between them:
 
 | Variable | Writer | Reader | Consequence of a tear |
 |---|---|---|---|
-| `main.c:77` `s_activity_us` | **three tasks** -- WebSocket, LVGL, app_main | app_main | idle timeout kills a live session, or never fires |
-| `main.c:411` `s_test_entry_deadline_us` | WebSocket | app_main | display test enters early, or 71 min late |
-| `session_ctl.c:67` `s_ready_at_us` | control task | LVGL, button | gesture wrongly refused or wrongly accepted |
-| `ui.c:493` `s_reported_us` | WebSocket | LVGL | INITIALIZING dwell misjudged |
-| `ui.c:307` `s_last_feed_us` | audio tasks | LVGL | one frame of wrong `idle` |
-| `ui.c:349` `s_feed_us[2]` | audio tasks | LVGL | one frame of wrong per-channel `idle` |
+| `main.c` `s_activity_us` | **three tasks** -- WebSocket, LVGL, app_main | app_main | idle timeout kills a live session, or never fires |
+| `main.c` `s_test_entry_deadline_us` | WebSocket | app_main | display test enters early, or 71 min late |
+| `session_ctl.c` `s_ready_at_us` | control task | LVGL, button | gesture wrongly refused or wrongly accepted |
+| `ui.c` `s_reported_us` | WebSocket | LVGL | INITIALIZING dwell misjudged |
+| `ui.c` `s_last_feed_us` | audio tasks | LVGL | one frame of wrong `idle` |
+| `ui.c` `s_feed_us[2]` | audio tasks | LVGL | one frame of wrong per-channel `idle` |
 
-`s_activity_us` is the worst of them: three writers, and `note_activity()` is
-called from all three tasks (`main.c` lines 241, 359, 377, 457, 537, 776, 806,
-889). It is also the only one where a tear has a user-visible cost rather than a
-cosmetic one.
+All six are now `uint32_t` milliseconds, with their comparisons rewritten as
+wrap-safe unsigned subtraction. `IDLE_US`, `INITIALIZING_MAX_US` and
+`TEST_ENTRY_WAIT_US` became the `_MS` equivalents; `resolve_behaviour()` converts
+`now_us` once at the top rather than at each use.
 
-`main.c:410` `s_test_entry_pending` is a plain `bool` while every other
-cross-task flag in that file is `volatile`.
+`s_activity_us` was the only one with a user-visible cost, and it keeps **three
+writers** by design -- `note_activity()` is called from all three tasks, every
+call means "something happened", so last-write-wins is the correct rule. Its
+comment now says so explicitly rather than implying single ownership, because
+every other flag in that file documents its owner.
+
+`s_test_entry_pending` was a plain `bool` among `volatile` neighbours and is now
+`volatile` too. `now_ms()` had to move above `note_activity()` in `main.c`, which
+previously used `esp_timer_get_time()` directly.
 
 The remaining `int64_t` statics -- `face_orb.c` 40/52/292/373/431, `ui.c` 1172
-and 1268, `audio_io.c:677` -- are single-task and fine as they are.
+and 1268, `audio_io.c:677` -- are single-task and were left alone.
 
-### I4. `orb_init()` writes the lattice tables with no bound check
+### I4. `orb_init()` wrote the lattice tables with no bound check FIXED
 
 `orb_geometry.c:783-845`. The pool is sized `3 * ORB_VOICE_DOTS + 2 *
 ORB_WAVE_DOTS + ...`, but `n` is accumulated by summing
 `round(|cos lat| * ORB_LON_DENSITY)` over `ORB_RINGS` -- and nothing in the build
-ties the two together. No `_Static_assert`, no runtime guard.
+tied the two together. No `_Static_assert`, no runtime guard.
 
-I verified they agree today: the ring loops produce exactly 456 and 384, matching
-`ORB_VOICE_DOTS` and `ORB_WAVE_DOTS`. But `ORB_RINGS` (17) and
-`ORB_LON_DENSITY` (42) are tuning knobs one file over, and `orb_geometry.h`
-explicitly invites retuning ("Reduce a mode's tuning if a frame is too dear").
-Nudge either and the result is a silent PSRAM heap overflow, not a truncated orb.
+They agree today: the ring loops produce exactly 456 and 384. But `ORB_RINGS`
+(17) and `ORB_LON_DENSITY` (42) are tuning knobs one file over, and
+`orb_geometry.h` explicitly invites retuning ("Reduce a mode's tuning if a frame
+is too dear").
 
-Fix: `if (n + lon_count > ORB_VOICE_DOTS) return false;` inside both ring loops.
-Costs nothing and turns the worst outcome into a boot failure with a log line.
-`host/run.sh` will catch any behaviour change for free.
+**The two loops fail differently, and both were verified on the host by bumping a
+density and compiling the pre-guard source.**
 
-### I5. `audio_io_capture_start()` has no re-entry guard
+- The **wave** loop overruns a *separate* allocation. `s_wave_unit` is its own
+  `malloc` of `3 * ORB_WAVE_DOTS` doubles, so `WAVE_LON_DENSITY` 40 -> 44 gives a
+  genuine heap-buffer-overflow -- ASan reports it as an 8-byte write past the
+  block. On the device that is heap corruption with no diagnostic.
+- The **shell** loop is worse, because it corrupts *silently*. Every shell table
+  lives in one pooled allocation, so writing past `ORB_VOICE_DOTS` never leaves
+  the block -- it lands in the next sub-array. `ORB_LON_DENSITY` 42 -> 44 writes
+  `s_cos_lon[456..477]`, which is `s_sin_lon[0..21]`; the sine writes then land in
+  `s_scatter`, and the scatter loop cascades into `s_wave_cos_lon`. ASan reports
+  **nothing** -- the pool is 3,034 floats, so `n` would have to grow ~6.7x to
+  escape it. Nothing in this project's toolchain would catch this; it would
+  present as an orb that draws wrongly.
+
+Fixed with `if (n + lon_count > ORB_VOICE_DOTS) return false;` in both loops
+(`ORB_WAVE_DOTS` for the wave). `orb_init()` already returns `bool`, `face_orb`'s
+`init()` turns false into `ESP_ERR_NO_MEM`, and `select_face()` logs the face by
+name -- so the boot fails loudly and the device continues headless. No
+`ESP_LOGE`, because this file stays free of ESP-IDF headers so `host/run.sh` can
+compile it.
+
+Verified: both guards fire when their density is bumped, the shipped values still
+return true, and `host/run.sh` parity is unchanged at 0.0043 px worst deviation.
+
+### I5. `audio_io_capture_start()` had no re-entry guard FIXED
 
 `audio_io.c:577`. `dg_agent_init()` and `session_ctl_start()` both refuse a
-second call; this one would create a second `audio_cap` task at priority 7, and
-every "one writer only, so the read-modify-write needs no lock" argument in
-`ui.c` and `face_spectrum.c` would stop holding at once. Called once from
-app_main today, so this is defence for a caller that does not exist yet -- but
-`audio_io.h` already states "the task cannot be created twice" as a fact.
+second call; this one would have created a second `audio_cap` task at priority 7,
+and every "one writer only, so the read-modify-write needs no lock" argument in
+`ui.c` and `face_spectrum.c` would stop holding at once -- `s_level_peak`'s
+peak-hold, the FFT window's hop fill, and the seqlock's publish counter all
+assume a single producer.
+
+Fixed by keeping the task handle (it was being discarded) and refusing a second
+call with `ESP_ERR_INVALID_STATE`. Defence for a caller that does not exist yet,
+but `audio_io.h` already stated "the task cannot be created twice" as a property
+of the module, and now something enforces it.
+
+### I7. The oversized-JSON drop path corrupted the *following* message FIXED
+
+`dg_agent.c`. On overflow the buffer was reset and the slice dropped, but the
+remaining CONT slices of that same message kept accumulating from offset 0, and
+the `fin` slice then parsed a fragment tail -- so an oversized message was
+logged as "unparseable message" against a message that was perfectly well formed.
+The drop lasted one slice when it needed to last one message.
+
+Fixed with an `s_json_dropping` flag: set on overflow, and cleared at `fin`
+rather than at the next message's first slice, so a following message that never
+presents an offset-0 TEXT slice still starts clean. Also cleared on socket close
+and in `dg_agent_start()`, alongside the existing `s_json_len` resets.
+
+
+---
+
+## Open
 
 ### I6. `send_settings()` keeps 2,880 B of catalog buffers live in one frame
 
@@ -121,16 +168,6 @@ only for `set_color`, via a PSRAM buffer with the prefix written first and the
 catalog appended into its tail. The two older pairs were left as they were. That
 pattern applies to both unchanged, and doing it removes the trap the comment
 warns the next person about.
-
-### I7. The oversized-JSON drop path corrupts the *following* message
-
-`dg_agent.c:1029-1036`. On overflow the buffer is reset and the slice dropped,
-but the remaining CONT slices of that same message keep accumulating from offset
-0, and the `fin` slice then parses a fragment tail. The result is
-"unparseable message" logged against a message that was perfectly well formed.
-
-Fix: an `s_json_dropping` flag, set on overflow and cleared on `fin`, so the drop
-actually drops.
 
 ### I8. The spectrum point-samples 24 of 512 FFT bins
 

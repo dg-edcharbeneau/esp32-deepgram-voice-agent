@@ -64,7 +64,14 @@ static volatile bool s_busy;    /* an action is in progress */
  * had just been cleared.
  */
 static volatile uint32_t s_busy_since_ms;
-static volatile int64_t s_ready_at_us; /* earliest time the next request is taken */
+/*
+ * Earliest time the next request is taken. 32-bit ms for the reason the busy
+ * stamp above gives: written by the worker, read by the LVGL and button tasks,
+ * and a 64-bit value is stored in two halves. A tear here is milder than the
+ * backstop's -- a gesture wrongly refused, or wrongly accepted inside the
+ * cooldown -- but it is the same defect and the same one-line remedy.
+ */
+static volatile uint32_t s_ready_at_ms;
 static bool s_logged_hwm;
 
 /* Milliseconds since boot, truncated. One 32-bit store, so no writer can tear
@@ -229,7 +236,7 @@ static void session_ctl_task(void *arg)
 
         /* Stamped after the work, so the quiet period is 1.5 s of settled
          * device rather than 1.5 s that a slow stop already spent. */
-        s_ready_at_us = esp_timer_get_time() + (COOLDOWN_MS * 1000);
+        s_ready_at_ms = now_ms() + COOLDOWN_MS;
         /* Flag down before the stamp is cleared -- the mirror of the order on
          * the way in, and what makes both orders safe for the reader. */
         s_busy = false;
@@ -303,7 +310,11 @@ static void request(request_t req)
      * current one finishes, which is exactly the accidental double-trigger this
      * is meant to stop.
      */
-    if (s_busy || esp_timer_get_time() < s_ready_at_us) {
+    /* Wrap-safe: the difference is compared against half the range rather than
+     * the deadline against now, the same idiom main.c's deadlines use. At boot
+     * s_ready_at_ms is 0, which correctly reads as "no cooldown". */
+    const bool cooling = (now_ms() - s_ready_at_ms) >= (UINT32_MAX / 2);
+    if (s_busy || cooling) {
         ESP_LOGI(TAG, "request ignored (%s)", s_busy ? "busy" : "cooldown");
         return;
     }

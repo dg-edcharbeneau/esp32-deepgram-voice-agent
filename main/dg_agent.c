@@ -167,6 +167,17 @@ static volatile uint32_t s_audio_dropped;
 /* Reassembly buffer for JSON messages split across several DATA events. */
 static char *s_json;
 static int s_json_len;
+/*
+ * Set when the message being reassembled has already overrun the buffer, so its
+ * remaining slices are discarded instead of being taken for a new message.
+ *
+ * Without it, resetting s_json_len on overflow made the NEXT slices of the SAME
+ * message accumulate from offset 0, and the fin slice then parsed a fragment
+ * tail -- so an oversized message was reported as "unparseable message" against
+ * a message that was perfectly well formed. The drop has to last until the end
+ * of the message, not until the end of the slice.
+ */
+static bool s_json_dropping;
 
 /*
  * The last few turns, replayed into the next session's Settings so that
@@ -1024,23 +1035,36 @@ static void accumulate_json(const esp_websocket_event_data_t *ev)
      * though its own payload_offset starts back at 0. */
     if (ev->op_code == WS_OPCODE_TEXT && ev->payload_offset == 0) {
         s_json_len = 0;
+        s_json_dropping = false;
     }
 
-    if (s_json_len + ev->data_len > JSON_REASSEMBLY_MAX) {
-        ESP_LOGW(TAG, "message exceeds %d byte reassembly buffer, dropping",
-                 JSON_REASSEMBLY_MAX);
-        s_json_len = 0;
-        return;
+    if (!s_json_dropping) {
+        if (s_json_len + ev->data_len > JSON_REASSEMBLY_MAX) {
+            ESP_LOGW(TAG, "message exceeds %d byte reassembly buffer, dropping",
+                     JSON_REASSEMBLY_MAX);
+            s_json_dropping = true;
+            s_json_len = 0;
+        } else {
+            memcpy(s_json + s_json_len, ev->data_ptr, ev->data_len);
+            s_json_len += ev->data_len;
+        }
     }
 
-    memcpy(s_json + s_json_len, ev->data_ptr, ev->data_len);
-    s_json_len += ev->data_len;
-
-    /* Complete only when this is the last slice of the last frame: payload_len
-     * covers one frame, fin covers the fragment chain. */
+    /*
+     * Complete only when this is the last slice of the last frame: payload_len
+     * covers one frame, fin covers the fragment chain.
+     *
+     * Reached whether or not the message was dropped, and that is the point: the
+     * drop is cleared HERE rather than on the next message's first slice, so a
+     * following message that never presents an offset-0 TEXT slice still starts
+     * clean.
+     */
     if (ev->fin && ev->payload_offset + ev->data_len >= ev->payload_len) {
-        handle_json(s_json, s_json_len);
+        if (!s_json_dropping) {
+            handle_json(s_json, s_json_len);
+        }
         s_json_len = 0;
+        s_json_dropping = false;
     }
 }
 
@@ -1106,6 +1130,7 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
     case WEBSOCKET_EVENT_CLOSED:
         ESP_LOGW(TAG, "socket closed (status %d)", ev->close_status_code);
         s_json_len = 0;
+        s_json_dropping = false;
         set_state(DG_AGENT_DISCONNECTED);
         break;
 
@@ -1410,8 +1435,10 @@ esp_err_t dg_agent_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Stale bytes from a message that was cut off by the previous teardown. */
+    /* Stale bytes from a message that was cut off by the previous teardown, and
+     * a drop that teardown may have left mid-message. */
     s_json_len = 0;
+    s_json_dropping = false;
 
     ESP_LOGI(TAG, "connecting to %s", DG_AGENT_URI);
     esp_err_t err = esp_websocket_client_start(s_client);

@@ -126,6 +126,17 @@ static bool s_volume_from_nvs;
 /* Shared with the saved voice; see voices.c. */
 #define NVS_NAMESPACE  "dgagent"
 #define NVS_KEY_VOLUME "out_volume"
+/*
+ * The capture task's handle, which exists to make starting twice impossible.
+ *
+ * Not a diagnostic: audio_io.h states that the task cannot be created twice as
+ * though it were a property of this module, and until now nothing enforced it.
+ * A second audio_cap task at priority 7 would invalidate every "one writer only,
+ * so the read-modify-write needs no lock" argument in ui.c and face_spectrum.c
+ * at once -- s_level_peak's peak-hold, the FFT window's hop fill, and the
+ * seqlock's publish counter all assume a single producer.
+ */
+static TaskHandle_t s_capture_task;
 static volatile bool s_capture_enabled = true;
 /* Tap-only override, consulted only while capture is disabled. See
  * audio_io_capture_set_monitor() in the header for why it exists. */
@@ -579,11 +590,21 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink)
     if (s_mic == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Refused rather than ignored, the same way dg_agent_init() and
+     * session_ctl_start() refuse a second call: silently creating a second
+     * producer is the kind of fault that shows up as corrupted audio levels
+     * somewhere else entirely. */
+    if (s_capture_task != NULL) {
+        ESP_LOGE(TAG, "capture already started");
+        return ESP_ERR_INVALID_STATE;
+    }
     s_sink = sink;
 
     /* Priority above playback: a missed read is lost audio, a late write is
      * only a small gap the ring buffer absorbs. */
-    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7, NULL, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7,
+                                &s_capture_task, 1) != pdPASS) {
+        s_capture_task = NULL;
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "capture started: %d frame chunks (%d ms)",
