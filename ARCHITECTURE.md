@@ -288,8 +288,9 @@ flowchart TB
     assoc --> uistart["ui_start<br/><i>~1.2 s CO5300 reset,<br/>overlapped with association</i>"]
 
     uistart2 --> ap
-    uistart --> capstart["capture task started, gated"] --> ctl[session_ctl_start] --> wait{"wifi_sta_wait_connected<br/>30 s"}
-    wait -->|"ok"| run["session_ctl_request_start<br/>→ telemetry loop, 1 line/s"]
+    uistart --> capstart["capture task started, gated"] --> wait{"wifi_sta_wait_connected<br/>30 s"}
+    wait -->|"ok"| ctl["session_ctl_start<br/><i>after the link: it reads the API key,<br/>and a flash read stalls the cache</i>"]
+    ctl --> run["session_ctl_request_start<br/>→ telemetry loop, 1 line/s"]
     wait -->|"unreachable"| ap
 
     save -.->|"reboot"| boot0
@@ -299,6 +300,84 @@ Holding BOOT for 3 seconds erases the saved network and reboots straight into
 the portal. `GPIO 0` is polled after startup rather than sampled at reset — held
 low *through* a reset it puts the ROM into USB download mode, so "hold BOOT while
 pressing RESET" is emphatically not a Wi-Fi reset.
+
+### From link-up to the first word
+
+The chart above ends at `got ip`. What follows is five tasks coming up in an
+order that matters, and the diagram below is the local half — the wire half is
+the Agent API sequence earlier in this document.
+
+```mermaid
+sequenceDiagram
+    participant M as main task
+    participant S as session_ctl
+    participant G as dg_agent
+    participant W as ws client task
+    participant U as dg_uplink
+    participant C as audio_cap
+
+    Note over M: got ip
+
+    M->>S: session_ctl_start
+    S->>G: dg_agent_init
+    G->>G: api_key_load — NVS, else the Kconfig seed
+    Note over G: the only read of the key, ever
+    G->>G: header built in PSRAM, client strdups it, both freed
+    G->>U: create dg_uplink + PSRAM ring buffer
+    G->>G: create dg_keepalive
+
+    M->>S: session_ctl_request_start
+    S->>G: dg_agent_start
+    G->>W: client_start → TLS, cert bundle
+    Note over W: 401 here means BAD_KEY, not a bad network
+    W-->>S: CONNECTED → Settings sent
+    W-->>S: SettingsApplied → READY
+    S->>C: capture ungated
+
+    loop while ready
+        C->>U: enqueue 80 ms frame, never blocks
+        U->>W: send_bin, holds the client lock
+        W-->>C: agent PCM → playback, mic gated while it talks
+    end
+
+    Note over M: idle 15 s, or a tap
+    M->>S: session_ctl_request_stop
+    S->>G: dg_agent_stop
+    G->>G: s_ready = false, wait for the in-flight send
+    G->>G: drain the queue, no CLOSE frame
+    G->>W: client_stop
+    W-->>S: stopped
+```
+
+Four properties of this are load bearing, and three of them were bought the
+expensive way.
+
+- **The key is read once.** `dg_agent_init()` is the only caller of
+  `api_key_load()`, so a new key takes effect on the reboot the portal always
+  performs. Nothing applies one to a live session.
+- **`session_ctl_start()` happens after the link is up.** It reads NVS, and on
+  this config a flash read briefly disables the cache on both cores — which is
+  the one thing not to do while the station is still associating. Nothing needed
+  it earlier: every `session_ctl_request_*()` is a no-op while the task does not
+  exist, so a tap during "connecting" is ignored rather than starting a session
+  with no network.
+- **The audio send is not on the capture task.** `audio_cap` enqueues and returns;
+  `dg_uplink` owns every `send_bin` and therefore the client lock. That is what
+  makes "no send is in flight" something `dg_agent_stop()` can assert before it
+  touches the client, and it is what keeps a congested uplink from stalling the
+  task that owns the microphone. Overflow drops the newest frame — `updrop` in the
+  telemetry line — because 80 ms of stale speech is worth less than latency.
+- **No CLOSE frame is sent.** `esp_websocket_client_close()` takes a timeout and
+  forwards `portMAX_DELAY` to the frame send, so on a socket that cannot accept a
+  write it never returns — and it runs *before* the stop it precedes. That hung
+  the control task with "stopping" on the panel until the board was reset. The
+  session now finalises at Deepgram's idle timer instead, which costs a few
+  seconds of billing. See `esp-websocket-close-ignores-timeout.md`, and the long
+  comment in `dg_agent_stop()` for the two workarounds that failed first.
+
+A stop is ~150 ms on a healthy link and a second or two on a bad one. If one ever
+fails to finish, main's loop reboots the device after 30 s rather than leaving it
+unable to accept a gesture.
 
 ## Display
 
