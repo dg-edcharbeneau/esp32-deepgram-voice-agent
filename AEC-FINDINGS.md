@@ -921,12 +921,35 @@ is exactly when the keepalive is redundant.
   path takes `client->lock` with `portMAX_DELAY` and wedges the client permanently.
   See the comment in `sdkconfig.defaults`.
 
-**Still unexplained:** why the socket stalls at all. 32 kB/s to a cloud endpoint
-should not saturate, `errno` is 0, RAM is ample, and Wi-Fi power save is already
-`WIFI_PS_NONE`. Roughly 17% of mic frames drop. The patches above make that
-survivable, not absent, and the drop counter now measures it. A related failure
-survives at connect time: the 17.6 kB `Settings` TEXT frame failing with
-`errno=119` (EINPROGRESS), which self-recovers by reconnecting.
+### The stall was the network
+
+Chased for most of a day as a firmware bug. It is not one.
+
+The symptom: the socket goes unwritable with `errno=0`, `transport_error=ESP_OK`
+and no TLS error, while ~50-80 kB of internal RAM is free and Wi-Fi power save is
+already `WIFI_PS_NONE`. Roughly 17% of mic frames dropped, `Settings` failed at
+connect with `errno=119` (EINPROGRESS), and sessions died five times in seven.
+
+**The discriminator was one experiment: move the board to a phone hotspot.** Same
+firmware, same room, same board, different access point -- and it ran clean. The
+stall lives in the network, not the device.
+
+Two things worth keeping from the day it cost:
+
+- **Both branches are affected.** `stable` failed identically on the bad AP,
+  twice, and could not complete a conversation. The premise the whole
+  investigation started from -- `stable` clean, `main` intermittently broken --
+  was never true. Before blaming a diff, put the two builds on the same link at
+  the same time.
+- **The tolerance is still worth having.** It is what let the device hold fifteen
+  turns on the AP where `stable` could not finish one. A congested uplink is now
+  dropped frames rather than a dead session, and the drop counter measures what
+  used to be invisible. That is the right behaviour for a realtime audio device
+  regardless of whose fault the congestion is.
+
+What was never established is WHY that AP does it -- band steering, airtime
+fairness, an upstream shaper, something else. Nobody looked, because the answer
+stopped mattering to the firmware once the hotspot came back clean.
 
 **If anyone picks this up again**, the two walls above are the thing to attack, and
 neither is an AEC problem: send less audio upstream, or find the residual-echo
