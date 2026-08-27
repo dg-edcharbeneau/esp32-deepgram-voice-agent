@@ -56,7 +56,10 @@ static void on_forget_wifi(void *arg, void *usr_data)
 static void on_click(void *arg, void *usr_data)
 {
     /* session_ctl takes requests from any task and has its own debounce and
-     * cooldown, so the button needs no gating that the screen does not. */
+     * cooldown, so the button needs no gating that the screen does not.
+     *
+     * Unconditionally a toggle, unlike the screen tap, which interrupts while the
+     * agent is speaking. See the header for why the escape hatch stays simple. */
     ESP_LOGI(TAG, "EVT bootclick");
     session_ctl_request_toggle();
 }

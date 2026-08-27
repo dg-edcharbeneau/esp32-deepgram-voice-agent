@@ -690,7 +690,7 @@ image.
 ### If it fails
 
 The device stays half-duplex, and the honest product answer is a **non-acoustic
-interrupt** — a touch on the display ring stops the reply — or push-to-talk, which
+interrupt** — a touch on the centre button stops the reply — or push-to-talk, which
 makes the echo problem structurally impossible and reads as a deliberate
 interaction model rather than an apology. Both work in every room, which no
 canceller does.
@@ -883,6 +883,12 @@ finished SENDING and sits up to 12.3 s of ring ahead of the speaker -- so a tap 
 the tail, the case the feature exists for, arrived after its own clearing event and
 latched the mute for the full 30 s deadline. And `UI_INTERRUPT` fired on any short
 click outside the centre button, so stray touches triggered it.
+
+*(Both are fixed. The tail case is handled by `s_turn_inbound`, described below.
+The stray-touch case outlived that fix and was settled later by deleting the ring
+target altogether: the interrupt now shares the centre button with the session
+toggle, and `on_gesture()` picks between them on `audio_io_playback_active()`. See
+"Ending, starting, and interrupting a conversation" in the README.)*
 
 The fix has two halves, and neither is the mic gate.
 

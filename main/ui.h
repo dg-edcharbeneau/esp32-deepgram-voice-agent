@@ -32,8 +32,24 @@
 esp_err_t ui_start(void);
 
 typedef enum {
-    UI_TAP,  /* short press: toggle */
-    UI_HOLD, /* long press: force restart */
+    /*
+     * A short press on the centre button. ONE gesture with two meanings, and the
+     * handler picks between them: it interrupts if the agent is speaking, and
+     * otherwise toggles the session.
+     *
+     * The two used to be separate targets -- centre to toggle, ring to interrupt
+     * -- and the ring was the whole screen minus a 70 px circle, so it collected
+     * every brush of the bezel. AEC-FINDINGS.md records the same complaint from
+     * the other side: "UI_INTERRUPT fired on any short click outside the centre
+     * button, so stray touches triggered it."
+     *
+     * Collapsing them onto the button is what makes the overlap safe. There is no
+     * moment where a tap could plausibly do both, because there is only one
+     * branch, in main.c, and it is an if/else -- see on_gesture() there for which
+     * way it goes and why the interrupt arm is not routed through session_ctl.
+     */
+    UI_TAP,
+    UI_HOLD, /* long press on the centre button: force restart */
 
     /*
      * The display test reached its last step and has already put the previous
@@ -41,17 +57,6 @@ typedef enum {
      * session header, exactly as tap and hold do.
      */
     UI_TEST_DONE,
-
-    /*
-     * A tap on the ring OUTSIDE the centre button, which was previously dead.
-     * Kept off the centre deliberately: that toggles the session, and an
-     * accidental ring touch should cost one sentence where an accidental centre
-     * touch costs the whole conversation.
-     *
-     * Emitted whatever the device is doing; main.c decides whether there is
-     * anything to interrupt.
-     */
-    UI_INTERRUPT,
 } ui_gesture_t;
 
 /*

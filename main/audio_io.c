@@ -313,7 +313,8 @@ static void capture_task(void *arg)
          * reply saturates the TCP send queue until a 1,630 B DMA allocation fails
          * and the session drops, and even while that audio reached Deepgram it
          * never distinguished a person talking over the agent from the residual
-         * echo. The interrupt on this device is the tap on the display ring.
+         * echo. The interrupt on this device is a tap on the centre button while the
+         * agent is speaking -- see on_gesture() in main.c.
          *
          * The whole investigation, the numbers and where the removed code lives
          * are in AEC-FINDINGS.md. Read it before removing this gate again.

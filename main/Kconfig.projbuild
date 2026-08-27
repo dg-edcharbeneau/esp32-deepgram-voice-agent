@@ -257,7 +257,8 @@ menu "Deepgram Agent Device"
             stops answering itself in an empty room. It still does not give
             barge-in: the microphone stream saturates the TCP send queue until TLS
             cannot allocate, and Deepgram never distinguished a person talking over
-            the agent from the residual echo. Use the tap on the display ring.
+            the agent from the residual echo. The interrupt on this device is a
+            tap on the centre button while the agent is speaking.
 
             AEC-FINDINGS.md has the measurements and where the removed code lives.
             The ~70 kB figure that used to appear here was esp-sr's AFE, not its
@@ -320,6 +321,31 @@ menu "Deepgram Agent Device"
             1000 ms gives several samples inside a spoken word. Raise it to reduce
             log volume for long unattended runs; note that a window shorter than a
             frame period will report frames=0.
+
+    config UI_SHOW_INDICATORS
+        bool "Draw the touch target and what a tap will do"
+        default n
+        help
+            BENCH AND DEMO AID. Leave it off for anything you intend to use.
+
+            The control is invisible. It is a 70 px circle in the middle of a
+            466 px panel, with no outline and no label, and the rest of the
+            screen does nothing -- which is right for a device sitting on a desk
+            and unhelpful for anyone learning it, reviewing it, or filming it.
+
+            With this on, the frame timer draws a thin ring at exactly the hit
+            radius, and a line under the status word saying what a tap does RIGHT
+            NOW: "interrupt" while the agent is speaking, "stop" or "start"
+            otherwise, "advance" during the display test. The ring changes colour
+            with it, so the affordance and the action agree.
+
+            IT SHOWS, IT DOES NOT CHANGE. Every gesture behaves identically with
+            this off; nothing here is load bearing.
+
+            Costs a frame. The ring is drawn over whatever the face painted and
+            its bounding box is invalidated every frame, which the orb otherwise
+            avoids -- it invalidates only the dots it moved. The spectrum already
+            repaints the whole canvas and pays nothing extra.
 
     choice UI_DEFAULT_FACE_CHOICE
         prompt "Default display face"

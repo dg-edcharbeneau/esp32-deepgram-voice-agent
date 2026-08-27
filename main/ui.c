@@ -67,6 +67,30 @@ static const char *TAG = "ui";
  */
 #define BUTTON_RADIUS 70
 
+#if CONFIG_UI_SHOW_INDICATORS
+/*
+ * The button, made visible. See CONFIG_UI_SHOW_INDICATORS for what this is for;
+ * the constraint worth repeating here is that it must only ever DRAW. Every
+ * gesture behaves identically with the flag off, so nothing in this file may
+ * branch on it outside a draw path.
+ *
+ * The ring's radius is BUTTON_RADIUS itself, not a hand-picked "looks about
+ * right" value, and lv_draw_arc puts the OUTER edge there and grows inward -- so
+ * the ink lies inside the live area and its outer edge is the boundary the hit
+ * test actually uses. If the two ever disagree the drawing is wrong, which is
+ * the only way an affordance like this stays worth trusting.
+ */
+#define INDICATOR_WIDTH 2
+
+/* Dim, because the resting state is "here is the button" and it sits under a
+ * face that is already using the screen. */
+#define INDICATOR_RGB_IDLE 0x4a5560
+
+/* Warm, and deliberately the loudest thing the overlay does: it marks the one
+ * moment when a tap means something other than start/stop. */
+#define INDICATOR_RGB_INTERRUPT 0xe8a54a
+#endif
+
 /* Rows per LVGL render chunk, in internal RAM: 466 * rows * 2 bytes. Must stay
  * small enough that the SPI driver can allocate a DMA buffer of the same size,
  * and small enough that Wi-Fi can still find contiguous internal RAM later. */
@@ -483,6 +507,9 @@ static volatile int64_t s_reported_us;
 
 static lv_obj_t *canvas_obj;
 static lv_obj_t *status_label;
+#if CONFIG_UI_SHOW_INDICATORS
+static lv_obj_t *hint_label;
+#endif
 static uint32_t s_frame;
 static lv_indev_t *s_touch;
 static void (*s_gesture_handler)(ui_gesture_t gesture);
@@ -867,6 +894,96 @@ static void update_status_label(ui_behaviour_t beh)
         lv_label_set_text(status_label, want);
     }
 }
+
+#if CONFIG_UI_SHOW_INDICATORS
+/*
+ * Draw the touch target and name the action it currently carries.
+ *
+ * CALLED AFTER THE FACE, always. The orb clears only the boxes its own dots
+ * occupied last frame, so anything drawn before it is partly erased and the
+ * overlay would come out moth-eaten; drawing last means the ring is simply on
+ * top. It also means the ring has to invalidate its own bounding box -- the orb
+ * invalidates dots, not this -- which is the frame cost the Kconfig help warns
+ * about.
+ *
+ * WHERE THE ANSWER COMES FROM
+ *
+ * audio_io_playback_active(), because that is the exact predicate main.c's
+ * on_gesture() branches on. Not a state of its own, and not the resolved
+ * behaviour: SPEAKING is a presentation state with dwell times and crossfades
+ * layered over it, so a hint keyed to it would go on promising "interrupt" after
+ * the tap had stopped doing that. Two readings of one predicate can disagree by
+ * at most a frame; two different predicates disagree by design.
+ *
+ * The one thing it does not model is main.c's post-interrupt grace: for
+ * INTERRUPT_GRACE_MS after an interrupt a tap does nothing at all, and this will
+ * already be reading "stop". Left alone deliberately -- a bench overlay that
+ * reaches into another file's timers to be right for another second and a half
+ * is a worse trade than a window this short being optimistic.
+ */
+static void draw_indicators(void)
+{
+    const char *hint;
+    bool interrupt = false;
+
+    if (s_qr_payload != NULL) {
+        /* Provisioning owns the screen, the code is what to look at, and none of
+         * the gestures below apply. Nothing drawn, nothing said. */
+        hint = "";
+    } else if (s_test_active) {
+        hint = "tap: advance";
+    } else if (audio_io_playback_active()) {
+        interrupt = true;
+        hint = "tap: interrupt";
+    } else if (s_stopped) {
+        hint = "tap: start";
+    } else {
+        hint = "tap: stop";
+    }
+
+    /* Pointer compare, like update_status_label(), and for the same reason: a
+     * rewrite is another invalid area and another render pass. Every branch above
+     * yields a literal, so this is exact. */
+    static const char *shown;
+    if (hint != shown) {
+        shown = hint;
+        lv_label_set_text(hint_label, hint);
+    }
+
+    if (s_qr_payload != NULL) {
+        return;
+    }
+
+    lv_layer_t layer;
+    lv_canvas_init_layer(canvas_obj, &layer);
+
+    lv_draw_arc_dsc_t dsc;
+    lv_draw_arc_dsc_init(&dsc);
+    dsc.color = lv_color_hex(interrupt ? INDICATOR_RGB_INTERRUPT : INDICATOR_RGB_IDLE);
+    dsc.width = INDICATOR_WIDTH;
+    dsc.center.x = CENTER_X;
+    dsc.center.y = CENTER_Y;
+    dsc.radius = BUTTON_RADIUS;
+    dsc.start_angle = 0;
+    dsc.end_angle = 360;
+    dsc.opa = LV_OPA_COVER;
+    lv_draw_arc(&layer, &dsc);
+
+    lv_canvas_finish_layer(canvas_obj, &layer);
+
+    /* One pixel of slop for the anti-aliased outer edge. The canvas sits at 0,0
+     * and covers the panel, so widget and screen coordinates coincide -- the same
+     * assumption orb_raster.c documents where it invalidates. */
+    const int32_t r = BUTTON_RADIUS + 1;
+    lv_area_t area = {
+        .x1 = CENTER_X - r,
+        .y1 = CENTER_Y - r,
+        .x2 = CENTER_X + r,
+        .y2 = CENTER_Y + r,
+    };
+    lv_obj_invalidate_area(canvas_obj, &area);
+}
+#endif /* CONFIG_UI_SHOW_INDICATORS */
 
 /*
  * Creates or tears down the QR overlay to match what was last requested.
@@ -1333,6 +1450,12 @@ static void frame_timer_cb(lv_timer_t *timer)
         s_face->render(&ctx);
     }
 
+#if CONFIG_UI_SHOW_INDICATORS
+    /* Last, and inside the timing window on purpose: the ring is not free, and a
+     * cost excluded from the measurement is a cost nobody finds. */
+    draw_indicators();
+#endif
+
     tlm_accumulate_frame(draw_start_us);
 }
 
@@ -1387,22 +1510,30 @@ static void gesture_event_cb(lv_event_t *e)
         break;
 
     case LV_EVENT_SHORT_CLICKED:
-        /* The one mode where a tap does not toggle the session. */
+        /*
+         * ONE target, and it is the centre. A click that started outside the
+         * button is dropped here and reaches nothing.
+         *
+         * The ring briefly meant "interrupt" and that is what this reverts. It
+         * was the whole 466 px panel minus a 70 px circle, so the gesture with
+         * the largest target was the one nobody aimed at -- every bezel brush
+         * cost a sentence. The interrupt did not go away with it; it moved onto
+         * the button, where main.c chooses between interrupting and toggling.
+         *
+         * Nothing here asks whether the agent is actually speaking. That stays
+         * main.c's call, which is what keeps this file free of any notion of a
+         * turn -- the same reason the split lived here and the meaning did not.
+         */
+        if (!s_press_in_button) {
+            break;
+        }
+        /* The one mode where a tap does not reach the session at all. */
         if (s_test_active) {
-            if (s_press_in_button) {
-                test_advance();
-            }
+            test_advance();
             break;
         }
         if (s_gesture_handler) {
-            /*
-             * Two targets on one screen, split by radius. The centre keeps the
-             * session toggle it has always had; the ring, dead until now, stops
-             * the agent mid-reply. Nothing here asks whether the agent is
-             * actually speaking -- that is main.c's call, and it keeps this file
-             * free of any notion of a turn.
-             */
-            s_gesture_handler(s_press_in_button ? UI_TAP : UI_INTERRUPT);
+            s_gesture_handler(UI_TAP);
         }
         break;
 
@@ -1631,6 +1762,21 @@ static esp_err_t build_ui(void)
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_24, LV_PART_MAIN);
     lv_obj_set_style_text_color(status_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_center(status_label);
+
+#if CONFIG_UI_SHOW_INDICATORS
+    /*
+     * Under the status word, and fixed there rather than aligned to it: the
+     * status label slides down when the QR code is up, and this one is blanked in
+     * that case anyway -- see draw_indicators(). Small and grey, because it
+     * annotates the picture and must not become the picture.
+     */
+    hint_label = lv_label_create(scr);
+    lv_label_set_text(hint_label, "");
+    lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(hint_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
+    lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 34);
+#endif
 
     /*
      * The screen, not the canvas. lv_canvas derives from lv_image, whose

@@ -162,6 +162,74 @@ static void end_interrupt(const char *why)
     ESP_LOGI(TAG, "EVT interrupt-end (%s)", why);
 }
 
+/*
+ * How long after an interrupt a tap still refuses to toggle the session.
+ *
+ * The interrupt and the toggle now share the button, and the branch between them
+ * is "is the speaker busy" -- which the interrupt itself makes false, within
+ * PLAYBACK_TAIL_MS of the flush. So the second tap of a double-tap arrives at a
+ * quiet device and reads as "end the conversation". One impatient finger, and the
+ * gesture that means "stop talking" has hung up instead.
+ *
+ * 1500 ms, matching session_ctl's COOLDOWN_MS, and for the same reason it gives:
+ * with a touch panel as the only control, ignoring a press someone meant costs
+ * far less than acting on one they did not. It delays nothing real -- the tap
+ * that ends a conversation is a considered one, and it still works a beat later.
+ */
+#define INTERRUPT_GRACE_MS 1500
+static volatile uint32_t s_interrupt_grace_ms;
+
+static bool in_interrupt_grace(void)
+{
+    if (s_interrupt_grace_ms == 0) {
+        return false;
+    }
+    /* Wrap-safe, like the mute deadline below: the difference is compared against
+     * half the range rather than the deadline against now. */
+    return (now_ms() - s_interrupt_grace_ms) >= (UINT32_MAX / 2);
+}
+
+/*
+ * Silence the reply, and stop the rest of it from arriving.
+ *
+ * The flush silences the ring. Whether that is the whole job depends on something
+ * the flush cannot see: is the reply still ARRIVING?
+ *
+ * If it is, the mute is the other half -- Deepgram has no interrupt message and
+ * keeps sending, so a flush alone just makes the agent pause and resume mid-word a
+ * moment later. Measured: 410 kB of story kept arriving over the 14 s after one
+ * tap, every byte of it discarded.
+ *
+ * If it is not -- a tap after the last byte has landed, with only the ring left to
+ * empty -- there is nothing to mute. Flush and stop.
+ *
+ * Either way the microphone stays open and the user can talk immediately, which is
+ * both what the feature promised and what releases the mute.
+ *
+ * Deliberately NOT routed through session_ctl: request() drops anything arriving
+ * while busy or inside COOLDOWN_MS, which is exactly when someone interrupts.
+ * Every call here is a single flag store, safe on the LVGL task.
+ *
+ * The caller has already established that playback is active, which is what makes
+ * this the interrupt arm rather than the toggle arm.
+ */
+static void do_interrupt(void)
+{
+    audio_io_flush();
+    note_activity();
+    s_interrupt_grace_ms = now_ms() + INTERRUPT_GRACE_MS;
+
+    if (s_turn_inbound) {
+        ESP_LOGI(TAG, "EVT interrupt");
+        audio_io_mute_playback(true);
+        s_mute_deadline_ms = now_ms() + MUTE_MAX_MS;
+    } else {
+        /* Distinct from the line above so a serial capture shows which path ran
+         * -- the tail tap arms no mute and gets no end event. */
+        ESP_LOGI(TAG, "EVT interrupt (tail)");
+    }
+}
+
 static const char *state_name(dg_agent_state_t state)
 {
     switch (state) {
@@ -362,52 +430,46 @@ static void on_gesture(ui_gesture_t gesture)
 {
     switch (gesture) {
     case UI_TAP:
-        ESP_LOGI(TAG, "EVT tap");
-        session_ctl_request_toggle();
+        /*
+         * ONE TARGET, TWO MEANINGS, AND EXACTLY ONE OF THEM PER TAP.
+         *
+         * Interrupting used to have a target of its own -- everything outside the
+         * 70 px button, which is most of a 466 px panel -- and that is why it is
+         * here instead: the gesture nobody aimed at collected every brush of the
+         * bezel, and each one cost a sentence.
+         *
+         * The two meanings can share the button because they are never both
+         * plausible. Agent speaking means "stop talking"; anything else means
+         * "start or end the conversation". So the split is this if/else and
+         * nothing more: an if/else cannot fall through into the toggle, which is
+         * the property being bought -- an interrupt must never be able to also
+         * hang up.
+         *
+         * audio_io_playback_active() rather than a state of our own. It is true
+         * while the ring holds audio and for PLAYBACK_TAIL_MS past the last write,
+         * which is the same thing as "you can still hear it" -- and being wrong in
+         * the generous direction is the safe way to be wrong here, since the worst
+         * case is a tap that interrupts nothing instead of a tap that ends the
+         * conversation.
+         */
+        if (audio_io_playback_active()) {
+            do_interrupt();
+        } else if (in_interrupt_grace()) {
+            /*
+             * The second tap of an impatient double-tap, landing after the flush
+             * has already silenced the speaker. Without this it reads as a toggle
+             * and hangs up -- the exact failure the if/else above exists to
+             * prevent, arriving a beat late instead of on the same press.
+             */
+            ESP_LOGI(TAG, "EVT tap ignored (interrupt grace)");
+        } else {
+            ESP_LOGI(TAG, "EVT tap");
+            session_ctl_request_toggle();
+        }
         break;
     case UI_HOLD:
         ESP_LOGI(TAG, "EVT hold");
         session_ctl_request_restart();
-        break;
-
-    case UI_INTERRUPT:
-        /*
-         * The flush silences the ring. Whether that is the whole job depends on
-         * something the flush cannot see: is the reply still ARRIVING?
-         *
-         * If it is, the mute is the other half -- Deepgram has no interrupt
-         * message and keeps sending, so a flush alone just makes the agent pause
-         * and resume mid-word a moment later. Measured: 410 kB of story kept
-         * arriving over the 14 s after one tap, every byte of it discarded.
-         *
-         * If it is not -- a tap after the last byte has landed, with only the ring
-         * left to empty -- there is nothing to mute. Flush and stop.
-         *
-         * Either way the microphone stays open and the user can talk immediately,
-         * which is both what the feature promised and what releases the mute.
-         *
-         * Deliberately NOT routed through session_ctl: request() drops anything
-         * arriving while busy or inside COOLDOWN_MS, which is exactly when someone
-         * interrupts. Every call here is a single flag store, safe on the LVGL
-         * task.
-         */
-        if (audio_io_playback_active()) {
-            audio_io_flush();
-            note_activity();
-            if (s_turn_inbound) {
-                ESP_LOGI(TAG, "EVT interrupt");
-                audio_io_mute_playback(true);
-                s_mute_deadline_ms = now_ms() + MUTE_MAX_MS;
-            } else {
-                /* Distinct from the line above so a serial capture shows which
-                 * path ran -- the tail tap arms no mute and gets no end event. */
-                ESP_LOGI(TAG, "EVT interrupt (tail)");
-            }
-        } else {
-            /* Nothing to stop. Logged because a ring tap that appears to do
-             * nothing is otherwise indistinguishable from a dead touch panel. */
-            ESP_LOGI(TAG, "EVT interrupt (nothing playing)");
-        }
         break;
 
     case UI_TEST_DONE:
