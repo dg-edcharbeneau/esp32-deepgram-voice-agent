@@ -98,6 +98,24 @@ static const char *TAG = "ui";
 
 #define FRAME_MS 33
 
+/*
+ * SLEEP: what the panel does when nothing has wanted it for a while.
+ *
+ * 88% of this device's life is spent with the session stopped, and until now it
+ * rendered that at full rate and full brightness -- which is where the heat was
+ * going. Asleep it keeps drawing, slowly and dim, because a frozen or black panel
+ * reads as a crash where a slow breathing orb reads as waiting.
+ *
+ * 200 ms is 5 fps. The frame timer is the ONLY thing slowed: LVGL itself keeps
+ * running, so the touch panel is polled at its usual rate and a tap is as
+ * responsive asleep as awake. That is the property that rules out the adapter's
+ * own AUTO_SLEEP_MODE_PAUSE, which parks the LVGL worker -- and the worker is
+ * what reads the touch, so nothing but the BOOT button could wake it.
+ */
+#define SLEEP_FRAME_MS       200
+#define SLEEP_BRIGHTNESS_PCT 15
+#define AWAKE_BRIGHTNESS_PCT 100
+
 /* How long after the last sample we treat the display as idle. Slightly longer
  * than one producer hop so a late chunk does not flicker everything to flat. */
 #define IDLE_MS 250
@@ -212,6 +230,16 @@ static bool s_face_ready[FACE_COUNT];    /* has init() succeeded */
 /* Requested from any task, applied by the frame timer -- the same deferred
  * pattern as s_qr_payload, and for the same reason: bringing a face up touches
  * LVGL. -1 means nothing pending. */
+/*
+ * Sleep, requested from any task and applied by the frame timer -- the same
+ * deferred handoff as s_face_want below, and here it is load bearing rather than
+ * tidy: bsp_display_brightness_set() is a panel command over the same QSPI bus as
+ * the flush, so it must not run while one is in flight.
+ */
+static volatile bool s_sleep_want;
+static bool s_asleep;            /* LVGL task only */
+static lv_timer_t *s_frame_timer;
+
 static volatile int s_face_want = -1;
 
 /*
@@ -694,6 +722,16 @@ void ui_show_qr(const char *payload)
 void ui_set_gesture_handler(void (*handler)(ui_gesture_t gesture))
 {
     s_gesture_handler = handler;
+}
+
+void ui_set_sleep(bool sleep)
+{
+    s_sleep_want = sleep;
+}
+
+bool ui_is_asleep(void)
+{
+    return s_asleep;
 }
 
 void ui_set_stopped(bool stopped)
@@ -1325,10 +1363,37 @@ void ui_get_telemetry(ui_telemetry_t *out)
     s_tlm.last_us = keep;
 }
 
+/*
+ * Enter or leave sleep. LVGL task only -- it touches the panel and an lv_timer.
+ *
+ * Refuses to sleep during the display test. The test runs with the session
+ * stopped and can outlast the sleep timer -- main.c records a measured 41 s run
+ * against a 30 s threshold -- so without this it would dim and slow down in the
+ * middle of someone stepping through it.
+ */
+static void apply_sleep(bool want)
+{
+    if (want == s_asleep) {
+        return;
+    }
+    if (want && s_test_active) {
+        return;
+    }
+    s_asleep = want;
+    if (s_frame_timer != NULL) {
+        lv_timer_set_period(s_frame_timer, want ? SLEEP_FRAME_MS : FRAME_MS);
+    }
+    bsp_display_brightness_set(want ? SLEEP_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
+    ESP_LOGI(TAG, "EVT %s", want ? "sleep" : "wake");
+}
+
 static void frame_timer_cb(lv_timer_t *timer)
 {
     LV_UNUSED(timer);
     s_frame++;
+
+    /* Before anything draws, like the face and colour switches below. */
+    apply_sleep(s_sleep_want);
 
     int64_t draw_start_us = esp_timer_get_time();
     bool idle = ((uint32_t)(draw_start_us / 1000) - s_last_feed_ms) > IDLE_MS;
@@ -1502,6 +1567,18 @@ static void gesture_event_cb(lv_event_t *e)
 {
     switch (lv_event_get_code(e)) {
     case LV_EVENT_PRESSED:
+        /*
+         * WAKE ON THE PRESS, not on the click, and here rather than by setting
+         * the request flag: this already runs on the LVGL task, so the panel can
+         * come back at full brightness on the same event that noticed the finger.
+         * Going through s_sleep_want would cost up to one 200 ms sleep frame,
+         * which is exactly the lag that makes a device feel dead.
+         *
+         * Deliberately regardless of where the press landed. Waking is not the
+         * button's job -- any touch means someone is there.
+         */
+        s_sleep_want = false;
+        apply_sleep(false);
         s_press_in_button = press_is_in_button(e);
         s_press_active = s_press_in_button;
         break;
@@ -1704,6 +1781,11 @@ static size_t orb_slot(void)
 
 static void test_enter(void)
 {
+    /* The test is entered with the session stopped, so the device may already be
+     * asleep -- and a dimmed 5 fps walkthrough is not a display test. */
+    s_sleep_want = false;
+    apply_sleep(false);
+
     s_test_face_restore = s_face_index;
     s_test_step = 0;
     s_test_active = true;
@@ -1815,7 +1897,7 @@ static esp_err_t build_ui(void)
         return err;
     }
 
-    lv_timer_create(frame_timer_cb, FRAME_MS, NULL);
+    s_frame_timer = lv_timer_create(frame_timer_cb, FRAME_MS, NULL);
     return ESP_OK;
 }
 

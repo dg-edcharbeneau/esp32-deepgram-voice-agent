@@ -117,6 +117,21 @@ void ui_set_gesture_handler(void (*handler)(ui_gesture_t gesture));
  * connecting, where the display should keep breathing. This is only for a
  * device that has been deliberately stopped.
  */
+/*
+ * Ask the display to sleep or wake. Safe from any task -- the request is applied
+ * by the frame timer on the LVGL task, because changing the brightness is a panel
+ * command over the same bus as the flush.
+ *
+ * Asleep the panel dims and the frame rate drops, but LVGL keeps running, so a
+ * touch is answered as quickly as it is when awake -- and a touch wakes it on the
+ * press, without the caller doing anything. Refused while the display test is
+ * running, which can outlast the sleep timer.
+ */
+void ui_set_sleep(bool sleep);
+
+/* Whether the display is currently in that state. */
+bool ui_is_asleep(void);
+
 void ui_set_stopped(bool stopped);
 
 /* audio_io_tap_t-compatible. Agent audio wins when both are active. */

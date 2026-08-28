@@ -118,7 +118,14 @@ esp_err_t wifi_sta_start(const char *ssid, const char *pass)
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-    /* No modem sleep: it adds tens of ms of jitter to a live audio stream. */
+    /*
+     * No modem sleep: it adds tens of ms of jitter to a live audio stream.
+     *
+     * That is a SESSION-TIME requirement, not an always-on one, and for most of
+     * this device's life there is no stream to protect -- 88% of it is spent with
+     * the session stopped. wifi_sta_set_power_save() below is what lets the sleep
+     * state take advantage of that; this call is the awake default.
+     */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -154,4 +161,27 @@ esp_err_t wifi_sta_stop(void)
     }
     xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
     return err;
+}
+
+/*
+ * Modem sleep on or off, for the sleep state in main.c.
+ *
+ * Kept here rather than calling esp_wifi_set_ps() from the caller so that Wi-Fi
+ * policy lives in one file and the reasoning above sits next to both settings.
+ *
+ * MIN_MODEM rather than MAX_MODEM: the station stays associated and keeps
+ * listening for beacons, so waking costs about one beacon interval (~100 ms)
+ * rather than a re-association. That is invisible behind the 1.1-6.0 s the
+ * Deepgram handshake takes -- see the CONNECTING note in main.c.
+ *
+ * Failure is logged and swallowed: a device that will not modem-sleep should
+ * carry on running warm, not refuse to work.
+ */
+void wifi_sta_set_power_save(bool enabled)
+{
+    esp_err_t err = esp_wifi_set_ps(enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(%s): %s",
+                 enabled ? "MIN_MODEM" : "NONE", esp_err_to_name(err));
+    }
 }
