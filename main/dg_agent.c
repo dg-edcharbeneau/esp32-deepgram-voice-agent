@@ -1645,20 +1645,3 @@ uint32_t dg_agent_transport_dropped(void)
     return transport_ws_local_dropped_frames();
 }
 
-esp_err_t dg_agent_inject_user_message(const char *text)
-{
-    if (!s_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    cJSON *root = cJSON_CreateObject();
-    if (root == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    cJSON_AddStringToObject(root, "type", "InjectUserMessage");
-    cJSON_AddStringToObject(root, "content", text);
-
-    esp_err_t err = send_json(root, "InjectUserMessage");
-    cJSON_Delete(root);
-    return err;
-}

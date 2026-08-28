@@ -32,10 +32,6 @@ static const face_t s_faces[] = {
 
 #define FACE_COUNT (sizeof(s_faces) / sizeof(s_faces[0]))
 
-size_t faces_count(void)
-{
-    return FACE_COUNT;
-}
 
 const char *faces_name(size_t index)
 {

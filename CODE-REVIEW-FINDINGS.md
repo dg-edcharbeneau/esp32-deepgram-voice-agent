@@ -462,6 +462,40 @@ Two guards, because they catch different things:
   upstream to fix a bug we cannot hit works against the single-file-diff
   discipline that makes this vendoring maintainable.
 
+## Unreachable states, removed
+
+An audit of what the state machine can actually reach. Three tiers came out of
+it, and only the middle one was removed.
+
+**Removed -- unreachable and not exercised by anything:**
+
+| thing | why it was unreachable |
+|---|---|
+| `MODE_WAVE`, `orb_build_wave()`, `orb_wave_ink()` | nothing selects it since LISTENING moved back to the shell |
+| `MODE_RIBBON`, `orb_build_ribbon()` and its lattice | same, for SPEAKING |
+| `ORB_LISTENING`, `ORB_SPEAKING` | `to_orb()` maps the UI states to the `*_FILL` poses instead |
+| `dg_agent_inject_user_message()`, `faces_count()`, `ui_hide_qr()` | zero call sites |
+| `ui_test_step_t.idle` / `.stopped` | all nine steps set both `false`; the struct comment admitted it |
+
+**Kept deliberately:** `MODE_RUBIK` and `UI_BEHAVIOUR_THINKING`, to be wired up
+when Deepgram's `AgentThinking` starts arriving. `ORB_THINKING` and the wave
+LATTICE stay with them -- rubik is built on `s_wave_rings` / `s_wave_unit`, and
+`wave_w()` is what the shell's THINKING pose undulates with.
+
+**Two consequences worth knowing.**
+
+Removing `MODE_WAVE` frees code but **no memory**: rubik needs its lattice, so
+only the builder went. The one real allocation saved is ribbon's tables --
+1,792 B of the pooled 12,136, a 15% cut.
+
+And the parity harness drops from **33 frames to 19**: five shell cases
+(listening, listening_amp, speaking, speaking_amp, blend_l2s) plus wave's five
+and ribbon's four. No coverage of *live* code is lost -- the `*_FILL` poses that
+replaced ORB_LISTENING/ORB_SPEAKING are this project's own and were never
+parity-testable, with zero mentions in the reference. What went was coverage of
+poses nothing could select. The builders, their cases and the reference they were
+diffed against live on in the orb library branch.
+
 ## Worth keeping
 
 Recorded because a future change might otherwise undo them:

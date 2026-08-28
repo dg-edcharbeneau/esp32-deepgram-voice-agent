@@ -28,9 +28,7 @@
 typedef enum {
     ORB_IDLE = 0,
     ORB_INITIALIZING = 1,
-    ORB_LISTENING = 2,
     ORB_THINKING = 3,
-    ORB_SPEAKING = 4,
     ORB_CONNECTING = 5,
     ORB_BUFFERING = 6,
     ORB_DISCONNECTED = 7,
@@ -66,7 +64,7 @@ typedef enum {
      */
     ORB_LISTENING_FILL = 9,
 
-    ORB_BEHAVIOUR_COUNT = 10,
+    ORB_BEHAVIOUR_COUNT = 8,
 } orb_behaviour_t;
 
 /*
@@ -80,7 +78,6 @@ typedef enum {
  */
 #define ORB_VOICE_DOTS 456  /* 18 rings of cosine-tapered longitude counts */
 #define ORB_WAVE_DOTS 384   /* rings 15 / lonDensity 40; rubik shares it */
-#define ORB_RIBBON_DOTS 370 /* ghostN 90 + lanes 5 * segs 56, tuned down */
 #define ORB_BRAID_DOTS 306  /* ghostN 150 + 3 strands * strandN 52 */
 #define ORB_WEB_DOTS 35     /* nodeN 30 + signals 5 */
 
@@ -99,8 +96,7 @@ typedef enum {
  */
 #define ORB_ONE_MODE_DOTS                                   \
     ORB_MAX2(ORB_VOICE_DOTS,                                \
-             ORB_MAX2(ORB_WAVE_DOTS,                        \
-                      ORB_MAX2(ORB_RIBBON_DOTS, ORB_BRAID_DOTS)))
+             ORB_MAX2(ORB_WAVE_DOTS, ORB_BRAID_DOTS))
 #define ORB_SECOND_MODE_DOTS ORB_WAVE_DOTS /* the next largest after the shell */
 #define ORB_MAX_DOTS (ORB_ONE_MODE_DOTS + ORB_SECOND_MODE_DOTS)
 
@@ -165,29 +161,7 @@ typedef struct {
     float high; /* ink only, no motion -- sibilance as brightness  */
 } orb_bands_t;
 
-/*
- * Build one frame of `wave` -- the playground's `listening` orb, ported from
- * lattice.ts buildWave.
- *
- * No behaviour, no blend, no amplitude: a wave is a single animation that does
- * the same thing forever. 384 dots on its own lattice, not the shell's 456.
- *
- * `amp` is the MICROPHONE level -- LISTENING is the user talking -- and scales
- * every radius through the reference's dyn.rMul. See WAVE_RMUL_GAIN for why that
- * is the only hook available and what it costs in expressiveness.
- */
-void orb_build_wave(orb_frame_t *out, float t, float amp);
 
-/*
- * Brighten a built wave frame by the microphone level.
- *
- * A SEPARATE call, not folded into orb_build_wave, because buildWave has no ink
- * hook upstream -- radius is the only thing the reference lets volume touch. This
- * composes over the finished frame the way the voice band pass does, which keeps
- * orb_build_wave a transcription the parity harness can check and keeps the part
- * with no upstream outside it.
- */
-void orb_wave_ink(orb_frame_t *out, float amp);
 
 /*
  * Build one frame of `rubik` -- the playground's `solving` orb, ported from
@@ -196,25 +170,12 @@ void orb_wave_ink(orb_frame_t *out, float amp);
  */
 void orb_build_rubik(orb_frame_t *out, float t);
 
-/*
- * Build one frame of `ribbon` -- the playground's `composing` orb, ported from
- * ribbon.ts buildRibbon.
- *
- * The largest mode at 590 dots: a 150-dot Fibonacci ghost shell plus a five-lane
- * band of 88 segments that precesses and undulates. Unlike wave and rubik it
- * varies alpha per dot, so its ghosts read as a haze behind the band.
- *
- * `amp` is 0..1 and scales how DEEP the undulation goes, never how fast -- the
- * band's tempo is fixed. Tuned below the reference's dot counts for frame budget;
- * see RIBBON_GHOSTS in orb_geometry.c.
- */
-void orb_build_ribbon(orb_frame_t *out, float t, float amp);
 
 /*
  * Build one frame of `braid` -- the playground's `weaving` orb, ported from
  * braid.ts frameBraid.
  *
- * Three strands plaiting pole to pole over the same ghost shell ribbon uses. The
+ * Three strands plaiting pole to pole over a Fibonacci ghost shell. The
  * only mode so far that CULLS: a strand fades out at the poles, so the dot count
  * varies from frame to frame.
  */
@@ -240,7 +201,7 @@ void orb_build_web(orb_frame_t *out, float t);
  * unaffected. The dot lattice turns with the light, which is what rotating the
  * orb means -- a 90 puts the poles left and right and the rings read vertical.
  *
- * A LOCAL POST-PASS with no upstream, like orb_wave_ink, so host/run.sh cannot
+ * A LOCAL POST-PASS with no upstream, so host/run.sh cannot
  * check it. Keeping it out of the build calls is what leaves those transcriptions
  * diffable. Zero returns immediately, so an unrotated behaviour pays nothing.
  */

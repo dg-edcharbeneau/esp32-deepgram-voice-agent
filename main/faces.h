@@ -25,7 +25,6 @@ typedef struct {
 } face_t;
 
 /* How many faces exist. Indices are stable and match ui.c's table. */
-size_t faces_count(void);
 
 /* Name for an index, or NULL if out of range. */
 const char *faces_name(size_t index);

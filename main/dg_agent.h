@@ -187,8 +187,6 @@ uint32_t dg_agent_transport_dropped(void);
 /* Streams captured microphone audio. No-op unless the session is ready. */
 esp_err_t dg_agent_send_audio(const void *pcm, size_t len);
 
-/* Talks to the agent without a microphone -- useful for bring-up. */
-esp_err_t dg_agent_inject_user_message(const char *text);
 
 /*
  * Forget the conversation so far.

@@ -76,9 +76,7 @@ static int64_t s_t0_us;
  */
 typedef enum {
     MODE_SHELL = 0, /* the voice shell, with its own behaviour blending */
-    MODE_WAVE,
     MODE_RUBIK,
-    MODE_RIBBON,
     MODE_BRAID,
     MODE_WEB,
 } orb_mode_t;
@@ -145,9 +143,7 @@ static orb_frame_t *s_frame_b;
 static const char *mode_name(orb_mode_t m)
 {
     switch (m) {
-    case MODE_WAVE:   return "wave";
     case MODE_RUBIK:  return "rubik";
-    case MODE_RIBBON: return "ribbon";
     case MODE_BRAID:  return "braid";
     case MODE_WEB:    return "web";
     case MODE_SHELL:
@@ -180,22 +176,7 @@ static void build_mode(orb_mode_t mode, orb_frame_t *out, float t, float amp,
                        orb_behaviour_t from, orb_behaviour_t to, float mix)
 {
     switch (mode) {
-    /*
-     * Kept, and currently unreachable: no state maps to MODE_WAVE since LISTENING
-     * moved to the shell's inward fill. Parity-verified, and one line from being
-     * pointed at a state again -- as ribbon already is.
-     */
-    case MODE_WAVE:
-        orb_build_wave(out, t, amp);
-        orb_wave_ink(out, amp); /* local pass; see orb_geometry.h */
-        break;
     case MODE_RUBIK:  orb_build_rubik(out, t); break;
-    /*
-     * Kept, and currently unreachable: no state maps to MODE_RIBBON since
-     * SPEAKING moved to the shell's fill. The port stays because it is
-     * parity-verified and cheap to point a state back at.
-     */
-    case MODE_RIBBON: orb_build_ribbon(out, t, amp); break;
     case MODE_BRAID:  orb_build_braid(out, t); break;
     case MODE_WEB:    orb_build_web(out, t); break;
     case MODE_SHELL:

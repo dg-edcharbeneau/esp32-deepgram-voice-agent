@@ -254,11 +254,6 @@ static uint32_t s_tint_rgb = 0xFFFFFFu;
  */
 typedef struct {
     ui_behaviour_t behaviour;
-    /* Kept though no step sets them, because they are what the SPECTRUM reads:
-     * if this test ever grows a spectrum leg, the steps are the place for them
-     * and the plumbing below already honours them. */
-    bool idle;
-    bool stopped;
     bool frozen;
     const char *label; /* literal: update_status_label() compares by pointer */
 } ui_test_step_t;
@@ -275,16 +270,16 @@ typedef struct {
  * unreachable in service, though the harness still diffs all eight.
  */
 static const ui_test_step_t s_test_steps[] = {
-    { UI_BEHAVIOUR_IDLE,         false, false, false, "idle (shell)" },
-    { UI_BEHAVIOUR_INITIALIZING, false, false, false, "initializing (shell)" },
-    { UI_BEHAVIOUR_LISTENING,    false, false, false, "listening (fill, in)" },
-    { UI_BEHAVIOUR_THINKING,     false, false, false, "thinking (rubik)" },
-    { UI_BEHAVIOUR_SPEAKING,     false, false, false, "speaking (fill, out)" },
-    { UI_BEHAVIOUR_CONNECTING,   false, false, false, "connecting (web)" },
-    { UI_BEHAVIOUR_BUFFERING,    false, false, false, "buffering (braid)" },
-    { UI_BEHAVIOUR_DISCONNECTED, false, false, false, "disconnected (shell)" },
+    { UI_BEHAVIOUR_IDLE, false, "idle (shell)" },
+    { UI_BEHAVIOUR_INITIALIZING, false, "initializing (shell)" },
+    { UI_BEHAVIOUR_LISTENING, false, "listening (fill, in)" },
+    { UI_BEHAVIOUR_THINKING, false, "thinking (rubik)" },
+    { UI_BEHAVIOUR_SPEAKING, false, "speaking (fill, out)" },
+    { UI_BEHAVIOUR_CONNECTING, false, "connecting (web)" },
+    { UI_BEHAVIOUR_BUFFERING, false, "buffering (braid)" },
+    { UI_BEHAVIOUR_DISCONNECTED, false, "disconnected (shell)" },
     /* frozen holds the clock, which is orb-wide, so the shell shows it clearest. */
-    { UI_BEHAVIOUR_IDLE,         false, false, true,  "mod: frozen" },
+    { UI_BEHAVIOUR_IDLE, true, "mod: frozen" },
 };
 #define TEST_STEP_COUNT (sizeof(s_test_steps) / sizeof(s_test_steps[0]))
 
@@ -695,10 +690,6 @@ void ui_show_qr(const char *payload)
     s_qr_payload = payload;
 }
 
-void ui_hide_qr(void)
-{
-    s_qr_payload = NULL;
-}
 
 void ui_set_gesture_handler(void (*handler)(ui_gesture_t gesture))
 {
@@ -1445,11 +1436,11 @@ static void frame_timer_cb(lv_timer_t *timer)
          * amp and the bands deliberately do NOT -- they arrive from the live
          * microphone, which is the whole reason monitor mode exists.
          */
-        .idle = s_test_active ? s_test_steps[s_test_step].idle : idle,
+        .idle = idle,
         /* What is actually driving the frame, not the last tap to fire, so this
          * and .amp can never describe different signals. */
         .source = src_now,
-        .stopped = s_test_active ? s_test_steps[s_test_step].stopped : s_stopped,
+        .stopped = s_stopped,
         .frozen = s_test_active ? s_test_steps[s_test_step].frozen : s_failed,
         .press_active = s_press_active,
         .amp = amp_now,

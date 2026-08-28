@@ -145,7 +145,6 @@ void ui_set_status(const char *text, bool session_live);
  * lv_* themselves.
  */
 void ui_show_qr(const char *payload);
-void ui_hide_qr(void);
 
 /*
  * Switch the visual. `index` is a faces.h catalog index; out-of-range is ignored.
