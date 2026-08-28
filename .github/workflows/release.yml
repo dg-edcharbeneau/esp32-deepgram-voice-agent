@@ -1,0 +1,90 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and draft a release for"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and attach firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # Same tracked-defaults-only build as CI: the published image carries no
+      # API key and no network, so it boots into the provisioning portal.
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32s3
+          idf.py build
+
+      # A committed sdkconfig would carry a menuconfig-seeded API key into the
+      # published image. It is gitignored, so this should never fire -- which is
+      # exactly why it is cheap to assert before publishing a binary.
+      - name: Refuse to publish a seeded build
+        shell: bash
+        run: |
+          if [ -f sdkconfig ]; then
+            echo "A sdkconfig is present in a clean checkout -- it may contain an" >&2
+            echo "API key or Wi-Fi password. Refusing to publish. See SECURITY.md." >&2
+            exit 1
+          fi
+
+      # One image at offset 0 -- bootloader, partition table and app together --
+      # so flashing needs no knowledge of this project's custom partitions.csv.
+      # merge-bin writes into build/, not the working directory.
+      - name: Merge into a single flashable image
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py merge-bin -o merged.bin
+          mv build/merged.bin deepgram_agent-merged.bin
+          ls -l deepgram_agent-merged.bin
+
+      - name: Release notes
+        shell: bash
+        run: |
+          cat > NOTES.md <<'NOTES'
+          Firmware for the Waveshare **ESP32-S3-Touch-AMOLED-1.75C**.
+
+          `deepgram_agent-merged.bin` is a single image containing the
+          bootloader, partition table and app. It is built from this repo's
+          tracked defaults, so it holds **no API key and no Wi-Fi network** — on
+          first boot it raises its own WPA2 access point and shows the SSID and
+          passphrase on the panel. Join it, and the captive portal asks for your
+          network and your Deepgram API key.
+
+          Flash it with [esptool](https://github.com/espressif/esptool)
+          (`pip install esptool`), with the board in download mode:
+
+          ```
+          esptool.py -c esp32s3 -p /dev/YOUR-PORT write_flash 0x0 deepgram_agent-merged.bin
+          ```
+
+          `deepgram_agent.elf` is attached for decoding a backtrace with
+          `idf.py monitor` or `addr2line`; it is not needed to run the firmware.
+          NOTES
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: NOTES.md
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          files: |
+            deepgram_agent-merged.bin
+            build/deepgram_agent.bin
+            build/deepgram_agent.elf
+          fail_on_unmatched_files: true
