@@ -75,6 +75,10 @@ The normal path. Nothing to install.
    the signal both iOS and Android use to pop a sign-in sheet. If it does not
    appear, browse to `http://192.168.4.1/`.
 
+   <p align="center">
+     <img src="images/portal.png" alt="The setup portal on a phone: a network dropdown, a password field, and a Deepgram API key field" width="300">
+   </p>
+
 4. **Pick your network and enter the password.** The list is sorted as scanned,
    with signal strength beside each name and `open` marked where there is no
    password. For a hidden network choose **Other / hidden network...** and type

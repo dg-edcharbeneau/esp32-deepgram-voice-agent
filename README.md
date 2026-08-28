@@ -9,13 +9,9 @@ TTS) → speaker**, over a single WebSocket, with a 466×466 AMOLED that reacts 
 the conversation. No phone, no laptop, no cloud glue in between — the board holds
 the session itself.
 
-<!-- Uncomment once docs/images/device-orb.jpg exists -- see docs/images/README.md
-     for the shot list. A broken image renders worse than no image, so this stays
-     commented until the photo lands.
 <p align="center">
-  <img src="docs/images/device-orb.jpg" alt="The board mid-conversation, orb face lit" width="420">
+  <img src="docs/images/device-orb.png" alt="The board mid-conversation, the orb face lit and labelled speaking" width="640">
 </p>
--->
 
 Talk to it and it answers. Ask it to change its voice, its name, its colour, or
 its face, and it does — the agent has tools wired to the device's own hardware.
