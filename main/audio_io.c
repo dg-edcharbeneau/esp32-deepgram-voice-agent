@@ -326,7 +326,33 @@ static void capture_task(void *arg)
         if (!mic_open) {
             /* Gain before open, mirroring audio_io_init()'s order. */
             esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
+            /*
+             * ONE UPSTREAM LOG LINE, SILENCED FOR THE LENGTH OF ONE CALL.
+             *
+             * esp_codec_dev's _i2s_data_set_fmt() disables the I2S channel before
+             * reconfiguring it, UNCONDITIONALLY -- it never asks whether the
+             * channel was enabled, and it discards the return value. After a
+             * close it was not, so the driver logs
+             *
+             *   E i2s_common: i2s_channel_disable(): the channel has not been
+             *   enabled yet
+             *
+             * and carries on correctly. Nothing is wrong: the reopen that follows
+             * works, which the session either side of it demonstrates. But it is
+             * an ERROR-level line on every single wake, and a log where E means
+             * "look at this" is worth more than one where it does not.
+             *
+             * Scoped to this call rather than silenced globally, and restored
+             * immediately, so a genuine i2s fault anywhere else still shouts. The
+             * only i2s activity inside the window is the open being performed
+             * here, and its own result is still checked below.
+             *
+             * Delete this once esp_codec_dev checks the channel state before
+             * disabling it.
+             */
+            esp_log_level_set("i2s_common", ESP_LOG_NONE);
             int oerr = esp_codec_dev_open(s_mic, &s_fs);
+            esp_log_level_set("i2s_common", ESP_LOG_INFO);
             if (oerr != ESP_CODEC_DEV_OK) {
                 ESP_LOGE(TAG, "microphone reopen failed: %d", oerr);
                 vTaskDelay(pdMS_TO_TICKS(CAPTURE_PARK_POLL_MS));
