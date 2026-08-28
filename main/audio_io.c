@@ -428,7 +428,7 @@ static void capture_task(void *arg)
          * agent is speaking -- see on_gesture() in main.c.
          *
          * The whole investigation, the numbers and where the removed code lives
-         * are in AEC-FINDINGS.md. Read it before removing this gate again.
+         * are in docs/notes/echo-cancellation.md. Read it before removing this gate again.
          *
          * THE MUTE DELIBERATELY DOES NOT GATE THIS. It used to, to keep the
          * microphone out of the reply's inbound tail after an interruption. Two

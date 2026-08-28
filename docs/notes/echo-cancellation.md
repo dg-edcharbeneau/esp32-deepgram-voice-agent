@@ -1,5 +1,10 @@
 # Echo cancellation: the 70 kB was the wrong number
 
+> **Historical finding**, investigated 2026-08-25 to 2026-08-26. This is the
+> record of a measurement and the decision it led to, not current setup
+> instructions. The gates and comments it justifies are still live in
+> `main/audio_io.c` and `main/ui.h` — read this before removing them.
+
 ## Summary
 
 `a4fa137` measured echo cancellation at **~70 kB of internal RAM**, found that it
@@ -67,7 +72,7 @@ The loop is closed and self-sustaining:
    so it captures that reply.
 2. `mic_to_agent()` streams it to Deepgram, which cannot tell it from a person.
 3. Deepgram fires `UserStartedSpeaking`.
-4. [`main.c:157`](main/main.c#L157) `on_user_started_speaking()` calls
+4. [`main.c:157`](../../main/main.c#L157) `on_user_started_speaking()` calls
    `audio_io_flush()` — "stop mid-sentence rather than talk over the user" — and
    the reply is cut.
 5. The agent now answers what it just heard itself say. Go to 1.
@@ -127,14 +132,14 @@ Added after the first draft, and it overturns this document's original
 recommendation.
 
 `ui.c` publishes a *shaped* amplitude: `shape_to_byte()` is `powf(v, 0.7f) * 255`
-([ui.c:508](main/ui.c#L508)) applied to `rms * AMP_GAIN_MIC` with
+([ui.c:508](../../main/ui.c#L508)) applied to `rms * AMP_GAIN_MIC` with
 `CONFIG_ORB_AMP_GAIN_MIC=600`, so `rms = amp^(1/0.7) / 6`. Inverting every level
 this project has measured, in consistent units:
 
 | | shaped amp | RMS, LSB of 32767 |
 |---|---|---|
-| quiet room ([ui.c:417](main/ui.c#L417)) | 0.009 – 0.014 | 6.5 – 12.3 |
-| normal voice ([ui.c:417](main/ui.c#L417)) | 0.031 – 0.093 | 38 – 184 |
+| quiet room ([ui.c:417](../../main/ui.c#L417)) | 0.009 – 0.014 | 6.5 – 12.3 |
+| normal voice ([ui.c:417](../../main/ui.c#L417)) | 0.031 – 0.093 | 38 – 184 |
 | **echo, measured 2026-08-25** | 0.050 – 0.344 | **76 – 1189** |
 
 **The signal-to-echo ratio at the microphone is -11.1 dB** on geometric means:
@@ -444,11 +449,11 @@ non-obvious facts live in that diff:
 MSB-first and stores little-endian, so each pair swaps in memory. The ordering
 was established rather than guessed, using the permanently dead lane: MIC4 is
 AC-coupled to AGND and reads 3–9 always, which identifies its position and
-therefore everyone else's. Per-lane peaks are in the README's echo section.
+therefore everyone else's. Per-lane peaks are in ../audio-path.md.
 
 **3. `aec_process()` wants planar channels**, "ch0 ch0 ch0…, ch1 ch1 ch1…", not
 interleaved. The capture loop already de-interleaves
-([`audio_io.c:218`](main/audio_io.c#L218)); a planar gather costs nothing extra
+([`audio_io.c:218`](../../main/audio_io.c#L218)); a planar gather costs nothing extra
 because the copy is happening anyway.
 
 **4. Alignment is free on this board — but linearity is not.** The reference is
@@ -544,7 +549,7 @@ The proposal was: with a reference in hand, compare per-frame mic energy against
 what the reference predicts and pass audio only when the mic exceeds it by a
 margin. It fails on the arithmetic above — a typical talker moves the microphone
 by 0.33 dB — and it fails a second, independent way for the software variant:
-`s_play_tap` fires at [audio_io.c:176](main/audio_io.c#L176) *before* the blocking
+`s_play_tap` fires at [audio_io.c:176](../../main/audio_io.c#L176) *before* the blocking
 `esp_codec_dev_write()`, so its lead is DMA occupancy. That is zero at the start of
 a turn, climbs to ~90 ms, and is reset to zero by every `audio_io_flush()` — it
 swings across precisely the moments barge-in has to work.
@@ -575,15 +580,15 @@ Closed directions, so nobody re-explores them:
   interrupts.
 
 The interrupt half of barge-in was never the missing piece anyway. It is already
-built and correctly wired: [dg_agent.c:842](main/dg_agent.c#L842) ->
-[main.c:157](main/main.c#L157) -> `audio_io_flush()`. The device does not lack a
+built and correctly wired: [dg_agent.c:842](../../main/dg_agent.c#L842) ->
+[main.c:157](../../main/main.c#L157) -> `audio_io_flush()`. The device does not lack a
 way to stop the agent. It lacks a way to decide which microphone audio deserves
 to be sent, and that decision is local by construction.
 
 **Caveat, and it matters here more than usual.** All of the above is external
 documentation this device has never observed on the wire, and this repo already
-carries one spec-versus-account divergence: see `UPDATESPEAK-ISSUE.md` and
-[dg_agent.c:199](main/dg_agent.c#L199). A five-minute wire test is worth folding
+carries one spec-versus-account divergence: see `docs/notes/updatespeak.md` and
+[dg_agent.c:199](../../main/dg_agent.c#L199). A five-minute wire test is worth folding
 into whatever gets built next.
 
 ## Also dead: winning by level alone
@@ -592,18 +597,18 @@ Recorded with numbers so it is not re-proposed:
 
 - **Mic PGA reduction: 0.0 dB** on the echo-to-voice ratio, by construction. Echo
   and voice pass through the same ES7210 amplifier
-  ([audio_io.c:477](main/audio_io.c#L477) applies one gain to the device, not per
+  ([audio_io.c:477](../../main/audio_io.c#L477) applies one gain to the device, not per
   lane).
 - **Choosing the far microphone: ~0 dB.** `9479446` measured 11,439 against 12,353
   between the two MEMS lanes — 0.67 dB — with identical idle floors, and the echo
   is correlated across the pair, so the realisable figure is smaller still.
 - **A high-pass: ~0 dB**, plausibly negative given the HF tilt noted at
-  [ui.c:131](main/ui.c#L131).
+  [ui.c:131](../../main/ui.c#L131).
 - **Ducking the speaker while listening: 16.0 dB of total travel, and the last 8
   are inaudible.** The volume curve maps vol 0 to `EXTRA_GAIN_DB - RANGE_DB` and
-  vol 100 to `EXTRA_GAIN_DB` ([audio_io.c:456](main/audio_io.c#L456)); with
+  vol 100 to `EXTRA_GAIN_DB` ([audio_io.c:456](../../main/audio_io.c#L456)); with
   `RANGE_DB=20`, `EXTRA=0` and a runtime floor of `VOLUME_MIN 20`
-  ([audio_io.c:84](main/audio_io.c#L84)), volume 20 to 100 spans -16 dB to 0 dB.
+  ([audio_io.c:84](../../main/audio_io.c#L84)), volume 20 to 100 spans -16 dB to 0 dB.
 
 Against a 17-42 dB requirement, the whole category is out. It survives only as a
 possible *precondition* for the canceller: if the linearity measurement below
@@ -627,7 +632,7 @@ and it should be scheduled *before* the canceller rather than after.
 the reference lane at 0 dB gain, accumulate per 80 ms block: `sum(mic^2)` over
 lanes 1 and 3, `sum(ref^2)` over lane 0, and a count of samples >= 32,000 on each.
 Have the agent speak the same greeting at `CONFIG_AUDIO_OUT_VOLUME` of 40, 60, 80
-and 100 — [dg_agent.c:684](main/dg_agent.c#L684) sends it on every fresh session,
+and 100 — [dg_agent.c:684](../../main/dg_agent.c#L684) sends it on every fresh session,
 so this is free and repeatable. Log `10*log10(sum(mic^2) / sum(ref^2))` per run.
 
 - Ratio flat within ~1 dB across all four volumes and no samples >= 32,000:
@@ -749,12 +754,12 @@ Questions the next session has to answer, not assumptions to carry forward.
 
 **Does esp-sr still pin `esp-dsp`?** It previously required exactly 1.8.0 while
 this project asks for `^1.8.2`, which is recorded in
-[`main/idf_component.yml`](main/idf_component.yml). A conflict there is a
+[`main/idf_component.yml`](../../main/idf_component.yml). A conflict there is a
 dependency-resolution problem before it is an audio problem.
 
 **Does the standalone AEC need the `model` partition?** Models are for WakeNet
 and MultiNet; a signal-processing canceller should need none. But
-[`partitions.csv`](partitions.csv) has no `model` partition and is deliberately
+[`partitions.csv`](../../partitions.csv) has no `model` partition and is deliberately
 byte-identical to `spec_analyzer_radial`'s so the two firmwares share one flash
 layout and can be swapped without an erase. Changing it costs more than the
 bytes. The previous experiment pulled 1.1 MB of flash, most of it presumably
@@ -888,7 +893,7 @@ click outside the centre button, so stray touches triggered it.
 The stray-touch case outlived that fix and was settled later by deleting the ring
 target altogether: the interrupt now shares the centre button with the session
 toggle, and `on_gesture()` picks between them on `audio_io_playback_active()`. See
-"Ending, starting, and interrupting a conversation" in the README.)*
+../session-control.md.)*
 
 The fix has two halves, and neither is the mic gate.
 
@@ -1026,7 +1031,7 @@ Read, and load-bearing for the numbers above:
 - [Speex manual — programming with libspeex][speex] — frame size and tail length
   guidance.
 - [Deepgram — Audio Preprocessing & Barge-In][dg] — why cancellation is the
-  device's problem and not the server's. Already cited in the README.
+  device's problem and not the server's. Already cited in ../audio-path.md.
 
 Leads, not read in depth:
 

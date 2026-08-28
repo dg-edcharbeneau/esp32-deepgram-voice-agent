@@ -15,5 +15,5 @@ dependencies:
   # Pinned to exactly 1.8.0 twice now, both times to satisfy espressif/esp-sr:
   # EVERY published esp-sr version pins esp-dsp exactly and none is >= 1.8.2, so
   # the two are unsatisfiable together and the solver rejects the whole graph.
-  # esp-sr is gone again, so this is free to float. See AEC-FINDINGS.md.
+  # esp-sr is gone again, so this is free to float. See docs/notes/echo-cancellation.md.
   espressif/esp-dsp: "^1.8.2"

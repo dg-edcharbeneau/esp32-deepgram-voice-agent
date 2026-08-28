@@ -1,5 +1,9 @@
 # `esp_websocket_client_close()` accepts a timeout and ignores it
 
+> **Historical finding / upstream bug report**, filed 2026-08-27 against
+> `espressif/esp_websocket_client` 1.5.0 on ESP-IDF v5.5.5. It is why
+> `components/tcp_transport/transport_ws.c` is vendored and patched here.
+
 **Reported by:** Ed Charbeneau (DevRel) · **Date:** 2026-08-27
 **Severity:** hangs the calling task indefinitely; on a single-control device that
 means a state only a physical reset clears

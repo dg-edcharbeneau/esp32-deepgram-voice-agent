@@ -66,7 +66,7 @@ static const block_t s_blocks[] = {
      * with, hence the flag. */
     { substance_flux_md_start, substance_flux_md_end, true },
     /* Half duplex: the mic is deaf while the agent speaks, and the interrupt is
-     * the centre button. See the gate in audio_io.c and AEC-FINDINGS.md. */
+     * the centre button. See the gate in audio_io.c and docs/notes/echo-cancellation.md. */
     { half_duplex_md_start,  half_duplex_md_end,  false },
     { boundaries_md_start,   boundaries_md_end,   false },
     { session_md_start,      session_md_end,      false },
