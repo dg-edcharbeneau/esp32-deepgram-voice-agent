@@ -20,7 +20,7 @@ reason.
 ```mermaid
 flowchart TB
     subgraph app["Application"]
-        main["main.c<br/><i>boot order, telemetry loop, idle timeout</i>"]
+        main["main.c<br/><i>boot order, telemetry loop,<br/>idle timeout, tap interrupt, sleep</i>"]
         session["session_ctl.c<br/><i>start/stop worker task</i>"]
         boot["boot_button.c<br/><i>GPIO 0: click = toggle, 3 s = forget network</i>"]
     end
@@ -61,7 +61,8 @@ flowchart TB
     prompt --> voices & faces & colors & aname
     agent -. "on_reload_required" .-> session
     boot -. "toggle / erase+reboot" .-> session
-    ui -. "tap / hold" .-> session
+    main -. "toggle / restart, or interrupt<br/>the reply without session_ctl" .-> session
+    ui -. "tap / hold" .-> main
     aio -- "taps" --> ui
     ui --> spectrum & orbface
     ui --> colors
@@ -109,13 +110,21 @@ Three things in that picture are load-bearing:
   plays. The visualizer is tapped at the *drain* end, not at `audio_io_play()`,
   so it stays in step with the speaker instead of racing ahead and finishing
   while the device is still talking.
-- **Capture is gated, not stopped.** The ES7210 is clocked by the shared duplex
-  I2S regardless, so the task keeps reading; what the gate cuts is everything
-  downstream. Stopping the read would only overflow the RX ring and produce a
-  stale burst on resume. This is the stand-in for echo cancellation — see the
-  README's "Echo: why capture is gated".
+- **Capture is gated while the agent talks, and parked when nothing wants it.**
+  The gate is the stand-in for echo cancellation — see the README's "Echo: why
+  capture is gated" — and it sits *below* the read, so a gated task still reads
+  and downmixes and throws the result away. That is fine for the length of a
+  reply, and wasteful for the 88% of the device's life with no session at all,
+  so `capture_task` has a second tier above the read: when the session gate is
+  shut *and* monitor mode is off, it closes the ES7210 outright and polls every
+  100 ms until something wants samples again. Closing it from the task that
+  reads it is the only safe place; waking costs one poll plus the open, against a
+  1.1–6.0 s handshake. `CONFIG_AUDIO_CAPTURE_ALWAYS` compiles the park out.
 - **Barge-in drops queued audio.** When Deepgram says the user started speaking,
-  anything still in the ring is a reply they have already talked over.
+  anything still in the ring is a reply they have already talked over. A tap on
+  the centre button while the speaker is busy does the same flush deliberately —
+  see "The tap interrupt" below, which is the only barge-in the user has, since
+  the microphone is gated exactly when they would be talking over it.
 
 ## Session lifecycle
 
@@ -135,7 +144,7 @@ stateDiagram-v2
     Ready --> Connecting: socket dropped (client retries)
 
     Ready --> Stopped: request_stop (idle timeout)
-    Ready --> Stopped: tap
+    Ready --> Stopped: tap (speaker not busy)
     Buffering --> Stopped: tap
     Connecting --> Stopped: tap
 
@@ -161,12 +170,90 @@ stateDiagram-v2
         end-of-turn and start-of-speech, plus
         playback -- never the local VAD, so a
         headless boot still times out.
+
+        Thirty seconds after this state is
+        reached the panel and radio sleep.
+        See "Sleep" below.
     end note
 ```
 
 Inputs that drive this are deliberately interchangeable: a screen tap, a BOOT
 button click, the idle timer, and the agent's own function calls all land on the
 same non-blocking `session_ctl_request_*()` surface.
+
+### The tap interrupt
+
+One target, two meanings, and exactly one of them per tap. `on_gesture()` in
+`main.c` branches on `audio_io_playback_active()`: the speaker being busy means
+"stop talking", anything else means "start or end the conversation". It is an
+`if`/`else` on purpose — an interrupt must never be able to also hang up. The
+interrupt used to have a target of its own, everything outside the 70 px button,
+which collected every brush of the bezel; `ui.h` and `AEC-FINDINGS.md` both
+record that complaint.
+
+Silencing a reply takes two halves, because the flush cannot see whether the
+reply is still *arriving*:
+
+- **`audio_io_flush()`** empties the ring, which is the whole job for a tap after
+  the last byte has landed — logged as `EVT interrupt (tail)`.
+- **`audio_io_mute_playback(true)`** is the other half when a turn is still
+  inbound. Deepgram has no interrupt message and keeps sending: 410 kB of story
+  measured arriving over the 14 s after one tap, all of it discarded. Without the
+  mute the agent merely pauses and resumes mid-word.
+
+The mute is released by `on_user_started_speaking()` — which is why it must not
+gate the microphone — with a `MUTE_MAX_MS` deadline as a backstop for a tap that
+is never followed by speech, and an explicit `end_interrupt()` on a new socket, a
+dead stream, and a deliberate stop, since a deadline outliving its session was
+observed firing four seconds into the next one. An `INTERRUPT_GRACE_MS` window
+after a tap swallows the second press of an impatient double-tap, which would
+otherwise land on the toggle arm and hang up.
+
+None of this goes through `session_ctl`: `request()` drops anything arriving
+while busy or inside `COOLDOWN_MS`, which is exactly when someone interrupts.
+Every call is a single flag store, safe on the LVGL task.
+
+### Sleep
+
+With a session up the board runs the panel at full brightness and ~29 fps, Wi-Fi
+with modem sleep disabled, and both codecs clocked — and it used to stay that way
+after the session ended, which is 88% of its life. That is where the heat was
+going.
+
+`SLEEP_AFTER_STOPPED_MS` is 30 s measured from the session stopping, and the
+session stops after `CONFIG_SESSION_IDLE_TIMEOUT_S` (default 15) of quiet, so
+sleep lands about 45 s after anyone last spoke — long enough that a pause in a
+conversation never reaches it. Provisioning needs no guard: `enter_provisioning()`
+is `noreturn` and runs before the telemetry loop, so the timer cannot engage
+while the setup QR is up.
+
+```mermaid
+flowchart LR
+    tlm["main.c telemetry loop<br/><i>1 Hz</i>"] -->|"stopped > 30 s"| want["ui_set_sleep(true)<br/><i>a request, not an act</i>"]
+    want --> lvgl["LVGL task applies it<br/><i>refuses during the display test</i>"]
+    lvgl --> panel["frame timer 200 ms<br/>brightness 15%"]
+    touch(["touch"]) -.->|"withdraws the request<br/>and wakes at once"| lvgl
+    lvgl --> truth["ui_is_asleep()"]
+    truth -->|"tracked by the loop"| radio["wifi_sta_set_power_save()<br/><i>modem sleep follows the panel</i>"]
+    mic["capture task parks itself<br/><i>independently, 30 s earlier</i>"]
+```
+
+Three things about that shape:
+
+- **The panel is the source of truth, not the loop.** `ui_set_sleep()` only
+  stores a request; the frame timer applies it on the LVGL task, and a touch
+  withdraws it and wakes the panel there and then without telling the loop. So
+  the loop reads `ui_is_asleep()` back and *detects* the wake edge rather than
+  assuming it, restarting the 30 s count from the wake.
+- **Asleep it keeps drawing, slowly and dim.** A frozen or black panel reads as a
+  crashed device, and the LVGL worker has to stay running for touch to be as
+  responsive asleep as awake — which is what rules out the adapter's own
+  `AUTO_SLEEP_MODE_PAUSE`.
+- **The radio follows the panel; the microphone does not.** `wifi_sta` re-enables
+  modem sleep only while asleep, because it costs tens of ms of jitter to a live
+  stream. The microphone is absent from this entirely — `capture_task` parks the
+  ES7210 on its own as soon as nothing downstream wants samples, 30 s before the
+  panel dims.
 
 ## Protocol
 
@@ -236,7 +323,9 @@ it copies and frees. Three properties are worth keeping:
   worse than a shorter one, because the model asserts it confidently. Both
   former gates were removed with their Kconfig options — the build is Flux-only,
   so `substance-flux.md` is unconditional, and `half-duplex.md` is the only
-  duplex block left now that barge-in is settled (`AEC-FINDINGS.md`).
+  duplex block left (`AEC-FINDINGS.md`). That block is where the model is told
+  it cannot be talked over but can be tapped, and told to say so when someone is
+  trying and failing to interrupt.
 - **The frame does not grow with the prompt.** `agent_prompt_build()` measures
   80 bytes of stack against an 11 kB result, which matters because
   `send_settings()` already sits at 2,944 B of the WebSocket task's 6,144 — see
@@ -404,12 +493,16 @@ flowchart TB
     shared --> resolve
     facepcm -.-> render
 
-    render --> orb["orb: 18 rings, ≤456 dots<br/>geometry → raster, 280 ms blends"]
+    render --> orb["orb: shell / rubik / braid / web<br/>chosen by behaviour, ≤840 dots<br/>geometry → raster, 280 ms blends"]
     render --> spec["spectrum: 1024-pt FFT<br/>48 bands → 96 bars"]
 ```
 
+The frame timer runs at `FRAME_MS` (33 ms) awake and `SLEEP_FRAME_MS` (200 ms)
+asleep, at 100% and 15% brightness respectively — see "Sleep" above.
+
 Setters (`ui_set_status`, `ui_set_face`, `ui_set_orb_color`,
-`ui_start_display_test`, `ui_set_behaviour`, `ui_show_qr`) are
+`ui_start_display_test`, `ui_set_behaviour`, `ui_show_qr`, `ui_set_stopped`,
+`ui_set_failed`, `ui_note_user_speech`, `ui_set_sleep`) are
 safe from any task because they only store a value; the frame timer applies it.
 The gesture handler runs *on* the LVGL task with the lock held, so it may only
 signal.
@@ -429,6 +522,7 @@ would ask for 434 kB.
 | `audio_play` | 6 | 1 | ring drain, stereo doubling, blocking I2S write |
 | LVGL adapter | 4 | 1 | frame timer, faces, panel flush, touch |
 | WebSocket client | — | — | `dg_agent` callbacks; may not stop itself |
+| `dg_uplink` | 5 | 0 | every `send_bin`, and therefore the client lock |
 | `session_ctl` | 4 | 0 | start/stop/restart/reload, away from audio |
 | `dg_keepalive` | 4 | — | `KeepAlive` during silence |
 | `prov_dns` | 5 | — | captive-portal DNS, only while provisioning |
@@ -456,7 +550,8 @@ squinting at a 466 px panel.
 `host/prompt.sh` does the same trick for the persona: it compiles the real
 `main/agent_prompt.c` against stub ESP-IDF headers and prints the assembled
 prompt, so reviewing a wording change costs a second instead of a flash.
-`--resumed`, `--nova` and `--barge-in` dump the gated variants.
+`--resumed` dumps the variant a session reopened by a voice change sends; it is
+the only variant left now that both build gates are gone.
 
 ```mermaid
 flowchart LR
