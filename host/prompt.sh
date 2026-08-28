@@ -24,6 +24,6 @@ python3 prompt_blobs.py ../main/prompt > build/prompt_blobs.S
 # FILE's directory before any -I: left in main/, agent_prompt.c would pull in the
 # real faces.h and with it cJSON. Copied fresh every run, so it cannot drift.
 cp ../main/agent_prompt.c build/agent_prompt.c
-cc -O2 -std=c11 -Wall -Wextra -Iprompt_stubs -I../main \
+cc -O2 -std=gnu11 -Wall -Wextra -Iprompt_stubs -I../main \
    -o build/prompt_dump prompt_dump.c build/agent_prompt.c build/prompt_blobs.S
 exec ./build/prompt_dump $ARGS
