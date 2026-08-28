@@ -1,0 +1,83 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run pointless.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    name: firmware (ESP-IDF 5.5.5)
+    runs-on: ubuntu-latest
+    # Pinned exactly, not to the floating v5.5 tag: transport_ws.c carries an
+    # #error on a MAJOR.MINOR bump, and local.patch's baseline is the 5.5.5
+    # file, so a patch release moving under us would make patch-drift flap.
+    container: espressif/idf:v5.5.5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds with the tracked sdkconfig.defaults only -- no sdkconfig is
+      # committed, so no API key and no SSID are baked into this image. It comes
+      # up in provisioning mode, which is what makes it safe to publish.
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Size report
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py size
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deepgram_agent-app
+          path: |
+            build/deepgram_agent.bin
+            build/deepgram_agent.elf
+            build/deepgram_agent.map
+          if-no-files-found: error
+
+  patch-drift:
+    # Its own job so a drift failure reads as a drift failure rather than
+    # hiding behind a compile error in the firmware job.
+    name: tcp_transport drift
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the vendored transport_ws.c against upstream
+        shell: bash
+        run: ./components/tcp_transport/check-patch.sh
+
+  host-harness:
+    # No IDF: orb_geometry.c and agent_prompt.c are deliberately free of LVGL
+    # and ESP-IDF, which is what lets them compile for the host at all.
+    name: host harnesses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # >= 22 for native TypeScript type stripping; orb_ref.mjs imports the
+      # upstream .ts reference directly.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Geometry parity (C port vs. upstream TypeScript)
+        run: ./host/run.sh
+
+      - name: Assembled system prompt
+        run: |
+          ./host/prompt.sh > /dev/null
+          ./host/prompt.sh --resumed > /dev/null
