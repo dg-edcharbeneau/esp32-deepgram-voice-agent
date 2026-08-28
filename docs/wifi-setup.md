@@ -193,7 +193,7 @@ esptool.py erase_region 0x9000 0x6000
 ```
 
 `0x9000`/`0x6000` are the NVS partition's offset and size from
-[partitions.csv](partitions.csv); check there before trusting them if the flash
+[partitions.csv](../partitions.csv); check there before trusting them if the flash
 layout has changed.
 
 ## What happens on its own
@@ -245,8 +245,9 @@ The reason code is the useful part:
 | 2 (`AUTH_EXPIRE`) / 4 (`ASSOC_EXPIRE`) | weak signal, or the AP dropped us |
 
 **It connects but the agent never speaks.**
-Wi-Fi is fine — `got ip` proves it. That is a Deepgram session problem; see the
-README and [agent-edge-host-header-404.md](agent-edge-host-header-404.md).
+Wi-Fi is fine — `got ip` proves it. That is a Deepgram session problem; see
+[verifying-a-boot.md](verifying-a-boot.md) for reading the counters, and
+[protocol-notes.md](protocol-notes.md) for the `Host` header issue.
 
 **Changed the SSID in menuconfig and nothing happened.**
 Expected. See the callout in [path B](#b-menuconfig-seed): the saved network
@@ -256,8 +257,8 @@ wins. Forget it first.
 
 | File | Role |
 |---|---|
-| [main/wifi_creds.c](main/wifi_creds.c) | NVS storage, and the seed precedence rule |
-| [main/wifi_sta.c](main/wifi_sta.c) | Station bring-up, retry budget, `GOT_IP` wait |
-| [main/wifi_prov.c](main/wifi_prov.c) | SoftAP, portal page, captive-portal DNS |
-| [main/boot_button.c](main/boot_button.c) | GPIO 0: click to toggle, hold to forget |
-| [main/main.c](main/main.c) | Boot flow and the fall-through to the portal |
+| [main/wifi_creds.c](../main/wifi_creds.c) | NVS storage, and the seed precedence rule |
+| [main/wifi_sta.c](../main/wifi_sta.c) | Station bring-up, retry budget, `GOT_IP` wait |
+| [main/wifi_prov.c](../main/wifi_prov.c) | SoftAP, portal page, captive-portal DNS |
+| [main/boot_button.c](../main/boot_button.c) | GPIO 0: click to toggle, hold to forget |
+| [main/main.c](../main/main.c) | Boot flow and the fall-through to the portal |

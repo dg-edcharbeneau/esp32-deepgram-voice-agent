@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Only the Actions here. ESP-IDF and the component-registry versions are
+  # pinned on purpose -- see CONTRIBUTING.md -- and a bot must not bump them.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "ci"

@@ -111,7 +111,7 @@ Three things in that picture are load-bearing:
   so it stays in step with the speaker instead of racing ahead and finishing
   while the device is still talking.
 - **Capture is gated while the agent talks, and parked when nothing wants it.**
-  The gate is the stand-in for echo cancellation — see the README's "Echo: why
+  The gate is the stand-in for echo cancellation — see audio-path.md's "Echo: why
   capture is gated" — and it sits *below* the read, so a gated task still reads
   and downmixes and throws the result away. That is fine for the length of a
   reply, and wasteful for the 88% of the device's life with no session at all,
@@ -188,7 +188,8 @@ One target, two meanings, and exactly one of them per tap. `on_gesture()` in
 "stop talking", anything else means "start or end the conversation". It is an
 `if`/`else` on purpose — an interrupt must never be able to also hang up. The
 interrupt used to have a target of its own, everything outside the 70 px button,
-which collected every brush of the bezel; `ui.h` and `AEC-FINDINGS.md` both
+which collected every brush of the bezel; `ui.h` and
+`docs/notes/echo-cancellation.md` both
 record that complaint.
 
 Silencing a reply takes two halves, because the flush cannot see whether the
@@ -323,7 +324,8 @@ it copies and frees. Three properties are worth keeping:
   worse than a shorter one, because the model asserts it confidently. Both
   former gates were removed with their Kconfig options — the build is Flux-only,
   so `substance-flux.md` is unconditional, and `half-duplex.md` is the only
-  duplex block left (`AEC-FINDINGS.md`). That block is where the model is told
+  duplex block left (`docs/notes/echo-cancellation.md`). That block is where
+  the model is told
   it cannot be talked over but can be tapped, and told to say so when someone is
   trying and failing to interrupt.
 - **The frame does not grow with the prompt.** `agent_prompt_build()` measures
@@ -333,7 +335,8 @@ it copies and frees. Three properties are worth keeping:
 
 `{{placeholders}}` are expanded as blocks are copied: `{{name}}`, `{{voice}}`,
 `{{listen_model}}`, `{{speak_model}}`, and the three catalogs. `{{name}}` is why
-renaming the agent needs no session reload — see the README section on it. An unknown one is
+renaming the agent needs no session reload — see voice-commands.md. An unknown
+one is
 copied through verbatim and logged, so a typo shows up rather than vanishing.
 
 A reopened session — every voice change is one — appends a note saying the
@@ -384,6 +387,22 @@ flowchart TB
 
     save -.->|"reboot"| boot0
 ```
+
+The page `GET /` serves is `main/portal.src.html`, embedded through
+`EMBED_TXTFILES` exactly as the prompt blocks are, so it is editable as HTML and
+openable in a browser rather than being a C string literal in `wifi_prov.c`. It
+carries its own CSS and script inline and may not reference an external asset: a
+second request is a second chance for a captive-portal webview to wander off to
+its connectivity check. `host/portal.sh` previews it.
+
+What actually gets embedded is the minified page `main/minify_html.py` writes
+into the build directory, which is why the source can stay commented and
+indented. The minifier is deliberately timid: it collapses CSS, but only strips
+comments and indentation from the script, and copies `<svg>` subtrees byte for
+byte. Joining JS lines means reasoning about semicolon insertion, and the
+wordmark is one long `<path d>` that a careless whitespace collapse would bend
+into a slightly wrong glyph -- both are bugs you would find by flashing and
+squinting, on the one page a bricked device needs you to reach.
 
 Holding BOOT for 3 seconds erases the saved network and reboots straight into
 the portal. `GPIO 0` is polled after startup rather than sampled at reset — held
@@ -461,7 +480,7 @@ expensive way.
   write it never returns — and it runs *before* the stop it precedes. That hung
   the control task with "stopping" on the panel until the board was reset. The
   session now finalises at Deepgram's idle timer instead, which costs a few
-  seconds of billing. See `esp-websocket-close-ignores-timeout.md`, and the long
+  seconds of billing. See `docs/notes/websocket-close-timeout.md`, and the long
   comment in `dg_agent_stop()` for the two workarounds that failed first.
 
 A stop is ~150 ms on a healthy link and a second or two on a bad one. If one ever
@@ -546,6 +565,11 @@ compiles on the host. `host/run.sh` diffs it against the upstream TypeScript it
 was transcribed from — fourteen frames, dot by dot across all six output fields,
 0.02 px tolerance — which catches a transcription error there instead of by
 squinting at a 466 px panel.
+
+`host/portal.sh` opens the captive-portal page in a browser. It is a plain file,
+so the only thing the script adds is a `fetch()` shim faking `/scan` — without
+one the page shows its scan-failed fallback, which is a real state but not the
+one you are usually looking at.
 
 `host/prompt.sh` does the same trick for the persona: it compiles the real
 `main/agent_prompt.c` against stub ESP-IDF headers and prints the assembled

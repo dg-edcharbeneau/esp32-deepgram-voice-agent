@@ -1,5 +1,10 @@
 # `UpdateSpeak` returns `SpeakUpdated` but the voice never changes
 
+> **Historical finding**, investigated 2026-08-21, against
+> `/v1/agent/converse` as it behaved then. It is why a voice change reopens
+> the session instead of updating it in place; see `docs/voice-commands.md`.
+> Re-measure before assuming the server side is unchanged.
+
 ## Summary
 
 Sending `UpdateSpeak` to `/v1/agent/converse` is acknowledged with `SpeakUpdated`

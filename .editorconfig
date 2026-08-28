@@ -1,0 +1,31 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{c,h}]
+max_line_length = 80
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+[*.md]
+# Trailing whitespace is not meaningful here, but wrapped prose is: these docs
+# are hand-wrapped at 80 and reflowing them makes every diff unreadable.
+max_line_length = 80
+
+[*.{py,mjs,ts}]
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.patch]
+# The recorded upstream diff. Byte-exact or it is not a record.
+trim_trailing_whitespace = false
+insert_final_newline = false

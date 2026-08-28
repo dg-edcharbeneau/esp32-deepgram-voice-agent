@@ -39,7 +39,7 @@ typedef enum {
      *
      * The two used to be separate targets -- centre to toggle, ring to interrupt
      * -- and the ring was the whole screen minus a 70 px circle, so it collected
-     * every brush of the bezel. AEC-FINDINGS.md records the same complaint from
+     * every brush of the bezel. docs/notes/echo-cancellation.md records the same complaint from
      * the other side: "UI_INTERRUPT fired on any short click outside the centre
      * button, so stray touches triggered it."
      *

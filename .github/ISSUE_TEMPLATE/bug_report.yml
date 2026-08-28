@@ -1,0 +1,60 @@
+name: Bug report
+description: Something on the device does not work
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security issues here — see
+        [SECURITY.md](../blob/main/SECURITY.md). And please redact your API key
+        and Wi-Fi password from any log you paste.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+
+  - type: input
+    id: idf
+    attributes:
+      label: ESP-IDF version
+      description: "`idf.py --version`. This project is pinned to v5.5.5."
+      placeholder: v5.5.5
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How was it flashed
+      options:
+        - A published release .bin
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: telemetry
+    attributes:
+      label: The telemetry line
+      description: |
+        This is the single most useful thing you can attach. The device prints
+        one `TLM` line per second; its counters localise a fault to one stage
+        (see docs/verifying-a-boot.md). Capture a few seconds of it around the
+        failure, plus any `EVT` lines and any `rst:0x` / `Guru Meditation`.
+      render: text
+      placeholder: |
+        TLM up=123.4 face=orb beh=SPEAKING src=agent sess=ready frames=22 ...
+        ready | turns=1 mic=64000 B rx=96000 B played=96000 B dropped=0 B
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Serial log
+      description: "`idf.py -b 2000000 monitor`, from boot. Redact secrets."
+      render: text

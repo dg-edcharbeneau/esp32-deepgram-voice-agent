@@ -1,7 +1,7 @@
 # Host harnesses
 
-Two things that run on a laptop instead of the board: a geometry parity check,
-and a dump of the assembled system prompt.
+Three things that run on a laptop instead of the board: a geometry parity check,
+a dump of the assembled system prompt, and a preview of the captive-portal page.
 
 ## Geometry parity
 
@@ -90,3 +90,26 @@ One wrinkle worth knowing before you edit `prompt.sh`: `agent_prompt.c` is
 compiled from a copy in `build/`. A quoted include resolves against the
 including file's own directory before any `-I`, so left in `main/` it would pull
 in the real `faces.h` and with it cJSON.
+
+## Captive-portal preview
+
+Opens `main/portal.src.html` in a browser, so a wording or layout change costs a
+second instead of a flash and a re-provision.
+
+    ./portal.sh              three fake networks, no key stored
+    ./portal.sh --key-set    the same, with a key already in NVS
+    ./portal.sh --raw        the file untouched, so /scan really fails
+
+The page is a plain file -- that being the point of embedding it through
+`EMBED_TXTFILES` rather than keeping it a C string literal in `wifi_prov.c` --
+so `--raw` is just the file, and what it shows is the **scan-failed** state:
+nothing is answering `/scan`, so the `.catch` branch fires and the manual SSID
+box appears. That is a real state worth checking.
+
+The other two modes prepend a `fetch()` shim to fake `/scan`, which is the only
+way to see the populated list off-device. The shim is written into `build/`,
+never into `main/`, so the embedded page cannot pick it up.
+
+Not covered: `POST /save`. The shim resolves it so the button settles, but
+nothing is saved and no reboot follows, and the save path's validation lives in
+`wifi_prov.c` rather than in the page.

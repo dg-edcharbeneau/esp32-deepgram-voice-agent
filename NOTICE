@@ -1,0 +1,31 @@
+esp32-deepgram-voice-agent
+Copyright 2026 Deepgram, Inc.
+
+This product includes software developed at Deepgram, Inc., licensed under the
+Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+Third-party code included in this repository
+--------------------------------------------------------------------------------
+
+components/tcp_transport/transport_ws.c
+
+    A fork of ESP-IDF 5.5.5's components/tcp_transport/transport_ws.c.
+    Copyright Espressif Systems (Shanghai) CO LTD.
+    Licensed under the Apache License, Version 2.0.
+
+    Two local patches are applied. The exact diff against upstream is committed
+    beside the file as components/tcp_transport/local.patch, and
+    components/tcp_transport/check-patch.sh fails if the working copy has
+    drifted from that recorded diff. See docs/notes/websocket-close-timeout.md
+    for why the fork exists.
+
+    Only this one file is vendored; its sibling sources and both include
+    directories still come out of $IDF_PATH at build time.
+
+--------------------------------------------------------------------------------
+
+ESP-IDF itself, the Espressif component-registry components, the Waveshare
+board-support package, and LVGL are fetched at build time and are not
+redistributed here. Each carries its own license; see managed_components/ after
+a build, and dependencies.lock for the exact versions.
