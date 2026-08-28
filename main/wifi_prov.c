@@ -69,82 +69,17 @@ static size_t s_scan_count;
 /* ------------------------------------------------------------------ page */
 
 /*
- * One page, no assets: a second request for a stylesheet is a second chance for
- * a captive-portal webview to wander off. Single quotes throughout the markup
- * so the C string needs almost no escaping.
+ * The page lives in main/portal.html and is embedded by EMBED_TXTFILES, so it is
+ * editable as HTML and previewable in a browser rather than being a C string
+ * literal nobody wants to touch. The file's own header comment carries the rules
+ * that shape it -- chiefly that it may not reference an external asset.
+ *
+ * The symbol is named after the file with every non-alphanumeric character turned
+ * into an underscore, the same convention agent_prompt.c documents. EMBED_TXTFILES
+ * appends a NUL, which is what lets HTTPD_RESP_USE_STRLEN below measure it; the
+ * matching _end symbol is therefore unused here.
  */
-static const char PORTAL_HTML[] =
-"<!doctype html><html><head><meta charset='utf-8'>"
-"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>Deepgram Agent setup</title><style>"
-"body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:24px;"
-"background:#111;color:#eee}"
-"h1{font-size:20px;margin:0 0 4px}p.sub{margin:0 0 20px;color:#888;font-size:14px}"
-"label{display:block;margin:16px 0 6px;font-size:13px;color:#aaa}"
-"select,input[type=text],input[type=password]{width:100%;box-sizing:border-box;"
-"padding:12px;font-size:16px;background:#1e1e1e;color:#eee;border:1px solid #333;"
-"border-radius:8px}"
-"button{width:100%;margin-top:24px;padding:14px;font-size:16px;font-weight:600;"
-"background:#13ef95;color:#000;border:0;border-radius:8px}"
-"button:disabled{opacity:.5}"
-"#msg{margin-top:16px;font-size:14px;color:#13ef95;min-height:20px}"
-"p.hint{margin:6px 0 0;font-size:12px;color:#888}"
-".chk{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:#aaa}"
-".chk input{width:auto}"
-"</style></head><body>"
-"<h1>Deepgram Agent</h1>"
-"<p class='sub'>Pick the network this device should join.</p>"
-"<form id='f'>"
-"<label for='net'>Network</label>"
-"<select id='net'><option value=''>scanning...</option></select>"
-"<div id='manual' style='display:none'>"
-"<label for='ssid'>Network name</label>"
-"<input type='text' id='ssid' autocapitalize='none' autocorrect='off' placeholder='SSID'>"
-"</div>"
-"<label for='pass'>Password</label>"
-"<input type='password' id='pass' placeholder='leave empty if open'>"
-"<label class='chk'><input type='checkbox' id='show'> Show password</label>"
-"<label for='key'>Deepgram API key</label>"
-"<input type='password' id='key' autocapitalize='none' autocorrect='off' "
-"spellcheck='false' placeholder='paste your key'>"
-"<label class='chk'><input type='checkbox' id='showk'> Show key</label>"
-"<p class='hint' id='keyhint'></p>"
-"<button type='submit' id='go'>Save and connect</button>"
-"</form><div id='msg'></div>"
-"<script>"
-"var sel=document.getElementById('net'),msg=document.getElementById('msg');"
-"var man=document.getElementById('manual');"
-"function opt(v,t){var o=document.createElement('option');o.value=v;o.textContent=t;"
-"sel.appendChild(o);return o}"
-"var hint=document.getElementById('keyhint');"
-"fetch('/scan').then(function(r){return r.json()}).then(function(d){"
-"sel.innerHTML='';"
-"d.nets.forEach(function(n){opt(n.ssid,n.ssid+'  ('+n.rssi+' dBm)'+(n.open?'  open':''))});"
-"opt('__other__','Other / hidden network...');"
-"hint.textContent=d.key_set?'A key is already stored. Leave this blank to keep it.'"
-":'No key stored yet - this device cannot talk until one is set.';"
-"}).catch(function(){sel.innerHTML='';opt('__other__','scan failed - enter manually');"
-"man.style.display='block'});"
-"sel.onchange=function(){man.style.display=(sel.value=='__other__')?'block':'none'};"
-"document.getElementById('show').onchange=function(){"
-"document.getElementById('pass').type=this.checked?'text':'password'};"
-"document.getElementById('showk').onchange=function(){"
-"document.getElementById('key').type=this.checked?'text':'password'};"
-"document.getElementById('f').onsubmit=function(e){"
-"e.preventDefault();"
-"var s=sel.value=='__other__'?document.getElementById('ssid').value:sel.value;"
-"if(!s){msg.textContent='Pick or enter a network.';return}"
-"document.getElementById('go').disabled=true;msg.textContent='Saving...';"
-"fetch('/save',{method:'POST',"
-"headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-"body:'ssid='+encodeURIComponent(s)+'&pass='+"
-"encodeURIComponent(document.getElementById('pass').value)+'&key='+"
-"encodeURIComponent(document.getElementById('key').value.trim())})"
-".then(function(){msg.textContent='Saved. Restarting to join '+s+'. "
-"This page will stop responding, and the setup network will disappear.'})"
-".catch(function(){msg.textContent='Save failed. Try again.';"
-"document.getElementById('go').disabled=false})};"
-"</script></body></html>";
+extern const char portal_html_start[] __asm__("_binary_portal_html_start");
 
 /* ------------------------------------------------------------------ scan */
 
@@ -315,7 +250,7 @@ static esp_err_t root_handler(httpd_req_t *req)
     /* The portal only ever serves the current state of the device; a webview
      * that cached it would show a stale scan list on the next provision. */
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, PORTAL_HTML, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, portal_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t scan_handler(httpd_req_t *req)

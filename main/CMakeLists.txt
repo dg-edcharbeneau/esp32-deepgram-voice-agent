@@ -20,10 +20,14 @@ idf_component_register(
         agent_name.c
         api_key.c
     INCLUDE_DIRS .
-    # The persona, one named block per file. Order lives in agent_prompt.c, not
-    # here -- this list only decides what gets embedded. Editing any of them
-    # rebuilds, so a prompt change is a normal edit-and-flash.
+    # Flash rodata, no RAM until something reads it. Editing any of these
+    # rebuilds, so a page or prompt change is a normal edit-and-flash.
     EMBED_TXTFILES
+        # The captive-portal setup page, served verbatim by wifi_prov.c. It was a
+        # C string literal until it grew past the point of being editable.
+        portal.html
+        # The persona, one named block per file. Order lives in agent_prompt.c,
+        # not here -- this list only decides what gets embedded.
         prompt/formatting.md
         prompt/identity.md
         prompt/conversation.md

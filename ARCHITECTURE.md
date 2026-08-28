@@ -385,6 +385,13 @@ flowchart TB
     save -.->|"reboot"| boot0
 ```
 
+The page `GET /` serves is `main/portal.html`, embedded through
+`EMBED_TXTFILES` exactly as the prompt blocks are, so it is editable as HTML and
+openable in a browser rather than being a C string literal in `wifi_prov.c`. It
+carries its own CSS and script inline and may not reference an external asset: a
+second request is a second chance for a captive-portal webview to wander off to
+its connectivity check. `host/portal.sh` previews it.
+
 Holding BOOT for 3 seconds erases the saved network and reboots straight into
 the portal. `GPIO 0` is polled after startup rather than sampled at reset — held
 low *through* a reset it puts the ROM into USB download mode, so "hold BOOT while
@@ -546,6 +553,11 @@ compiles on the host. `host/run.sh` diffs it against the upstream TypeScript it
 was transcribed from — fourteen frames, dot by dot across all six output fields,
 0.02 px tolerance — which catches a transcription error there instead of by
 squinting at a 466 px panel.
+
+`host/portal.sh` opens the captive-portal page in a browser. It is a plain file,
+so the only thing the script adds is a `fetch()` shim faking `/scan` — without
+one the page shows its scan-failed fallback, which is a real state but not the
+one you are usually looking at.
 
 `host/prompt.sh` does the same trick for the persona: it compiles the real
 `main/agent_prompt.c` against stub ESP-IDF headers and prints the assembled
