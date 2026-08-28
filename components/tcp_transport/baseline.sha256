@@ -1,0 +1,5 @@
+# Digests this fork is pinned to. Regenerate with ./check-patch.sh --update.
+#   upstream  ESP-IDF 5.5.5's components/tcp_transport/transport_ws.c
+#   local     components/tcp_transport/transport_ws.c, upstream + local.patch
+upstream bb52037a58c1ec99068241eb286971f7ec8f00d0366de8dcfcba1f2c5d1caaa2
+local    630fec0e76715663293e5b2a0f4f831bf9483e7da5642d4401035098cb1fc214
