@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-28
 
 ### Added
 
@@ -25,7 +25,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`baseline.sha256`) instead of on committed diff text, which was not portable
   between Apple/FreeBSD `diff` and GNU `diffutils` and so could not run in CI.
   `local.patch` is unchanged and remains the human-readable record.
+- The host harnesses compile with `-std=gnu11`. Under glibc, `-std=c11` defines
+  `__STRICT_ANSI__` and `math.h` then hides `M_PI`, which `orb_geometry.c` uses;
+  macOS exposes it either way, so the harnesses had only ever run there.
 
-## [0.1.0] - unreleased
-
-First tagged release. See the git history for everything before this file existed.
+First tagged release. The firmware itself predates this file -- see the git
+history for everything before it.
