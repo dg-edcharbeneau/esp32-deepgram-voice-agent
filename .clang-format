@@ -1,0 +1,20 @@
+# Matches the existing style in main/ and components/: ESP-IDF's own base with
+# an 80-column limit, which is what the code and its comments are wrapped to.
+---
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 80
+BreakBeforeBraces: Linux
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+IndentCaseLabels: false
+AlignAfterOpenBracket: Align
+AlignEscapedNewlines: Left
+PointerAlignment: Right
+SpaceAfterCStyleCast: false
+SortIncludes: false          # include order here is deliberate: C, then IDF, then local
+ReflowComments: false        # several comments are measurement records, wrapped by hand
