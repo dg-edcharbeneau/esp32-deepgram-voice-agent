@@ -3,17 +3,40 @@
  *
  * WHY A HAND-ROLLED BLITTER
  *
- * A frame is ~456 anti-aliased alpha-blended discs of radius 0.3 to 4.2 px. Put
- * through LVGL's draw pipeline that is 456 draw descriptors, area clips and
- * draw-unit dispatches per frame; written directly into the canvas pixels -- which
- * this module owns outright -- it is about 11,000 pixel blends, roughly 1.5 ms.
+ * A frame is ~456 anti-aliased alpha-blended discs. Put through LVGL's draw
+ * pipeline that is 456 draw descriptors, area clips and draw-unit dispatches per
+ * frame; written directly into the canvas pixels -- which this module owns
+ * outright -- it is a bounded number of pixel blends and one invalidated box.
  *
- * The measured budget is what justifies keeping it this simple. On this panel the
- * spectrum face spends ~16 ms drawing inside a ~55 ms frame, and ~40 ms of that
- * frame is LVGL's PSRAM-to-internal copy plus the QSPI flush, which no amount of
- * rasteriser cleverness touches. So this file optimises the two things that do
- * matter -- how many pixels are touched, and how many are flushed -- and leaves
- * the per-pixel path obvious.
+ * WHAT IT ACTUALLY COSTS, because the estimate that used to sit here was wrong
+ * by an order of magnitude and was the stated reason not to do better.
+ *
+ * It claimed ~11,000 blends and "roughly 1.5 ms". Measured over 5,000 face_orb
+ * log lines from real sessions: median 16.2 ms, minimum 9.8 ms, maximum 22.9 ms.
+ * It never once came in under 9.8. Alongside that, from 12,339 telemetry lines on
+ * this face: the frame period is a median 40 ms (25.0 fps) and the whole draw
+ * callback a median 18.5 ms. So the raster is about 40% of the frame and ~88% of
+ * the draw -- geometry is the other 2.2 ms.
+ *
+ * The old paragraph then argued from the SPECTRUM face's budget -- ~16 ms of
+ * drawing inside a ~55 ms frame, ~40 ms of it LVGL's PSRAM-to-internal copy plus
+ * the QSPI flush -- that no amount of rasteriser cleverness could matter. Two
+ * things are wrong with borrowing it. This face's frame is 40 ms, not 55, so
+ * there is ~21 ms behind the draw rather than ~40. And 16 ms of raster is not a
+ * small draw next to it.
+ *
+ * The 11,000 figure is consistent with a mean footprint of about 5x5 px and does
+ * not appear to account for blit_dot making TWO passes over each bounding box, or
+ * for the sqrtf per pixel in the transition annulus -- and it predates SPRITE_MAX
+ * going 14 -> 20, which roughly doubles a dot's footprint area at amplitude.
+ *
+ * NONE OF WHICH SAYS THE DESIGN IS WRONG. Direct-to-canvas still beats the draw
+ * pipeline it replaced, and the two things this file optimises -- how many pixels
+ * are touched and how many are flushed -- are still the two that matter. What is
+ * no longer supported is the conclusion that the per-pixel path is too cheap to
+ * be worth improving. If someone wants that back, measure it; the numbers above
+ * are what to beat, and the atlas the plan originally called for was rejected on
+ * the strength of the figure that turned out to be wrong.
  *
  * COVERAGE, AND WHY NOT AN ATLAS
  *
@@ -24,10 +47,53 @@
  * getting them wrong is not cosmetic.
  *
  * Normalising total coverage to the disc's true area fixes it outright, and makes
- * the atlas pointless: accumulate the raw edge function over the bounding box,
- * then scale so the coverage sums to pi*r^2. The edge shape is preserved where it
- * matters and the ink is exactly right at every radius, with no table, no 80 kB
- * of PSRAM, no boot-time precompute, and exact sub-pixel positioning for free.
+ * the atlas pointless FOR CORRECTNESS: accumulate the raw edge function over the
+ * bounding box, then scale so the coverage sums to pi*r^2. The edge shape is
+ * preserved where it matters and the ink is exactly right at every radius, with
+ * no table, no 80 kB of PSRAM, no boot-time precompute, and exact sub-pixel
+ * positioning for free.
+ *
+ * AND THE ATLAS WAS RE-EXAMINED FOR SPEED, once the 1.5 ms above turned out to be
+ * 16.2 ms. That is the number that had made the question moot, so it deserved
+ * asking again rather than inheriting the old answer.
+ *
+ * The answer is still no, for a reason the first pass never reached: AN ATLAS
+ * CANNOT TOUCH WHAT THIS COSTS. Counted over the real dot lists in
+ * host/port.tsv, a shell frame is ~30k box pixels, ~5.7k of them needing the
+ * sqrtf, and ~10k that actually blend -- so the old "about 11,000 pixel blends"
+ * was roughly RIGHT. What was wrong by an order of magnitude is the cost of each
+ * one, and the canvas is 434 kB in PSRAM. The blends are scattered
+ * read-modify-writes into it, and clear_box() moves the boxes again before them;
+ * at ~5k distinct cache lines per pass that is the shape of the bill. An atlas
+ * removes coverage ARITHMETIC and adds atlas READS. It cannot remove a single
+ * canvas write.
+ *
+ * What did help was noticing the boxes were 58% larger than they had to be; see
+ * blit_dot(). That one is lossless, costs nothing, and cuts the clear as well.
+ *
+ * MEASURED ON THE DEVICE, and the estimate held. ORB_RASTER_PHASE_TIMING below
+ * splits the frame; 407 samples across three behaviours say:
+ *
+ *              boxpx   clear    blit   raster    was    saved
+ *   idle       11,575   1,973   9,503   11,476  16,165    29%
+ *   listening  12,076   2,053   9,956   12,010  17,071    30%
+ *   speaking   16,757   2,511  12,726   15,237  19,341    21%
+ *
+ * The box tightening cut box pixels 60% and the frame only 29%, and that gap is
+ * what separates the two costs -- the tightening provably left the BLENDED pixel
+ * count alone, so before-and-after solves for both. It gives ~270 ns per box
+ * pixel and ~939 ns per blended pixel, the latter being 225 cycles at 240 MHz for
+ * a two-byte read-modify-write. About 73% of the frame is that one term.
+ *
+ * TWO INDEPENDENT ROUTES TO THE SAME ANSWER, and the second was an accident. The
+ * clear is pure memset with no arithmetic in it at all, and its cost per pixel
+ * FELL from 170 ns to 150 ns as speech grew the boxes. Arithmetic per pixel
+ * cannot get cheaper when there is more of it; only locality can, because a
+ * bigger box fetches more useful pixels per cache line. A pure-memory signature.
+ *
+ * Which is also why the linear model above over-predicts a loud frame by ~11%:
+ * the per-pixel costs are not constants, they improve with size. Being wrong in
+ * that particular direction is more evidence for the conclusion, not less.
  */
 
 #include "orb_raster.h"
@@ -38,6 +104,31 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+
+/*
+ * BENCH ONLY: split the frame into its clear and blit phases and log both.
+ *
+ * This is the measurement the header's cost note asks for and does not have.
+ * The clear is pure PSRAM writes with no arithmetic in it at all, so its cost
+ * per box pixel prices every other pixel in the frame -- which is what decides
+ * whether this rasteriser is memory-bound or compute-bound, and therefore
+ * whether optimising the per-pixel path could ever pay.
+ *
+ * Off by default for the same reason face_orb.c's ORB_LOG_TIMINGS is: ESP_LOGI
+ * on the LVGL task blocks on the UART for most of a frame, so the log spoils one
+ * frame in every 60 and corrupts ui.c's telemetry alongside it. Turn both on
+ * together, read the numbers knowing the frames they landed in are not
+ * representative, and turn them off again.
+ *
+ * The only cost inside the measured path is one integer add per DOT for the box
+ * accounting -- deliberately not per pixel, so the inner loops are untouched.
+ */
+#define ORB_RASTER_PHASE_TIMING 0
+
+#if ORB_RASTER_PHASE_TIMING
+#include "esp_timer.h"
+static uint32_t s_dbg_boxpx;   /* box pixels this frame, summed over dots */
+#endif
 
 static const char *TAG = "orb_raster";
 
@@ -172,10 +263,31 @@ static void clear_box(const int16_t *b)
 static void blit_dot(const orb_dot_t *d, int16_t *box, float tr, float tg, float tb)
 {
     float r = d->r;
-    int32_t x0 = (int32_t)floorf(d->x - r - 1.0f);
-    int32_t y0 = (int32_t)floorf(d->y - r - 1.0f);
-    int32_t x1 = (int32_t)ceilf(d->x + r + 1.0f);
-    int32_t y1 = (int32_t)ceilf(d->y + r + 1.0f);
+    /*
+     * THE EXACT PIXEL-CENTRE BOUND, not a margin around the radius.
+     *
+     * Coverage is zero at d >= r + 0.5 -- the outer2 test below returns 0 there
+     * -- and a pixel is sampled at its CENTRE, ix + 0.5. So pixel ix can only
+     * carry ink when |ix + 0.5 - x| <= r + 0.5, which is x - r - 1 <= ix <= x + r.
+     * That is this box, and nothing outside it can ever be non-zero.
+     *
+     * It replaces floor(x-r-1)..ceil(x+r+1), which was up to two whole columns
+     * and rows of guaranteed-zero pixels on every dot. Measured over the 12,343
+     * dots in host/port.tsv: 58% fewer box pixels, and the rendered canvas is
+     * BYTE-IDENTICAL, because every pixel dropped had coverage exactly zero and
+     * so contributed nothing to `sum` either -- the area normalisation below is
+     * unchanged along with the ink.
+     *
+     * It pays three times over: pass one does 58% less arithmetic, pass two
+     * iterates 58% fewer pixels for the same number of blends, and the box is
+     * what clear_box() erases next frame, so the clear moves 58% less PSRAM.
+     * See the frame-cost note at the top of this file for why that last one is
+     * the part that matters.
+     */
+    int32_t x0 = (int32_t)ceilf(d->x - r - 1.0f);
+    int32_t y0 = (int32_t)ceilf(d->y - r - 1.0f);
+    int32_t x1 = (int32_t)floorf(d->x + r);
+    int32_t y1 = (int32_t)floorf(d->y + r);
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -196,6 +308,10 @@ static void blit_dot(const orb_dot_t *d, int16_t *box, float tr, float tg, float
         x1 = x0 + bw - 1;
         y1 = y0 + bh - 1;
     }
+
+#if ORB_RASTER_PHASE_TIMING
+    s_dbg_boxpx += (uint32_t)(bw * bh);
+#endif
 
     /* Pass one: the raw edge function, and its total. */
     float cov[SPRITE_MAX * SPRITE_MAX];
@@ -415,6 +531,11 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
         return;
     }
 
+#if ORB_RASTER_PHASE_TIMING
+    const int64_t t_start = esp_timer_get_time();
+    s_dbg_boxpx = 0;
+#endif
+
     /* Once per frame, not once per dot: the colour cannot change mid-frame. */
     float tr = (float)((rgb >> 16) & 0xFF) / 255.0f;
     float tg = (float)((rgb >> 8) & 0xFF) / 255.0f;
@@ -457,6 +578,11 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
         if (b[2] > ux1) ux1 = b[2];
         if (b[3] > uy1) uy1 = b[3];
     }
+
+#if ORB_RASTER_PHASE_TIMING
+    /* Everything above erased last frame; everything below draws this one. */
+    const int64_t t_cleared = esp_timer_get_time();
+#endif
 
     /*
      * This frame's strokes, UNDER the dots -- paintFrame's order, and the reason
@@ -510,6 +636,34 @@ void orb_raster_draw(const orb_frame_t *frame, uint32_t rgb)
         if (b[3] > uy1) uy1 = b[3];
     }
     s_prev_count = n;
+
+#if ORB_RASTER_PHASE_TIMING
+    {
+        const int64_t t_drawn = esp_timer_get_time();
+        static int64_t clear_sum, draw_sum;
+        static uint32_t boxpx_sum, frames;
+        clear_sum += t_cleared - t_start;
+        draw_sum  += t_drawn - t_cleared;
+        boxpx_sum += s_dbg_boxpx;
+        if (++frames >= 60) {
+            /*
+             * clear/ is the same box pixels as blit/ walks, written with memset
+             * and no arithmetic. If the two are close, this rasteriser is bound
+             * by the PSRAM canvas and the per-pixel path is not worth touching;
+             * if clear is a small fraction, the arithmetic is worth attacking.
+             */
+            ESP_LOGI(TAG, "phase clear=%lld us blit=%lld us boxpx=%u dots=%u "
+                          "-> clear %.1f ns/px, blit %.1f ns/px",
+                     (long long)(clear_sum / frames), (long long)(draw_sum / frames),
+                     (unsigned)(boxpx_sum / frames), (unsigned)n,
+                     1000.0 * (double)clear_sum / (double)boxpx_sum,
+                     1000.0 * (double)draw_sum / (double)boxpx_sum);
+            clear_sum = draw_sum = 0;
+            boxpx_sum = 0;
+            frames = 0;
+        }
+    }
+#endif
 
     if (ux1 < ux0 || uy1 < uy0) {
         return; /* nothing drawn and nothing to clean up */

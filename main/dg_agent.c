@@ -12,6 +12,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
+/* The local patches' one accessor; see components/tcp_transport. */
+#include "transport_ws_local.h"
 
 #include "agent_name.h"
 #include "agent_prompt.h"
@@ -122,7 +124,9 @@ static volatile bool s_suppress_state;
  * makes one layer down: drop a frame, never a session.
  */
 #define AUDIO_QUEUE_FRAMES 4
-#define AUDIO_FRAME_BYTES  2560            /* 1280 samples x int16, see audio_io.c */
+/* From audio_io.h, not a literal repeated here: the queue is sized in whole
+ * capture chunks, so the two must agree by construction. */
+#define AUDIO_FRAME_BYTES  AUDIO_IO_CAPTURE_BYTES
 #define AUDIO_QUEUE_BYTES  (AUDIO_QUEUE_FRAMES * (AUDIO_FRAME_BYTES + 16))
 
 /* PSRAM: it is 10 kB that nothing touches from an ISR, and internal RAM is what
@@ -137,6 +141,13 @@ static TaskHandle_t s_send_task;
  * in flight while a stop arrives: the audio frames, and the keepalive -- which
  * is TEXT, so transport_ws.c's LOCAL PATCH 2 cannot drop it and it blocks in
  * poll_write holding the lock (see the note in keepalive_task).
+ *
+ * BOTH ARE RAISED BEFORE THEIR TASK TESTS s_ready, NOT AFTER, and that ordering
+ * is the property that makes them work at all. dg_agent_stop() clears s_ready
+ * and then waits here; raising a flag after the test leaves a window in which
+ * the sender has committed to a send and the stop cannot see it. Claim first,
+ * test second, and every interleaving ends with either the stop waiting or the
+ * send skipping. The full argument is at the top of audio_send_task().
  *
  * send_json() is deliberately NOT covered. It runs at session setup and on a
  * function-call response, not on the cadence a stop has to race, and adding it
@@ -160,6 +171,17 @@ static volatile uint32_t s_audio_dropped;
 /* Reassembly buffer for JSON messages split across several DATA events. */
 static char *s_json;
 static int s_json_len;
+/*
+ * Set when the message being reassembled has already overrun the buffer, so its
+ * remaining slices are discarded instead of being taken for a new message.
+ *
+ * Without it, resetting s_json_len on overflow made the NEXT slices of the SAME
+ * message accumulate from offset 0, and the fin slice then parsed a fragment
+ * tail -- so an oversized message was reported as "unparseable message" against
+ * a message that was perfectly well formed. The drop has to last until the end
+ * of the message, not until the end of the slice.
+ */
+static bool s_json_dropping;
 
 /*
  * The last few turns, replayed into the next session's Settings so that
@@ -684,18 +706,43 @@ static esp_err_t send_settings(void)
      * does it -- JSON Schema has nowhere to hang a per-enum-value note, and
      * without one the model is choosing between two bare nouns.
      */
-    char faces[512];
-    faces_describe(faces, sizeof(faces));
-    char face_desc[700];
-    snprintf(face_desc, sizeof(face_desc),
-             "Change what the device's screen shows. Use when the user asks for a "
-             "different look, mentions the display, or names one of these. "
-             "Faces: %s.",
-             faces);
+    /*
+     * PSRAM and ONE buffer, the pattern set_color introduced below and the
+     * reason this function's frame no longer grows with the catalog. This was
+     * the stack pair the canary note further down describes -- 512 + 700 = 1,212
+     * B of the frame for two faces. See .claude/skills/esp-stack-budget/.
+     *
+     * 377 B in use at two faces. Rounded up because it is PSRAM and free, so a
+     * few more faces cannot quietly reach faces_describe()'s truncation path.
+     */
+    enum { FACE_DESC_LEN = 1024 };
+    char *face_desc = heap_caps_malloc(FACE_DESC_LEN, MALLOC_CAP_SPIRAM);
+    /* Losing the catalog is survivable -- the enum still constrains the model to
+     * valid names. Losing the function is not. */
+    const char *face_desc_str = "Change what the device's screen shows.";
+    if (face_desc != NULL) {
+        int n = snprintf(face_desc, FACE_DESC_LEN,
+                         "Change what the device's screen shows. Use when the user asks for a "
+                         "different look, mentions the display, or names one of these. "
+                         "Faces: ");
+        if (n > 0 && (size_t)n < FACE_DESC_LEN) {
+            faces_describe(face_desc + n, FACE_DESC_LEN - (size_t)n);
+            /* The trailing stop the one-shot snprintf used to supply, kept so
+             * this is a move off the stack and not a change to what the model
+             * reads. */
+            size_t used = strlen(face_desc);
+            if (used + 2 <= FACE_DESC_LEN) {
+                face_desc[used] = '.';
+                face_desc[used + 1] = '\0';
+            }
+            face_desc_str = face_desc;
+        }
+    }
 
     cJSON *set_face = cJSON_CreateObject();
     cJSON_AddStringToObject(set_face, "name", "set_face");
-    cJSON_AddStringToObject(set_face, "description", face_desc);
+    cJSON_AddStringToObject(set_face, "description", face_desc_str);
+    free(face_desc); /* cJSON copied it; free(NULL) is fine */
     cJSON *fparams = cJSON_AddObjectToObject(set_face, "parameters");
     cJSON_AddStringToObject(fparams, "type", "object");
     cJSON *fprops = cJSON_AddObjectToObject(fparams, "properties");
@@ -718,18 +765,34 @@ static esp_err_t send_settings(void)
     /*
      * PSRAM, and ONE buffer rather than a catalog-plus-description pair.
      *
-     * NOT A STYLE CHOICE -- MEASURED. This task has task_stack = 6144, and the
-     * two existing pairs above already put 2,880 B of it on the stack (1,212 for
-     * faces, 1,668 for voices under Flux). Adding a third pair of 1,280 tripped
+     * NOT A STYLE CHOICE -- MEASURED. This task has task_stack = 6144. This
+     * function once gave every described catalog a stack PAIR, a buffer for the
+     * catalog and another for the description around it: 1,212 B for faces,
+     * 1,668 for voices. Adding a third pair of 1,280 for these colours tripped
      * the stack canary on the first session and put the device in a boot loop,
-     * before cJSON's own recursion is even counted.
+     * before cJSON's own recursion is even counted. Recovering it needed BOOT
+     * held while RESET was tapped -- the board rebooted faster than esptool
+     * could sync.
      *
      * So the prefix is written first and the catalog appended into the tail of
      * the same allocation, which costs no stack at all. cJSON copies the string,
-     * so it is freed immediately. If a fourth function ever wants a described
-     * catalog, do this rather than the pattern above it.
+     * so it is freed immediately.
+     *
+     * ALL THREE USE THIS NOW, which is the part worth keeping. The pair pattern
+     * was the trap rather than the colour function that sprang it: its cost was
+     * O(n) in declared functions with no budget written down anywhere, so it was
+     * going to fail for whoever added the third one, whatever it happened to be.
+     * Measured either side of moving faces and voices across: this function had
+     * a 2,944 B frame and was called from on_ws_event's 192 B one, so the path
+     * cost 3,136 B of the 6,144 available before cJSON recursed at all. With the
+     * buffers gone it is small enough that the compiler inlines it into
+     * on_ws_event outright -- there is no send_settings frame in the image any
+     * more, and that caller is still 192 B. 3,136 -> 192.
+     *
+     * A new described catalog should cost nothing here; if one ever appears to,
+     * measure with .claude/skills/esp-stack-budget/ before enlarging anything.
      */
-    /* 543 B in use at fourteen colours (201 prefix + 341 catalog + NUL). Rounded
+    /* 543 B in use at thirteen colours (201 prefix + 341 catalog + NUL). Rounded
      * up because it is PSRAM and free, so a couple more colours cannot quietly
      * run into orb_colors_describe()'s truncation path. */
     enum { COLOR_DESC_LEN = 1024 };
@@ -827,17 +890,39 @@ static esp_err_t send_settings(void)
     /* The catalog goes in the description because JSON Schema has nowhere to
      * hang a per-enum-value note, and without it the model is choosing from
      * bare first names. */
-    char catalog[768];
-    voices_describe(catalog, sizeof(catalog));
-    char description[900];
-    snprintf(description, sizeof(description),
-             "Change the voice you speak in. Use when the user asks you to sound "
-             "different, or asks for a particular accent or gender. Voices: %s.",
-             catalog);
+    /*
+     * The last of the three stack pairs, and the largest at 768 + 900 = 1,668 B.
+     * Same one-buffer PSRAM pattern as the two above.
+     *
+     * 2048 rather than the 1024 the others use, and sized for growth rather than
+     * for today: 705 B is in use at thirteen featured voices, and voices.c keeps
+     * the other twenty-three precisely so widening the offer is "a one-flag
+     * change". All thirty-six would be 1,743 B, so that flag can be flipped
+     * without landing on voices_describe()'s truncation path -- which is the
+     * whole point of the catalog not living on the stack any more.
+     */
+    enum { VOICE_DESC_LEN = 2048 };
+    char *description = heap_caps_malloc(VOICE_DESC_LEN, MALLOC_CAP_SPIRAM);
+    const char *description_str = "Change the voice you speak in.";
+    if (description != NULL) {
+        int n = snprintf(description, VOICE_DESC_LEN,
+                         "Change the voice you speak in. Use when the user asks you to sound "
+                         "different, or asks for a particular accent or gender. Voices: ");
+        if (n > 0 && (size_t)n < VOICE_DESC_LEN) {
+            voices_describe(description + n, VOICE_DESC_LEN - (size_t)n);
+            size_t used = strlen(description);
+            if (used + 2 <= VOICE_DESC_LEN) {
+                description[used] = '.';
+                description[used + 1] = '\0';
+            }
+            description_str = description;
+        }
+    }
 
     cJSON *set_voice = cJSON_CreateObject();
     cJSON_AddStringToObject(set_voice, "name", "set_voice");
-    cJSON_AddStringToObject(set_voice, "description", description);
+    cJSON_AddStringToObject(set_voice, "description", description_str);
+    free(description); /* cJSON copied it; free(NULL) is fine */
     cJSON *params = cJSON_AddObjectToObject(set_voice, "parameters");
     cJSON_AddStringToObject(params, "type", "object");
     cJSON *props = cJSON_AddObjectToObject(params, "properties");
@@ -1017,23 +1102,36 @@ static void accumulate_json(const esp_websocket_event_data_t *ev)
      * though its own payload_offset starts back at 0. */
     if (ev->op_code == WS_OPCODE_TEXT && ev->payload_offset == 0) {
         s_json_len = 0;
+        s_json_dropping = false;
     }
 
-    if (s_json_len + ev->data_len > JSON_REASSEMBLY_MAX) {
-        ESP_LOGW(TAG, "message exceeds %d byte reassembly buffer, dropping",
-                 JSON_REASSEMBLY_MAX);
-        s_json_len = 0;
-        return;
+    if (!s_json_dropping) {
+        if (s_json_len + ev->data_len > JSON_REASSEMBLY_MAX) {
+            ESP_LOGW(TAG, "message exceeds %d byte reassembly buffer, dropping",
+                     JSON_REASSEMBLY_MAX);
+            s_json_dropping = true;
+            s_json_len = 0;
+        } else {
+            memcpy(s_json + s_json_len, ev->data_ptr, ev->data_len);
+            s_json_len += ev->data_len;
+        }
     }
 
-    memcpy(s_json + s_json_len, ev->data_ptr, ev->data_len);
-    s_json_len += ev->data_len;
-
-    /* Complete only when this is the last slice of the last frame: payload_len
-     * covers one frame, fin covers the fragment chain. */
+    /*
+     * Complete only when this is the last slice of the last frame: payload_len
+     * covers one frame, fin covers the fragment chain.
+     *
+     * Reached whether or not the message was dropped, and that is the point: the
+     * drop is cleared HERE rather than on the next message's first slice, so a
+     * following message that never presents an offset-0 TEXT slice still starts
+     * clean.
+     */
     if (ev->fin && ev->payload_offset + ev->data_len >= ev->payload_len) {
-        handle_json(s_json, s_json_len);
+        if (!s_json_dropping) {
+            handle_json(s_json, s_json_len);
+        }
         s_json_len = 0;
+        s_json_dropping = false;
     }
 }
 
@@ -1099,6 +1197,7 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
     case WEBSOCKET_EVENT_CLOSED:
         ESP_LOGW(TAG, "socket closed (status %d)", ev->close_status_code);
         s_json_len = 0;
+        s_json_dropping = false;
         set_state(DG_AGENT_DISCONNECTED);
         break;
 
@@ -1134,6 +1233,25 @@ static void audio_send_task(void *arg)
             continue;
         }
 
+        /*
+         * CLAIMED BEFORE THE READINESS TEST, NEVER AFTER IT.
+         *
+         * dg_agent_stop() clears s_ready and then waits for this flag to fall.
+         * Raising it after the test left a window between them: the sender had
+         * already decided to send, the stop saw an idle sender, and
+         * esp_websocket_client_stop() ran underneath a send that was about to
+         * take the client lock -- the exact wedge this task exists to prevent.
+         *
+         * Flag first, test second, and the two orders cannot both miss. Either
+         * the stop observes s_sending and waits, or this observes !s_ready and
+         * skips. There is no third outcome, and both tasks are pinned to core 0
+         * so preemption is the only interleaving there is to cover.
+         *
+         * The cost is that the flag is briefly raised for a frame that is then
+         * discarded, so a stop can spin one extra 10 ms tick in its quiesce
+         * loop. That is the whole price.
+         */
+        s_sending = true;
         if (s_ready && s_client != NULL) {
             /*
              * Ahead of the send, not after it: a send that blocks is exactly when
@@ -1141,10 +1259,8 @@ static void audio_send_task(void *arg)
              * would leave the clock stale for the whole time it was blocked.
              */
             s_last_audio_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            s_sending = true;
             (void)esp_websocket_client_send_bin(s_client, (const char *)frame,
                                                 (int)len, AUDIO_SEND_TIMEOUT);
-            s_sending = false;
 
             /*
              * Stack headroom, reported once with real history behind it.
@@ -1171,6 +1287,7 @@ static void audio_send_task(void *arg)
                          (unsigned)uxTaskGetStackHighWaterMark(NULL), sends);
             }
         }
+        s_sending = false;
         vRingbufferReturnItem(s_audio_rb, frame);
     }
 }
@@ -1185,38 +1302,53 @@ static void keepalive_task(void *arg)
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(KEEPALIVE_PERIOD_MS));
-        if (!s_ready || !esp_websocket_client_is_connected(s_client)) {
-            continue;
-        }
         /*
-         * WHEN this frame goes out matters more than whether it does, because it
-         * is TEXT and transport_ws cannot drop it when the send queue is full --
-         * LOCAL PATCH 2 covers binary only, since Settings must never vanish
-         * silently. A congested TEXT send blocks in poll_write holding the client
-         * lock, stalls the capture task behind it, and finally times out and takes
-         * the session down. Observed twice, as a live session dying with mic=
-         * frozen for the full SEND_TIMEOUT and rx=0.
+         * Claimed before the readiness test, for the reason audio_send_task()
+         * spells out at length: dg_agent_stop() clears s_ready and then waits on
+         * this flag, so a claim that comes after the test leaves a window where
+         * the stop tears the client down under a send that has already been
+         * decided on. This one matters even more than the audio flag -- a
+         * keepalive is TEXT, so transport_ws.c's LOCAL PATCH 2 cannot drop it and
+         * it blocks in poll_write holding the client lock.
          *
-         * So send it only when the uplink is genuinely quiet AND uncongested, and
-         * there is one condition that means exactly that: the mic gate is shut
-         * because the agent is speaking. Nothing is being pushed upstream then, so
-         * the send queue is draining rather than filling, and this is also the one
-         * case the keepalive exists for -- a long reply during which the device
-         * sends no audio at all and Deepgram's ~10 s idle timer is running.
-         *
-         * Any other time, either audio is flowing and doing the job already, or
-         * the uplink is stalled -- and a stall is precisely when adding a
-         * blocking TEXT write is worst. An earlier version keyed on "no audio for
-         * 2 s" and did exactly that to itself: the stall aged the clock, the clock
-         * fired the keepalive, the keepalive killed the session.
+         * Which is why the guard below became a positive condition rather than a
+         * pair of `continue`s: the flag has to wrap the whole test, and a
+         * `continue` would skip past the lowering.
          */
-        uint32_t quiet_ms = (uint32_t)(esp_timer_get_time() / 1000) - s_last_audio_ms;
-        if (!audio_io_playback_active() && quiet_ms < KEEPALIVE_QUIET_MS) {
-            continue;
-        }
         s_sending_ka = true;
-        esp_websocket_client_send_text(s_client, KEEPALIVE, sizeof(KEEPALIVE) - 1,
-                                       SEND_TIMEOUT);
+        if (s_ready && esp_websocket_client_is_connected(s_client)) {
+            /*
+             * WHEN this frame goes out matters more than whether it does, because it
+             * is TEXT and transport_ws cannot drop it when the send queue is full --
+             * LOCAL PATCH 2 covers binary only, since Settings must never vanish
+             * silently. A congested TEXT send blocks in poll_write holding the client
+             * lock, stalls the capture task behind it, and finally times out and takes
+             * the session down. Observed twice, as a live session dying with mic=
+             * frozen for the full SEND_TIMEOUT and rx=0.
+             *
+             * So send it only when the uplink is genuinely quiet AND uncongested, and
+             * there is one condition that means exactly that: the mic gate is shut
+             * because the agent is speaking. Nothing is being pushed upstream then, so
+             * the send queue is draining rather than filling, and this is also the one
+             * case the keepalive exists for -- a long reply during which the device
+             * sends no audio at all and Deepgram's ~10 s idle timer is running.
+             *
+             * Any other time, either audio is flowing and doing the job already, or
+             * the uplink is stalled -- and a stall is precisely when adding a
+             * blocking TEXT write is worst. An earlier version keyed on "no audio for
+             * 2 s" and did exactly that to itself: the stall aged the clock, the clock
+             * fired the keepalive, the keepalive killed the session.
+             */
+            uint32_t quiet_ms = (uint32_t)(esp_timer_get_time() / 1000) -
+                                s_last_audio_ms;
+            /* The same rule as the `continue` this replaced, stated the other way
+             * round: send iff the mic gate is shut, or the uplink has been quiet
+             * long enough that nothing else is holding the session open. */
+            if (audio_io_playback_active() || quiet_ms >= KEEPALIVE_QUIET_MS) {
+                esp_websocket_client_send_text(s_client, KEEPALIVE,
+                                               sizeof(KEEPALIVE) - 1, SEND_TIMEOUT);
+            }
+        }
         s_sending_ka = false;
     }
 }
@@ -1370,8 +1502,10 @@ esp_err_t dg_agent_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Stale bytes from a message that was cut off by the previous teardown. */
+    /* Stale bytes from a message that was cut off by the previous teardown, and
+     * a drop that teardown may have left mid-message. */
     s_json_len = 0;
+    s_json_dropping = false;
 
     ESP_LOGI(TAG, "connecting to %s", DG_AGENT_URI);
     esp_err_t err = esp_websocket_client_start(s_client);
@@ -1504,6 +1638,11 @@ esp_err_t dg_agent_send_audio(const void *pcm, size_t len)
 uint32_t dg_agent_audio_dropped(void)
 {
     return s_audio_dropped;
+}
+
+uint32_t dg_agent_transport_dropped(void)
+{
+    return transport_ws_local_dropped_frames();
 }
 
 esp_err_t dg_agent_inject_user_message(const char *text)

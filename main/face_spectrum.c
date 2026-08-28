@@ -21,6 +21,7 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_dsp.h"
@@ -221,9 +222,39 @@ static void analyse(void)
         s_spectrum[i] = 20 * log10f(magnitude / (FFT_N / 2) + 1e-9);
     }
 
+    /*
+     * THE WHOLE BAND, NOT THE BIN IT STARTS ON.
+     *
+     * This read one bin per band -- 24 of the 512 -- and discarded the other
+     * 488. Bands are 21.33 bins wide (333 Hz at this size and rate), so the taps
+     * sat 333 Hz apart and anything between two of them was invisible however
+     * loud it was. The FFT was already paid for; only the reading was narrow.
+     *
+     * MAX, NOT MEAN, and the distinction matters more than it looks. s_spectrum
+     * is in dB, so averaging is a geometric mean of magnitudes: one full-scale
+     * bin among twenty at the floor averages to -85.7 dB, which is dimmer than
+     * the single-bin reading it replaced. It would also drag every bar down and
+     * put DB_MIN and the perceptual curve back in play. Max keeps the existing
+     * calibration exactly -- the value is still "the level of one bin", so the
+     * scale, DB_MIN and the sqrt curve all mean what they meant -- while fixing
+     * the case the point-sample got wrong.
+     *
+     * Bin 0 is skipped: it is DC, which band 0 used to display literally.
+     */
     for (int i = 0; i < STRIPE_COUNT; i++) {
-        int fft_idx = i * (FFT_N / 2) / STRIPE_COUNT;
-        display_spectrum[i] = fmaxf(DB_MIN, fminf(DB_MAX, s_spectrum[fft_idx]));
+        int lo = i * (FFT_N / 2) / STRIPE_COUNT;
+        const int hi = (i + 1) * (FFT_N / 2) / STRIPE_COUNT;
+        if (lo == 0) {
+            lo = 1;
+        }
+
+        float peak = s_spectrum[lo];
+        for (int k = lo + 1; k < hi; k++) {
+            if (s_spectrum[k] > peak) {
+                peak = s_spectrum[k];
+            }
+        }
+        display_spectrum[i] = fmaxf(DB_MIN, fminf(DB_MAX, peak));
     }
 }
 
@@ -385,6 +416,18 @@ static esp_err_t init(lv_obj_t *canvas)
     if (s_audio == NULL || s_wind == NULL || s_fft == NULL || s_spectrum == NULL ||
         s_window == NULL || s_bank == NULL) {
         ESP_LOGE(TAG, "no PSRAM for FFT buffers");
+        /*
+         * Released and nulled, not left dangling. select_face() leaves
+         * s_face_ready false on a failure, so this face can be selected again --
+         * and a second init() would allocate over the survivors of the first,
+         * leaking every one of them.
+         */
+        free(s_audio);   s_audio = NULL;
+        free(s_wind);    s_wind = NULL;
+        free(s_fft);     s_fft = NULL;
+        free(s_spectrum); s_spectrum = NULL;
+        free(s_window);  s_window = NULL;
+        free(s_bank);    s_bank = NULL;
         return ESP_ERR_NO_MEM;
     }
 

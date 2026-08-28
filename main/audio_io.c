@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -30,7 +31,7 @@ static const char *TAG = "audio_io";
  * larger writes directly reduce the pressure behind that failure. See the
  * "short send timeout" section of the README.
  */
-#define CAPTURE_FRAMES 1280
+#define CAPTURE_FRAMES AUDIO_IO_CAPTURE_FRAMES
 
 /*
  * Playback ring holds MONO bytes -- the stereo doubling happens in the drain
@@ -126,6 +127,17 @@ static bool s_volume_from_nvs;
 /* Shared with the saved voice; see voices.c. */
 #define NVS_NAMESPACE  "dgagent"
 #define NVS_KEY_VOLUME "out_volume"
+/*
+ * The capture task's handle, which exists to make starting twice impossible.
+ *
+ * Not a diagnostic: audio_io.h states that the task cannot be created twice as
+ * though it were a property of this module, and until now nothing enforced it.
+ * A second audio_cap task at priority 7 would invalidate every "one writer only,
+ * so the read-modify-write needs no lock" argument in ui.c and face_spectrum.c
+ * at once -- s_level_peak's peak-hold, the FFT window's hop fill, and the
+ * seqlock's publish counter all assume a single producer.
+ */
+static TaskHandle_t s_capture_task;
 static volatile bool s_capture_enabled = true;
 /* Tap-only override, consulted only while capture is disabled. See
  * audio_io_capture_set_monitor() in the header for why it exists. */
@@ -162,7 +174,14 @@ static void playback_task(void *arg)
      * from 32,768 to 59,392. */
     int16_t *stereo = heap_caps_malloc(CHUNK_MONO * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (mono == NULL || stereo == NULL) {
-        ESP_LOGE(TAG, "no internal RAM for playback buffers");
+        /* Name both pools, because only one of these is internal RAM and a
+         * message that blames the wrong one sends the next person to the wrong
+         * budget. Free the half that succeeded: this task is about to go away,
+         * so nothing else will. */
+        ESP_LOGE(TAG, "no memory for playback buffers (mono %d B internal, "
+                      "stereo %d B PSRAM)", CHUNK_MONO, CHUNK_MONO * 2);
+        free(mono);
+        free(stereo);
         vTaskDelete(NULL);
     }
 
@@ -247,7 +266,13 @@ static void capture_task(void *arg)
     int16_t *stereo = heap_caps_malloc(stereo_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     int16_t *mono = heap_caps_malloc(mono_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (stereo == NULL || mono == NULL) {
-        ESP_LOGE(TAG, "no internal RAM for capture buffers");
+        /* Same as the playback side: name the right pool for each, and release
+         * whichever one succeeded. */
+        ESP_LOGE(TAG, "no memory for capture buffers (stereo %u B PSRAM, "
+                      "mono %u B internal)",
+                 (unsigned)stereo_bytes, (unsigned)mono_bytes);
+        free(stereo);
+        free(mono);
         vTaskDelete(NULL);
     }
 
@@ -263,15 +288,18 @@ static void capture_task(void *arg)
             continue;
         }
 
-        int16_t peak_l = 0, peak_r = 0;
+        int32_t peak_l = 0, peak_r = 0;
         for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
             int16_t l = stereo[2 * i];
             int16_t r = stereo[2 * i + 1];
             /* Average, matching spec_analyzer_radial's downmix. */
             mono[i] = (int16_t)(((int32_t)l + (int32_t)r) / 2);
 
-            int16_t al = (l < 0) ? -l : l;
-            int16_t ar = (r < 0) ? -r : r;
+            /* int32_t, not int16_t: negating INT16_MIN in 16 bits gives
+             * INT16_MIN back, so a full-scale negative sample used to read as
+             * the quietest possible one. */
+            int32_t al = (l < 0) ? -(int32_t)l : (int32_t)l;
+            int32_t ar = (r < 0) ? -(int32_t)r : (int32_t)r;
             if (al > peak_l) peak_l = al;
             if (ar > peak_r) peak_r = ar;
         }
@@ -286,7 +314,7 @@ static void capture_task(void *arg)
         int64_t now = esp_timer_get_time();
         if (now >= next_level_log) {
             next_level_log = now + 3000000;
-            ESP_LOGI(TAG, "mic peak L=%d R=%d%s", peak_l, peak_r,
+            ESP_LOGI(TAG, "mic peak L=%d R=%d%s", (int)peak_l, (int)peak_r,
                      audio_io_playback_active() ? " (gated: agent speaking)" : "");
         }
 #endif
@@ -579,11 +607,21 @@ esp_err_t audio_io_capture_start(audio_io_capture_sink_t sink)
     if (s_mic == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Refused rather than ignored, the same way dg_agent_init() and
+     * session_ctl_start() refuse a second call: silently creating a second
+     * producer is the kind of fault that shows up as corrupted audio levels
+     * somewhere else entirely. */
+    if (s_capture_task != NULL) {
+        ESP_LOGE(TAG, "capture already started");
+        return ESP_ERR_INVALID_STATE;
+    }
     s_sink = sink;
 
     /* Priority above playback: a missed read is lost audio, a late write is
      * only a small gap the ring buffer absorbs. */
-    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7, NULL, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCore(capture_task, "audio_cap", 4096, NULL, 7,
+                                &s_capture_task, 1) != pdPASS) {
+        s_capture_task = NULL;
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "capture started: %d frame chunks (%d ms)",

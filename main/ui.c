@@ -100,7 +100,7 @@ static const char *TAG = "ui";
 
 /* How long after the last sample we treat the display as idle. Slightly longer
  * than one producer hop so a late chunk does not flicker everything to flat. */
-#define IDLE_US 250000
+#define IDLE_MS 250
 
 /* ---------------- audio level ---------------- */
 
@@ -304,7 +304,10 @@ static esp_err_t select_face(size_t idx);
 
 /* ---------------- cross-task state ---------------- */
 
-static int64_t s_last_feed_us;
+/* 32-bit ms: written by the audio tasks, read by the LVGL task. Same narrowing
+ * as the stamps in audio_io.c, and for the same reason -- a 64-bit store is two
+ * halves here, so a reader could catch one mid-write. */
+static volatile uint32_t s_last_feed_ms;
 static ui_source_t s_source;
 
 /*
@@ -346,7 +349,7 @@ static volatile uint32_t s_level_peak[2]; /* [0] agent, [1] mic */
  * capture task is gated outright), so a shared stamp would hold the mic channel
  * frozen at its last speech level for the whole reply instead of letting it fall.
  */
-static int64_t s_feed_us[2];
+static volatile uint32_t s_feed_ms[2];
 
 /*
  * The smoothed levels a face reads, one set per source.
@@ -369,6 +372,19 @@ typedef struct {
 } band_state_t;
 static band_state_t s_band[2]; /* [0] agent, [1] mic */
 static bool s_vad_open;
+
+/*
+ * The two crossover poles. Exact, not the x/(1+x) approximation: 2 kHz at 16 kHz
+ * is nowhere near low enough relative to the sample rate for that to hold.
+ *
+ * Resolved once in build_ui() rather than lazily on first use. publish_level()
+ * runs on BOTH audio tasks, and a lazy `if (a1 == 0.0f)` there could be entered
+ * by one task while the other had set a1 and not yet a2 -- leaving a2 at zero for
+ * a block, which collapses the mid and high bands into the input. Neither tap is
+ * attached until ui_start() has returned, so by the time either can be called
+ * these are already written.
+ */
+static float s_pole_low, s_pole_mid;
 
 /*
  * When the microphone last carried actual SPEECH, as opposed to merely carrying
@@ -490,7 +506,8 @@ static volatile bool s_failed;
  */
 #define UI_BEHAVIOUR_NONE ((ui_behaviour_t)0xFF)
 static volatile ui_behaviour_t s_reported = UI_BEHAVIOUR_NONE;
-static volatile int64_t s_reported_us;
+/* 32-bit ms: set on the WebSocket task, read on the LVGL task. */
+static volatile uint32_t s_reported_ms;
 
 /*
  * INITIALIZING is an assembly animation, not a resting state, so it expires.
@@ -501,7 +518,7 @@ static volatile int64_t s_reported_us;
  * would sit there assembling forever. One assemble period is exactly long enough
  * to read as having completed.
  */
-#define INITIALIZING_MAX_US 4000000
+#define INITIALIZING_MAX_MS 4000
 
 /* ---------------- LVGL-owned state ---------------- */
 
@@ -547,13 +564,7 @@ static void publish_level(const int16_t *mono, size_t samples, ui_source_t src)
         return;
     }
 
-    /* Exact poles, not the x/(1+x) approximation: 2 kHz at 16 kHz is nowhere near
-     * low enough relative to the sample rate for that to hold. Computed once. */
-    static float a1, a2;
-    if (a1 == 0.0f) {
-        a1 = 1.0f - expf(-2.0f * (float)M_PI * BAND_LOW_HZ / BAND_SAMPLE_RATE);
-        a2 = 1.0f - expf(-2.0f * (float)M_PI * BAND_MID_HZ / BAND_SAMPLE_RATE);
-    }
+    const float a1 = s_pole_low, a2 = s_pole_mid;
 
     band_state_t *st = &s_band[(src == UI_SRC_MIC) ? 1 : 0];
     float y1 = st->y1, y2 = st->y2;
@@ -640,9 +651,9 @@ static void publish_level(const int16_t *mono, size_t samples, ui_source_t src)
 static void feed(const int16_t *mono, size_t samples, ui_source_t src)
 {
     s_source = src;
-    int64_t now = esp_timer_get_time();
-    s_last_feed_us = now;
-    s_feed_us[(src == UI_SRC_MIC) ? LVL_MIC : LVL_AGENT] = now;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    s_last_feed_ms = now;
+    s_feed_ms[(src == UI_SRC_MIC) ? LVL_MIC : LVL_AGENT] = now;
 
     publish_level(mono, samples, src);
 
@@ -701,7 +712,9 @@ void ui_set_stopped(bool stopped)
 
 void ui_set_behaviour(ui_behaviour_t behaviour)
 {
-    s_reported_us = esp_timer_get_time();
+    /* Stamp before the behaviour, so the frame timer cannot read a new phase
+     * against the previous one's clock. */
+    s_reported_ms = (uint32_t)(esp_timer_get_time() / 1000);
     s_reported = behaviour;
 }
 
@@ -755,6 +768,10 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
     const bool handoff = (was_speaking && !speaking_now);
     was_speaking = speaking_now;
 
+    /* Every clock this function compares against is 32-bit ms now, so convert
+     * once here rather than at each use. */
+    const uint32_t now_ms = (uint32_t)(now_us / 1000);
+
     /*
      * FIRST, and it has to be. The session is stopped for the whole test, so the
      * s_stopped check below would swallow every step into DISCONNECTED.
@@ -795,7 +812,7 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
 
     /* Assembly gets to finish, unless real audio arrives to supersede it. */
     if (reported == UI_BEHAVIOUR_INITIALIZING &&
-        (now_us - s_reported_us) < INITIALIZING_MAX_US) {
+        (now_ms - s_reported_ms) < INITIALIZING_MAX_MS) {
         return UI_BEHAVIOUR_INITIALIZING;
     }
 
@@ -811,7 +828,6 @@ static ui_behaviour_t resolve_behaviour(bool idle, int64_t now_us)
      * Reading last frame's smoothed level: resolve_behaviour runs before
      * update_amp for this frame. One frame of lag on a 5 s hold is nothing.
      */
-    const uint32_t now_ms = (uint32_t)(now_us / 1000);
     /*
      * THE HANDOFF. The moment the agent stops talking, the device is listening --
      * the microphone is open and streaming to Deepgram, and a reply is what it is
@@ -1179,7 +1195,8 @@ static float update_amp(int64_t now_us, bool idle, int sel)
 
         /* Per channel: the mic delivers nothing at all while the agent speaks, so
          * a shared idle would read as "still flowing" and hold it up there. */
-        bool ch_idle = idle || (now_us - s_feed_us[ch]) > IDLE_US;
+        bool ch_idle = idle ||
+                       ((uint32_t)(now_us / 1000) - s_feed_ms[ch]) > IDLE_MS;
 
         float t_amp, t_low, t_mid, t_high;
         if (q > 0) {
@@ -1323,7 +1340,7 @@ static void frame_timer_cb(lv_timer_t *timer)
     s_frame++;
 
     int64_t draw_start_us = esp_timer_get_time();
-    bool idle = (draw_start_us - s_last_feed_us) > IDLE_US;
+    bool idle = ((uint32_t)(draw_start_us / 1000) - s_last_feed_ms) > IDLE_MS;
 
     /*
      * Apply a pending face switch before anything draws, so the new face owns the
@@ -1796,6 +1813,11 @@ static esp_err_t build_ui(void)
      * returns white for an out-of-range index, so a Kconfig list that has drifted
      * out of step with the table degrades to the default look. */
     s_tint_rgb = orb_colors_rgb(CONFIG_UI_DEFAULT_ORB_COLOR);
+
+    /* Before the frame timer and before any tap is attached, which is what makes
+     * publish_level() free of a first-use check. See s_pole_low. */
+    s_pole_low = 1.0f - expf(-2.0f * (float)M_PI * BAND_LOW_HZ / BAND_SAMPLE_RATE);
+    s_pole_mid = 1.0f - expf(-2.0f * (float)M_PI * BAND_MID_HZ / BAND_SAMPLE_RATE);
 
     esp_err_t err = select_face(CONFIG_UI_DEFAULT_FACE);
     if (err != ESP_OK) {

@@ -74,7 +74,22 @@ static volatile uint32_t s_turns;
  * is doing. Deliberately NOT the local VAD in ui.c: tying session lifetime to the
  * display would mean a headless boot never times out, or never stays up.
  */
-static volatile int64_t s_activity_us;
+/*
+ * 32-bit ms, not 64-bit us, and THREE TASKS WRITE IT.
+ *
+ * note_activity() is called from the WebSocket task (the agent's own messages),
+ * the LVGL task (an interrupt, the end of a display test) and this one. A
+ * 64-bit stamp is stored in two halves on this target, so a reader landing
+ * between them saw a time that never existed -- and this clock decides whether
+ * to stop a live session, so a tear either killed one mid-conversation or
+ * disabled the timeout for the next 71 minutes.
+ *
+ * Three writers RACING EACH OTHER is fine and stays fine: every one of them
+ * means "something happened", so last-write-wins is the correct rule and no
+ * ownership needs assigning. What was never fine was a torn read, and 32 bits
+ * is what removes it.
+ */
+static volatile uint32_t s_activity_ms;
 
 /*
  * Set when the server rejects the API key, cleared when a socket comes up.
@@ -105,14 +120,14 @@ static volatile bool s_bad_key_notice;
 /* While waiting for the speaker to drain before the display test. */
 #define TEST_ENTRY_POLL_MS 100
 
-static void note_activity(void)
-{
-    s_activity_us = esp_timer_get_time();
-}
-
 static inline uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static void note_activity(void)
+{
+    s_activity_ms = now_ms();
 }
 
 /*
@@ -407,8 +422,12 @@ static void on_reload_required(void *ctx)
  * Set when the agent has asked for the display test, cleared once the speaker has
  * actually finished the sentence announcing it. See enter_display_test().
  */
-static bool s_test_entry_pending;
-static int64_t s_test_entry_deadline_us;
+/* volatile, like every other cross-task flag in this file: set on the WebSocket
+ * task, read and cleared on this one. */
+static volatile bool s_test_entry_pending;
+/* 32-bit ms, same reason as s_activity_ms -- written by the WebSocket task and
+ * read here. */
+static volatile uint32_t s_test_entry_deadline_ms;
 
 /* How long to wait for the speaker to drain before starting anyway. Long enough
  * for a sentence the agent has already finished sending, short enough that a
@@ -419,7 +438,7 @@ static int64_t s_test_entry_deadline_us;
  * as. A reply longer than 8 s of audio still gets cut off mid-word -- the exact
  * fault the comment above enter_display_test() says this deferral exists to
  * prevent. Unmeasured: no logged reply has been long enough to trip it. */
-#define TEST_ENTRY_WAIT_US (8 * 1000000)
+#define TEST_ENTRY_WAIT_MS (8 * 1000)
 
 static void enter_display_test(void)
 {
@@ -448,8 +467,10 @@ static void on_display_test_required(void *ctx)
      * audio_io_playback_active() to go false, which is tied to what the speaker
      * is actually doing rather than to what the agent last claimed.
      */
+    /* Deadline before the flag, so the loop cannot see the request with a stale
+     * deadline behind it. */
+    s_test_entry_deadline_ms = now_ms() + TEST_ENTRY_WAIT_MS;
     s_test_entry_pending = true;
-    s_test_entry_deadline_us = esp_timer_get_time() + TEST_ENTRY_WAIT_US;
 }
 
 static void on_agent_audio_done(void *ctx)
@@ -739,7 +760,8 @@ void app_main(void)
          */
         if (s_test_entry_pending) {
             bool drained = !audio_io_playback_active();
-            bool timed_out = esp_timer_get_time() > s_test_entry_deadline_us;
+            /* Wrap-safe, like the mute deadline below. */
+            bool timed_out = (now_ms() - s_test_entry_deadline_ms) < (UINT32_MAX / 2);
             if (drained || timed_out) {
                 s_test_entry_pending = false;
                 ESP_LOGI(TAG, "EVT test entering (%s)",
@@ -785,7 +807,7 @@ void app_main(void)
          * timeout at 85.9 s, and the recovered session live at 86.4 s and stopped
          * 2 ms later by a request issued before it came back.
          *
-         * Gating the check is only half of it. s_activity_us keeps accumulating
+         * Gating the check is only half of it. s_activity_ms keeps accumulating
          * while the socket is down, so a gate alone would not save the session --
          * it would defer the kill to the exact moment readiness returned, with the
          * clock already past the limit. Which is the symptom, not a fix.
@@ -878,11 +900,12 @@ void app_main(void)
         }
 
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
-            ready_now && s_activity_us != 0) {
-            int64_t quiet_us = esp_timer_get_time() - s_activity_us;
-            if (quiet_us > (int64_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000000) {
+            ready_now && s_activity_ms != 0) {
+            /* Unsigned, so correct across the 49.7-day wrap. */
+            uint32_t quiet_ms = now_ms() - s_activity_ms;
+            if (quiet_ms > (uint32_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000) {
                 ESP_LOGI(TAG, "EVT idletimeout after=%.1fs",
-                         (double)quiet_us / 1000000.0);
+                         (double)quiet_ms / 1000.0);
                 session_ctl_request_stop();
                 /* So the next window does not ask again while the stop is in
                  * flight -- session_ctl has its own cooldown to respect. */
@@ -910,6 +933,7 @@ void app_main(void)
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
+                 " txdrop=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
                  " ialloc=%u",
                  (double)esp_timer_get_time() / 1000000.0,
@@ -921,7 +945,7 @@ void app_main(void)
                  t.mid_avg, t.mid_max, t.high_avg, t.high_max,
                  t.peak_mic, t.peak_agent,
                  s_turns, captured, s_audio_bytes, played, dropped,
-                 dg_agent_audio_dropped(),
+                 dg_agent_audio_dropped(), dg_agent_transport_dropped(),
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),

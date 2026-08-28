@@ -791,6 +791,27 @@ bool orb_init(float size)
             lon_count = 1;
         }
 
+        /*
+         * THE CAP IS HAND-COMPUTED AND NOTHING CHECKED IT UNTIL NOW.
+         *
+         * ORB_VOICE_DOTS sizes the pooled lattice above, but the count comes
+         * from this loop's arithmetic over ORB_RINGS and ORB_LON_DENSITY -- and
+         * those are tuning knobs the header explicitly invites moving ("Reduce a
+         * mode's tuning if a frame is too dear"). They agree today, at exactly
+         * 456. Nudge either and the writes below would run off a PSRAM block
+         * with nothing to stop them, which is a corruption bug somewhere else
+         * rather than a short orb.
+         *
+         * Failing the boot is the right answer: face_orb's init() turns this
+         * into ESP_ERR_NO_MEM, select_face() logs it by name, and the device
+         * carries on headless -- loud, and cheaper than the alternative. There
+         * is no ESP_LOGE here because this file stays free of ESP-IDF so
+         * host/run.sh can compile it.
+         */
+        if (n + lon_count > ORB_VOICE_DOTS) {
+            return false;
+        }
+
         s_rings[ri].sin_lat = sin_lat;
         s_rings[ri].cos_lat = cos_lat;
         s_rings[ri].lon_count = lon_count;
@@ -820,6 +841,13 @@ bool orb_init(float size)
         int lon_count = (int)lroundf(fabsf(cos_lat) * (float)WAVE_LON_DENSITY);
         if (lon_count < 1) {
             lon_count = 1;
+        }
+
+        /* Same guard as the shell's, against ORB_WAVE_DOTS. Currently 384, and
+         * this lattice feeds s_wave_unit as three doubles per dot as well, so an
+         * overrun here walks two allocations rather than one. */
+        if (wn + lon_count > ORB_WAVE_DOTS) {
+            return false;
         }
 
         s_wave_rings[ri].sin_lat = sin_lat;

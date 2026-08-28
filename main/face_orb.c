@@ -118,6 +118,22 @@ static orb_mode_t mode_for(ui_behaviour_t b)
 #define MODE_BLEND_MS BLEND_MS
 
 /*
+ * The geometry/raster split, on the bench only.
+ *
+ * OFF BY DEFAULT because ESP_LOGI on the LVGL task blocks on the UART for most
+ * of a frame, which corrupts this measurement and ui.c's telemetry alongside it
+ * -- see the note above the accumulator in ui.c. Every 60 frames is one spoiled
+ * frame every 2.4 s, inside the window tlm_accumulate_frame() is averaging.
+ *
+ * TLM's draw= carries the total cost in normal operation. Flip this when the
+ * split between geometry and raster is specifically what you are after, and read
+ * the numbers knowing the frame each one landed in is not representative. The
+ * figures in orb_raster.c's header came from exactly this, which is the argument
+ * for keeping it rather than deleting it.
+ */
+#define ORB_LOG_TIMINGS 0
+
+/*
  * The outgoing animation during a cross-mode fade, and the second frame it needs.
  *
  * PSRAM, like the primary frame and for the same reason -- 32 kB of dot list has
@@ -216,9 +232,17 @@ static void scale_alpha(orb_frame_t *f, float k)
  * threshold -- most of a frame, late in a transition, so this is what keeps the
  * doubled cost from being a doubled cost for the whole 280 ms.
  *
- * No re-sort. The rasteriser buckets by row band rather than trusting draw order,
- * and both halves arrive already sorted, so an interleaved pair is drawn correctly
- * without paying for a second qsort over 840 dots.
+ * No re-sort, and the reason is narrower than this comment used to claim. The
+ * row-band bucketing is real but it belongs to the GEOMETRY, not the rasteriser:
+ * cmp_draw_order() in orb_geometry.c sorts by y band and then by depth, and
+ * orb_raster_draw() simply blits the array in order. So both halves arrive sorted
+ * the same way, which is not the same thing as their concatenation being sorted.
+ *
+ * Left unsorted deliberately: a second qsort over 840 dots every frame, to fix
+ * the depth order of two overlapping animations that are both fading, during the
+ * ~7 frames a transition lasts. If a cross-mode fade ever looks wrong, this is
+ * the place to look -- but measure the qsort before adding it, because the raster
+ * beneath it is already the most expensive thing in the frame (see orb_raster.c).
  */
 static void append_frame(orb_frame_t *a, const orb_frame_t *b)
 {
@@ -344,7 +368,9 @@ static void render(const ui_render_ctx_t *ctx)
      * blends scattered across a 434 kB PSRAM buffer. Those fail very differently,
      * so measure them apart before optimising either.
      */
-    int64_t t_geom = esp_timer_get_time();
+#if ORB_LOG_TIMINGS
+    const int64_t t_geom = esp_timer_get_time();
+#endif
     const orb_bands_t bands = {
         .low = ctx->band_low,
         .mid = ctx->band_mid,
@@ -421,13 +447,16 @@ static void render(const ui_render_ctx_t *ctx)
         scale_alpha(s_frame_b, 1.0f - mode_mix);
         append_frame(s_frame, s_frame_b);
     }
-    int64_t t_rast = esp_timer_get_time();
+#if ORB_LOG_TIMINGS
+    const int64_t t_rast = esp_timer_get_time();
+#endif
     /* Colour is the user's, resolved by ui.c. Nothing to latch or reset: it is a
      * pure draw parameter, so a change lands on the next frame by itself -- which
      * is also why activate() has nothing to say about it. */
     orb_raster_draw(s_frame, ctx->tint_rgb);
-    int64_t t_end = esp_timer_get_time();
 
+#if ORB_LOG_TIMINGS
+    const int64_t t_end = esp_timer_get_time();
     static int64_t geom_sum, rast_sum;
     static uint32_t n;
     geom_sum += t_rast - t_geom;
@@ -439,6 +468,7 @@ static void render(const ui_render_ctx_t *ctx)
         geom_sum = rast_sum = 0;
         n = 0;
     }
+#endif
 }
 
 const ui_face_t ui_face_orb = {
