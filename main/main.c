@@ -120,6 +120,24 @@ static volatile bool s_bad_key_notice;
 /* While waiting for the speaker to drain before the display test. */
 #define TEST_ENTRY_POLL_MS 100
 
+/*
+ * How long the device stays stopped before it sleeps.
+ *
+ * Measured either side of this: with a session up the board runs the panel at
+ * full brightness and ~29 fps, Wi-Fi with modem sleep disabled, and both codecs
+ * clocked -- and it stays that way when the session ends, which is 88% of its
+ * life. That is where the heat was going.
+ *
+ * Thirty seconds AFTER the session stops, and the session itself stops after
+ * CONFIG_SESSION_IDLE_TIMEOUT_S of quiet, so this lands about 45 s after anyone
+ * last spoke. Long enough that a pause in a conversation never reaches it.
+ *
+ * PROVISIONING NEEDS NO GUARD, though it looks like it should: enter_provisioning()
+ * is noreturn and runs before the loop below, so the timer can never engage while
+ * the setup QR is on screen.
+ */
+#define SLEEP_AFTER_STOPPED_MS 30000
+
 static inline uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
@@ -780,6 +798,48 @@ void app_main(void)
         if (s_mute_deadline_ms != 0 &&
             (now_ms() - s_mute_deadline_ms) < (UINT32_MAX / 2)) {
             end_interrupt("deadline");
+        }
+
+        /*
+         * SLEEP, and the radio follows the panel rather than the other way round.
+         *
+         * ui_set_sleep() is only a request: the frame timer applies it on the LVGL
+         * task, and it refuses while the display test is running. A touch withdraws
+         * it and wakes the panel there and then, without telling this loop. So the
+         * panel is the source of truth and ui_is_asleep() is what the Wi-Fi radio
+         * tracks -- which is why the wake edge below is detected rather than
+         * assumed.
+         *
+         * The microphone is absent from all this deliberately. The capture task
+         * parks and closes the ES7210 itself whenever nothing downstream wants
+         * samples, which the stop already arranged 30 s earlier; see the park
+         * block in audio_io.c.
+         */
+        static uint32_t stopped_since_ms;
+        static bool prev_asleep;
+        static bool radio_saving;
+        const bool panel_asleep = ui_is_asleep();
+
+        if (prev_asleep && !panel_asleep) {
+            /* Something woke the panel -- a finger, almost always. Start counting
+             * again from now rather than sleeping straight back down. */
+            stopped_since_ms = now_ms();
+        }
+        prev_asleep = panel_asleep;
+
+        if (session_ctl_is_running()) {
+            stopped_since_ms = 0;
+            ui_set_sleep(false);
+        } else if (stopped_since_ms == 0) {
+            stopped_since_ms = now_ms();
+        } else if (!panel_asleep &&
+                   (now_ms() - stopped_since_ms) > SLEEP_AFTER_STOPPED_MS) {
+            ui_set_sleep(true);
+        }
+
+        if (panel_asleep != radio_saving) {
+            wifi_sta_set_power_save(panel_asleep);
+            radio_saving = panel_asleep;
         }
 
         uint32_t played, dropped, captured;

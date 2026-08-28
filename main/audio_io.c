@@ -43,6 +43,10 @@ static const char *TAG = "audio_io";
 #define RING_BYTES  (384 * 1024)
 #define CHUNK_MONO  1024
 
+/* How often a parked capture task looks to see whether it is wanted again. The
+ * whole of this is hidden behind the WebSocket handshake on the way back up. */
+#define CAPTURE_PARK_POLL_MS 100
+
 /* The drain task waits in bounded slices rather than forever so it can notice a
  * flush request itself. A stream buffer cannot be reset while a reader is
  * blocked on it, so the reader has to be the one to do the draining. */
@@ -143,6 +147,9 @@ static volatile bool s_capture_enabled = true;
  * audio_io_capture_set_monitor() in the header for why it exists. */
 static volatile bool s_monitor;
 static int s_rate;
+/* The format both codecs were opened with. File scope so capture_task can
+ * reopen the microphone after parking it; see the park block in that task. */
+static esp_codec_dev_sample_info_t s_fs;
 
 /*
  * Sample-alignment carries -- the fix for intermittent loud static.
@@ -280,7 +287,55 @@ static void capture_task(void *arg)
     int64_t next_level_log = 0;
 #endif
 
+    /* The microphone is open on entry -- audio_io_init() opened it. */
+    bool mic_open = true;
+
     while (1) {
+#if !CONFIG_AUDIO_CAPTURE_ALWAYS
+        /*
+         * PARK BEFORE THE READ, not after the downmix.
+         *
+         * The session gate further down has always stopped samples reaching the
+         * network, which is what it was written for -- but it sits BELOW the
+         * read, so a stopped device still pulled 5,120 B off the ES7210 and ran
+         * this loop's 1,280-sample downmix 12.5 times a second before throwing
+         * the result away. That is 88% of this device's life.
+         *
+         * The condition is "nobody downstream wants samples", which the existing
+         * state already answers: the session gate is shut AND monitor mode is off.
+         * Monitor mode is the display test feeding the orb with no session, so it
+         * has to keep the microphone running.
+         *
+         * While parked the codec is CLOSED, which stops the ADC and the I2S clock
+         * rather than merely ignoring them -- and closing it here, from the task
+         * that reads it, is the only safe place to do so. Closing a codec another
+         * task is blocked inside esp_codec_dev_read() on is a race with no upside.
+         *
+         * Waking costs one poll interval plus the open, against the 1.1-6.0 s the
+         * WebSocket handshake takes; see the note on CONNECTING in main.c.
+         */
+        if (!s_capture_enabled && !s_monitor) {
+            if (mic_open) {
+                esp_codec_dev_close(s_mic);
+                mic_open = false;
+                ESP_LOGI(TAG, "microphone parked");
+            }
+            vTaskDelay(pdMS_TO_TICKS(CAPTURE_PARK_POLL_MS));
+            continue;
+        }
+        if (!mic_open) {
+            /* Gain before open, mirroring audio_io_init()'s order. */
+            esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
+            int oerr = esp_codec_dev_open(s_mic, &s_fs);
+            if (oerr != ESP_CODEC_DEV_OK) {
+                ESP_LOGE(TAG, "microphone reopen failed: %d", oerr);
+                vTaskDelay(pdMS_TO_TICKS(CAPTURE_PARK_POLL_MS));
+                continue;
+            }
+            mic_open = true;
+            ESP_LOGI(TAG, "microphone resumed");
+        }
+#endif
         int err = esp_codec_dev_read(s_mic, stereo, (int)stereo_bytes);
         if (err != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "esp_codec_dev_read failed: %d", err);
@@ -520,12 +575,14 @@ esp_err_t audio_io_init(int sample_rate)
 
     s_rate = sample_rate;
 
-    /* One sample_info for both: they share the I2S clock. */
-    esp_codec_dev_sample_info_t fs = {
+    /* One sample_info for both: they share the I2S clock. Kept at file scope so
+     * the capture task can reopen the microphone with exactly this format. */
+    s_fs = (esp_codec_dev_sample_info_t){
         .sample_rate     = sample_rate,
         .channel         = CODEC_CHANNELS,
         .bits_per_sample = CODEC_BITS,
     };
+    esp_codec_dev_sample_info_t fs = s_fs;
 
     /*
      * Replace the stock volume curve, always -- not just when adding gain.

@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 
 /*
@@ -49,3 +51,14 @@ esp_err_t wifi_sta_wait_connected(int timeout_ms);
  * cheerfully call esp_wifi_connect() underneath the portal.
  */
 esp_err_t wifi_sta_stop(void);
+
+/*
+ * Turn Wi-Fi modem sleep on or off.
+ *
+ * On while the device is asleep, off while a session is live -- modem sleep adds
+ * tens of ms of jitter, which matters to a 16 kHz audio stream and to nothing
+ * else. Safe from any task; failures are logged rather than returned, because
+ * there is no useful way for a caller to react.
+ */
+void wifi_sta_set_power_save(bool enabled);
+
