@@ -22,6 +22,22 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # A COMMITTED sdkconfig would carry a menuconfig-seeded API key into the
+      # published image. It is gitignored, so this should never fire -- which is
+      # exactly why it is cheap to assert before publishing a binary.
+      #
+      # This has to run BEFORE the build, on the checkout as it came out of git:
+      # idf.py generates a sdkconfig from sdkconfig.defaults, so afterwards the
+      # file always exists and says nothing about what was committed.
+      - name: Refuse to publish a seeded build
+        shell: bash
+        run: |
+          if [ -f sdkconfig ]; then
+            echo "A sdkconfig is committed -- it may contain an API key or Wi-Fi" >&2
+            echo "password. Refusing to publish. See SECURITY.md." >&2
+            exit 1
+          fi
+
       # Same tracked-defaults-only build as CI: the published image carries no
       # API key and no network, so it boots into the provisioning portal.
       - name: Build
@@ -30,18 +46,6 @@ jobs:
           . "$IDF_PATH/export.sh"
           idf.py set-target esp32s3
           idf.py build
-
-      # A committed sdkconfig would carry a menuconfig-seeded API key into the
-      # published image. It is gitignored, so this should never fire -- which is
-      # exactly why it is cheap to assert before publishing a binary.
-      - name: Refuse to publish a seeded build
-        shell: bash
-        run: |
-          if [ -f sdkconfig ]; then
-            echo "A sdkconfig is present in a clean checkout -- it may contain an" >&2
-            echo "API key or Wi-Fi password. Refusing to publish. See SECURITY.md." >&2
-            exit 1
-          fi
 
       # One image at offset 0 -- bootloader, partition table and app together --
       # so flashing needs no knowledge of this project's custom partitions.csv.
