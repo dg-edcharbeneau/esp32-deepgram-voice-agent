@@ -385,12 +385,21 @@ flowchart TB
     save -.->|"reboot"| boot0
 ```
 
-The page `GET /` serves is `main/portal.html`, embedded through
+The page `GET /` serves is `main/portal.src.html`, embedded through
 `EMBED_TXTFILES` exactly as the prompt blocks are, so it is editable as HTML and
 openable in a browser rather than being a C string literal in `wifi_prov.c`. It
 carries its own CSS and script inline and may not reference an external asset: a
 second request is a second chance for a captive-portal webview to wander off to
 its connectivity check. `host/portal.sh` previews it.
+
+What actually gets embedded is the minified page `main/minify_html.py` writes
+into the build directory, which is why the source can stay commented and
+indented. The minifier is deliberately timid: it collapses CSS, but only strips
+comments and indentation from the script, and copies `<svg>` subtrees byte for
+byte. Joining JS lines means reasoning about semicolon insertion, and the
+wordmark is one long `<path d>` that a careless whitespace collapse would bend
+into a slightly wrong glyph -- both are bugs you would find by flashing and
+squinting, on the one page a bricked device needs you to reach.
 
 Holding BOOT for 3 seconds erases the saved network and reboots straight into
 the portal. `GPIO 0` is polled after startup rather than sampled at reset — held

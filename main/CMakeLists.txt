@@ -25,7 +25,12 @@ idf_component_register(
     EMBED_TXTFILES
         # The captive-portal setup page, served verbatim by wifi_prov.c. It was a
         # C string literal until it grew past the point of being editable.
-        portal.html
+        #
+        # Note the build directory: what gets embedded is the minified page that
+        # the custom command below generates from portal.src.html. Edit the .src
+        # file. The generated name is kept as portal.html so the embed symbol
+        # stays _binary_portal_html_start and wifi_prov.c does not have to care.
+        ${CMAKE_CURRENT_BINARY_DIR}/portal.html
         # The persona, one named block per file. Order lives in agent_prompt.c,
         # not here -- this list only decides what gets embedded.
         prompt/formatting.md
@@ -53,3 +58,18 @@ idf_component_register(
         espressif__esp-dsp
         espressif__button
 )
+
+# Minify the portal page into the build directory before it is embedded, so the
+# source can stay commented and indented without spending the bytes in flash.
+# The DEPENDS list is what makes an edit to either file rebuild the page.
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/portal.html
+    COMMAND ${python} ${COMPONENT_DIR}/minify_html.py
+            ${COMPONENT_DIR}/portal.src.html
+            ${CMAKE_CURRENT_BINARY_DIR}/portal.html
+    DEPENDS ${COMPONENT_DIR}/portal.src.html
+            ${COMPONENT_DIR}/minify_html.py
+    COMMENT "Minifying portal.src.html"
+    VERBATIM)
+add_custom_target(portal_html DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/portal.html)
+add_dependencies(${COMPONENT_LIB} portal_html)

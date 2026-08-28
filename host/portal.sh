@@ -5,7 +5,7 @@
 #   ./portal.sh --key-set    the same, but with a key already in NVS
 #   ./portal.sh --raw        the file untouched, so /scan really fails
 #
-# main/portal.html can be opened directly -- it is a plain file, that being the
+# main/portal.src.html can be opened directly -- it is a plain file, that being the
 # point of embedding it rather than keeping it a C string. What you get that way
 # is the scan-FAILED state, because there is no device answering /scan: a real
 # state worth checking, and what --raw gives you.
@@ -30,7 +30,7 @@ mkdir -p build
 OUT=build/portal-preview.html
 
 if [ -n "$RAW" ]; then
-    cp ../main/portal.html "$OUT"
+    cp ../main/portal.src.html "$OUT"
 else
     # Inserted before the page's own <script>, so its fetch() calls see the shim.
     cat > build/portal_shim.html <<EOF
@@ -52,7 +52,7 @@ window.fetch = function (u) {
 EOF
     awk 'BEGIN{done=0}
          /^<script>$/ && !done { while ((getline line < "build/portal_shim.html") > 0) print line; done=1 }
-         {print}' ../main/portal.html > "$OUT"
+         {print}' ../main/portal.src.html > "$OUT"
 fi
 
 echo "wrote $OUT"

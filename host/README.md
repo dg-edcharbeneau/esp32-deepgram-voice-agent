@@ -93,7 +93,7 @@ in the real `faces.h` and with it cJSON.
 
 ## Captive-portal preview
 
-Opens `main/portal.html` in a browser, so a wording or layout change costs a
+Opens `main/portal.src.html` in a browser, so a wording or layout change costs a
 second instead of a flash and a re-provision.
 
     ./portal.sh              three fake networks, no key stored
