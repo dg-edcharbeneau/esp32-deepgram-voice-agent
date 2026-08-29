@@ -24,6 +24,7 @@
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
+img{max-width:100%;height:auto}
 body{
   margin:0; background:var(--ink); color:var(--fg);
   font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
@@ -116,8 +117,11 @@ section{padding-block:var(--sp);border-top:1px solid var(--line)}
 /* ---- get it: also a real sequence ---- */
 .get{display:grid;grid-template-columns:1fr 1fr;gap:clamp(24px,3.5vw,44px);align-items:start}
 .portal{margin:0;position:sticky;top:32px}
-.portal img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:16px;background:#000}
-.portal figcaption{margin-top:14px;font-size:13px;color:var(--fg-faint)}
+.portal img{
+  display:block;width:auto;max-width:100%;max-height:min(760px,78vh);margin-inline:auto;
+  border:1px solid var(--line);border-radius:16px;background:#000;
+}
+.portal figcaption{margin-top:14px;font-size:13px;color:var(--fg-faint);text-align:center}
 .steps{display:grid;gap:18px;counter-reset:s -1}
 .step{display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:start;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px}
 .step::before{
@@ -137,7 +141,8 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
 
 @media (max-width:900px){
   .get{grid-template-columns:1fr}
-  .portal{position:static;max-width:420px;margin-inline:auto}
+  .portal{position:static}
+  .portal img{max-height:70vh}
   .path{grid-template-columns:1fr;gap:12px}
   .arrow{transform:rotate(90deg);justify-self:center}
 }
@@ -165,8 +170,9 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
       <p class="lede">Microphone to Deepgram to speaker, over <b>one WebSocket</b>, held open by the board itself. No phone in the loop. No laptop. No bridge process on your desk pretending to be the device.</p>
       <div class="cta-row">
         <a class="btn" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent">Build it yourself →</a>
-        <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/releases/latest">Download the firmware</a>
+        <a class="btn-2" href="https://a.co/d/09ht3XX8">Buy the hardware</a>
         <a class="btn-2" href="https://console.deepgram.com/signup">Get your FREE API Key</a>
+        <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/releases/latest">Download the firmware</a>
       </div>
       <div class="hero-meta">
         <span><i class="dot"></i>Apache-2.0</span>
