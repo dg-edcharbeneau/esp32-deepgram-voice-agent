@@ -5,6 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Deepgram Agent Device</title>
 <meta name="description" content="A voice agent that runs entirely on a $40 ESP32-S3 dev board. Mic to Deepgram to speaker, over one WebSocket.">
+<!-- The page paints every surface, so tell the UA too: without this the
+     scrollbar and any form chrome come up light against a black page. -->
+<meta name="color-scheme" content="dark">
+
+<!-- Absolute URLs on purpose. Crawlers do not resolve relative paths, so a
+     relative og:image is the same as no card at all. -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Deepgram Agent Device">
+<meta property="og:description" content="A voice agent that runs entirely on a $40 ESP32-S3 dev board. Mic to Deepgram to speaker, over one WebSocket.">
+<meta property="og:url" content="https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/">
+<meta property="og:image" content="https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/images/device-orb.png">
+<meta property="og:image:alt" content="The round device on a black surface, its display showing a sphere of blue dots.">
+<meta name="twitter:card" content="summary_large_image">
+
+<!-- The .hair bar, shrunk to a disc. Inline so the page ships no extra asset
+     and the icon cannot fall out of sync with the palette below. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%23f3b6e0'/%3E%3Cstop offset='.33' stop-color='%23f7a878'/%3E%3Cstop offset='.66' stop-color='%23a8ecd3'/%3E%3Cstop offset='1' stop-color='%2338bdf8'/%3E%3C/linearGradient%3E%3Crect width='32' height='32' rx='7' fill='%230e0e10'/%3E%3Ccircle cx='16' cy='16' r='9' fill='url(%23g)'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@700;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -18,8 +35,12 @@
   --panel:#161619;        /* raised surface */
   --line:#26262b;         /* hairlines, biased blue to sit with the accent */
   --fg:#f2f3f5;
-  --fg-dim:#a1a3ab;
-  --fg-faint:#6f717a;
+  --fg-dim:#a1a3ab;       /* 7.6:1 on --ink */
+  --fg-faint:#83858e;     /* 5.2:1 on --ink -- the floor, not a suggestion:
+                             this carries eyebrows, captions and the footer,
+                             all small and all normal weight, so AA wants
+                             4.5:1 and the large-text exemption never applies.
+                             Anything darker fails. */
   --sp:clamp(56px,7vw,104px);
 }
 *{box-sizing:border-box}
@@ -79,7 +100,9 @@ nav svg{display:block;width:118px;height:auto;color:var(--fg)}
 .btn-2:hover,.btn-2:focus-visible{border-color:var(--fg-faint);background:var(--panel)}
 .hero-meta{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:13px;color:var(--fg-faint)}
 .hero-meta span{display:inline-flex;align-items:center;gap:7px}
-.dot{width:5px;height:5px;border-radius:50%;background:var(--mint)}
+/* Painted, not marked up: the dot is decoration, and an empty <i> for it would
+   sit in the accessibility tree saying nothing. */
+.hero-meta span::before{content:"";width:5px;height:5px;flex:none;border-radius:50%;background:var(--mint)}
 
 .hero-shot{border:1px solid var(--line);border-radius:20px;overflow:hidden;background:#000}
 .hero-shot img{display:block;width:100%;height:auto}
@@ -116,6 +139,12 @@ section{padding-block:var(--sp);border-top:1px solid var(--line)}
 
 /* ---- get it: also a real sequence ---- */
 .get{display:grid;grid-template-columns:1fr 1fr;gap:clamp(24px,3.5vw,44px);align-items:start}
+/* Grid and flex items default to min-width:auto, which means "never shrink below
+   my content". The flash command is one ~60ch unbreakable line, so without this
+   it pushes .step -> .steps -> .get -> the page wider than the phone, and the
+   overflow-x below never gets a chance to fire. Every ancestor between the
+   scroll container and the wide content has to opt out. */
+.get>*,.steps>*,.step>*{min-width:0}
 .portal{margin:0;position:sticky;top:32px}
 .portal img{
   display:block;width:auto;max-width:100%;max-height:min(760px,78vh);margin-inline:auto;
@@ -130,7 +159,10 @@ section{padding-block:var(--sp);border-top:1px solid var(--line)}
 }
 .step h3{margin-bottom:8px}
 .step p{font-size:15px;color:var(--fg-dim)}
-.step code{display:block;margin-top:12px;background:#08080a;border:1px solid var(--line);border-radius:9px;padding:13px 15px;font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--fg);overflow-x:auto;white-space:pre}
+/* <pre>, not a bare <code>: the line break in the flash command is content, and
+   in a <code> it survives only as long as this stylesheet does. */
+.step pre{margin:12px 0 0;background:#08080a;border:1px solid var(--line);border-radius:9px;padding:13px 15px;overflow-x:auto;max-width:100%}
+.step pre code{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--fg)}
 
 footer{border-top:1px solid var(--line);padding:40px 0 64px;display:flex;flex-wrap:wrap;gap:18px 32px;justify-content:space-between;align-items:center;font-size:14px;color:var(--fg-faint)}
 footer a{color:var(--fg-dim);text-decoration:none}
@@ -146,12 +178,21 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
   .path{grid-template-columns:1fr;gap:12px}
   .arrow{transform:rotate(90deg);justify-self:center}
 }
+/* Later than the rest on purpose. Two columns of asks still read on a tablet;
+   it is the phone, where a card is ~150px wide minus its padding, that turns
+   every quote into four lines. */
+@media (max-width:640px){
+  .asks{grid-template-columns:1fr}
+}
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.001ms !important;transition-duration:.001ms !important}
 }
 </style>
 </head>
 <body>
+
+<!-- The mark is used twice; the path data is defined once. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><symbol id="gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.88-2.91-2.79 0-.82.29-1.49.77-2.01-.08-.2-.34-1 .07-2.08 0 0 .62-.2 2.03.77a6.9 6.9 0 0 1 1.85-.25c.63 0 1.26.08 1.85.25 1.41-.98 2.03-.77 2.03-.77.41 1.08.15 1.88.07 2.08.48.52.77 1.18.77 2.01 0 1.92-1.14 2.59-2.92 2.79.3.26.56.76.56 1.54 0 1.07-.01 1.94-.01 2.21 0 .21.15.46.55.38A7.99 7.99 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></symbol></svg>
 
 <div class="hair"></div>
 
@@ -160,7 +201,7 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
     <svg viewBox="0 0 800 155" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Deepgram">
       <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M91.6075 17.8668C102.954 29.3925 109.056 44.6272 108.816 60.7592V60.7393C108.318 93.2226 81.019 119.644 47.9773 119.644H1.55537C0.677983 119.644 0.239288 118.587 0.857449 117.949L23.4502 95.2366C23.8291 94.8578 24.3276 94.6384 24.866 94.6384H48.416C67.3596 94.6384 83.2324 79.4835 83.7907 60.8789C84.0699 51.3871 80.5803 42.4138 73.96 35.5941C67.3397 28.7744 58.4661 25.0255 48.9942 25.0255H25.0255V63.7503C25.0255 64.0893 24.7663 64.3485 24.4273 64.3485H0.59822C0.259229 64.3485 0 64.0893 0 63.7503V0.598196C0 0.259204 0.259229 0 0.59822 0H48.9942C65.1263 0 80.2612 6.34112 91.6075 17.8668ZM159.645 32.0842C130.452 32.0842 117.132 54.4577 117.132 76.3126L117.112 76.3326C117.112 98.0281 132.147 120.9 161.34 120.9C182.238 120.9 198.47 109.255 202.178 91.0687C202.258 90.6899 201.959 90.3309 201.58 90.3309H179.546C179.287 90.3309 179.067 90.5104 178.987 90.7696C176.973 97.8286 170.712 101.438 161.34 101.438C149.396 101.438 141.718 93.9203 140.003 81.7963H201.261C201.58 81.7963 201.839 81.577 201.859 81.2579C202.019 79.4234 202.159 77.0505 202.159 74.0993C202.159 54.4577 188.838 32.0842 159.645 32.0842ZM159.645 49.4925C171.091 49.4925 177.751 57.1696 178.429 66.7411H140.342C142.396 54.7767 148.897 49.4925 159.645 49.4925ZM212.568 76.3126C212.568 54.4577 225.888 32.0842 255.081 32.0842C284.274 32.0842 297.595 54.4577 297.595 74.0993C297.595 77.0505 297.455 79.4234 297.295 81.2579C297.276 81.577 297.016 81.7963 296.697 81.7963H235.44C237.154 93.9203 244.832 101.438 256.776 101.438C266.148 101.438 272.41 97.8286 274.424 90.7696C274.503 90.5104 274.723 90.3309 274.982 90.3309H297.016C297.395 90.3309 297.694 90.6899 297.615 91.0687C293.906 109.255 277.674 120.9 256.776 120.9C227.583 120.9 212.548 98.0281 212.548 76.3326L212.568 76.3126ZM273.865 66.7411C273.187 57.1696 266.527 49.4925 255.081 49.4925C244.333 49.4925 237.832 54.7767 235.779 66.7411H273.865ZM333.947 33.4601H311.414V33.4202C311.075 33.4202 310.815 33.6795 310.815 34.0185V153.722C310.815 154.061 311.075 154.321 311.414 154.321H333.947C334.285 154.321 334.545 154.061 334.545 153.722V111.807C339.151 117.61 347.526 120.86 357.257 120.86C382.023 120.86 398.754 103.272 398.754 76.4722C398.754 49.6719 383.379 32.0842 359.132 32.0842C348.025 32.0842 339.669 36.192 334.545 42.8522V34.0583C334.545 33.7194 334.285 33.4601 333.947 33.4601ZM375.184 76.4921C375.184 90.8294 366.829 100.401 354.186 100.401C341.564 100.401 333.189 90.989 333.189 76.4921C333.189 61.9952 341.564 52.4237 354.186 52.4237C366.809 52.4237 375.184 62.1548 375.184 76.4921ZM433.451 136.315C433.829 135.936 434.328 135.736 434.866 135.736H459.074C466.412 135.736 471.537 129.934 471.537 122.077V110.811C467.09 117.132 458.037 120.881 447.967 120.881C422.523 120.881 407.328 103.293 407.328 76.4926C407.328 49.6923 422.523 32.1047 447.628 32.1047C458.217 32.1047 466.572 36.033 471.537 42.0152V34.0788C471.537 33.7398 471.796 33.4805 472.135 33.4805H494.668C495.007 33.4805 495.267 33.7398 495.267 34.0788V124.669C495.267 142.436 482.465 154.381 463.003 154.381H417.877C416.98 154.381 416.541 153.304 417.179 152.686L433.451 136.355V136.315ZM451.736 100.382C464.717 100.382 472.913 90.9895 472.913 76.4727C472.913 61.9559 464.717 52.4043 451.736 52.4043C438.755 52.4043 430.739 61.9758 430.739 76.4727C430.739 90.9696 439.114 100.382 451.736 100.382ZM536.484 118.906V77.669H536.504C536.504 62.9727 541.788 53.2416 553.573 53.2416H567.153C567.492 53.2416 567.751 52.9824 567.751 52.6434V34.0388C567.751 33.6998 567.492 33.4406 567.153 33.4406H558.179C547.591 33.4406 541.09 37.0099 536.484 47.7779V34.0388C536.484 33.6998 536.225 33.4406 535.886 33.4406H513.353C513.014 33.4406 512.755 33.6998 512.755 34.0388V118.906C512.755 119.245 513.014 119.505 513.353 119.505H535.886C536.225 119.505 536.484 119.245 536.484 118.906ZM575.348 95.0973C575.348 78.1876 587.991 67.9381 606.934 67.9381H621.272C625.539 67.9381 627.753 65.2062 627.753 61.6169C627.753 54.4382 622.289 49.493 612.558 49.493C602.827 49.493 596.964 55.6546 596.525 62.5939C596.525 62.913 596.266 63.1523 595.947 63.1523H575.987C575.628 63.1523 575.348 62.8532 575.368 62.4943C576.545 45.5447 590.483 32.0648 613.754 32.0648C635.609 32.0648 651.482 44.7072 651.482 64.1693V118.886C651.482 119.225 651.223 119.485 650.884 119.485H628.351C628.012 119.485 627.753 119.225 627.753 118.886V107.54C624.841 115.556 615.29 120.861 603.505 120.861C586.934 120.861 575.328 109.754 575.328 95.0773L575.348 95.0973ZM609.666 103.632C621.112 103.632 627.772 95.0973 627.772 84.1698V82.9733H610.524C603.186 82.9733 598.22 87.4201 598.22 94.0803C598.22 99.7235 603.006 103.652 609.666 103.652V103.632ZM689.09 33.4601H666.557L666.597 33.4402C666.258 33.4402 665.999 33.6995 665.999 34.0384V118.906C665.999 119.245 666.258 119.504 666.597 119.504H689.13C689.469 119.504 689.728 119.245 689.728 118.906V70.6695C689.728 59.5625 696.029 52.2243 705.94 52.2243C715.152 52.2243 721.135 59.5625 721.135 70.6695V118.906C721.135 119.245 721.394 119.504 721.733 119.504H744.266C744.605 119.504 744.864 119.245 744.864 118.906V70.6695C744.864 59.5625 751.165 52.2243 761.076 52.2243C770.288 52.2243 776.271 59.5625 776.271 70.6695V118.906C776.271 119.245 776.53 119.504 776.869 119.504H799.402C799.741 119.504 800 119.245 800 118.906V63.1518C800 45.923 787.876 32.0842 769.271 32.0842C755.453 32.0842 744.685 39.4224 740.417 47.7975C736.31 37.548 727.595 32.0842 714.116 32.0842C702.49 32.0842 694.294 37.7274 689.688 45.5841V34.0583C689.688 33.7194 689.429 33.4601 689.09 33.4601Z"></path>
     </svg>
-    <a class="ghost" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent"><svg class="gh" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.88-2.91-2.79 0-.82.29-1.49.77-2.01-.08-.2-.34-1 .07-2.08 0 0 .62-.2 2.03.77a6.9 6.9 0 0 1 1.85-.25c.63 0 1.26.08 1.85.25 1.41-.98 2.03-.77 2.03-.77.41 1.08.15 1.88.07 2.08.48.52.77 1.18.77 2.01 0 1.92-1.14 2.59-2.92 2.79.3.26.56.76.56 1.54 0 1.07-.01 1.94-.01 2.21 0 .21.15.46.55.38A7.99 7.99 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>View the source →</a>
+    <a class="ghost" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent"><svg class="gh" aria-hidden="true" focusable="false"><use href="#gh"></use></svg>View the source →</a>
   </nav>
 
   <header class="hero">
@@ -175,14 +216,14 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
         <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/releases/latest">Download the firmware</a>
       </div>
       <div class="hero-meta">
-        <span><i class="dot"></i>Apache-2.0</span>
-        <span><i class="dot"></i>Waveshare ESP32-S3-Touch-AMOLED-1.75C</span>
-        <span><i class="dot"></i>Flashes in 13 seconds</span>
+        <span>Apache-2.0</span>
+        <span>Waveshare ESP32-S3-Touch-AMOLED-1.75C</span>
+        <span>Flashes in 13 seconds</span>
       </div>
     </div>
     <div>
       <div class="hero-shot">
-        <img src="images/device-orb.png" alt="The round device on a black surface, its display showing a sphere of blue dots labelled speaking">
+        <img src="images/device-orb.png" width="960" height="780" alt="The round device on a black surface, its display showing a sphere of blue dots labelled speaking">
       </div>
       <p class="hero-cap">456 dots · 18 rings · drawn on-device</p>
     </div>
@@ -195,7 +236,7 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
   <div class="sec-head">
     <p class="eyebrow">The whole loop, one board</p>
     <h2>Tiny hardware with personality.</h2>
-    <p>A 466 × 466 round AMOLED, unmodified and out of the box. The face is drawn on-device at ~25 frames a second, its behaviour driven by the session state — connecting, thinking, speaking, idle.</p>
+    <p>A 466 × 466 round AMOLED, unmodified and out of the box. The face is drawn on-device, every frame, its behaviour driven by the session state — connecting, thinking, speaking, idle.</p>
   </div>
   <div class="path">
     <div class="stage">
@@ -207,7 +248,7 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
     <div class="stage">
       <span class="part">agent.deepgram.com</span>
       <h3>Deepgram thinks</h3>
-      <p>Speech-to-text, the model, and text-to-speech on one authenticated socket. Flux speech stack, 36 voices.</p>
+      <p>Speech-to-text, the model, and text-to-speech on one authenticated socket. Flux speech stack, 13 voices offered by name.</p>
     </div>
     <div class="arrow" aria-hidden="true">→</div>
     <div class="stage">
@@ -229,7 +270,7 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
     <div class="ask"><span class="said">“Call yourself Ada.”</span><p>Saved to flash and folded into the system prompt as its own name.</p></div>
     <div class="ask"><span class="said">“Show me the spectrum.”</span><p>Two interchangeable faces: a vibrant spectrum analyzer or an intuitive, stylish orb.</p></div>
     <div class="ask"><span class="said">“Make the orb teal.”</span><p>A simple ask customizes the color to fit your vibe.</p></div>
-    <div class="ask"><span class="said">“Use a different voice.”</span><p>Choose a Deepgram Flux voice that responds emotionally to your mood.</p></div>
+    <div class="ask"><span class="said">“Use a different voice.”</span><p>Thirteen Flux voices are offered by name, each with its own accent and temperament.</p></div>
     <div class="ask"><span class="said">“Goodbye.”</span><p>When the conversation is over, the device drops into low power mode conserving battery and tokens.</p></div>
   </div>
 </section>
@@ -248,7 +289,7 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
         <tr><th scope="row">Audio out</th><td>ES8311 · shared duplex I2S</td></tr>
         <tr><th scope="row">Memory</th><td>8 MB PSRAM · 32 MB flash</td></tr>
         <tr><th scope="row">Faces</th><td>Orb (456 dots) · Spectrum (48 bars)</td></tr>
-        <tr><th scope="row">Voices</th><td>36, switchable by asking</td></tr>
+        <tr><th scope="row">Voices</th><td>36 in the catalog · 13 offered by voice</td></tr>
         <tr><th scope="row">Endpoint</th><td>wss://agent.deepgram.com/v1/agent/converse</td></tr>
         <tr><th scope="row">Firmware</th><td>1.66 MB · ESP-IDF 5.5.5</td></tr>
         <tr><th scope="row">Setup</th><td>WPA2 access point, captive portal, QR to join</td></tr>
@@ -281,8 +322,8 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
         <div>
           <h3>Write it to the board</h3>
           <p>With <span class="mono">esptool</span> and the board in download mode.</p>
-          <code>esptool.py -c esp32s3 -p /dev/YOUR-PORT \
-  write_flash 0x0 deepgram_agent-merged.bin</code>
+          <pre><code>esptool.py -c esp32s3 -p /dev/YOUR-PORT \
+  write_flash 0x0 deepgram_agent-merged.bin</code></pre>
         </div>
       </div>
       <div class="step">
@@ -293,13 +334,13 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
       </div>
     </div>
     <figure class="portal">
-      <img src="images/portal.png" alt="A phone showing the device's captive portal: a form asking for a Wi-Fi network and a Deepgram API key">
+      <img src="images/portal.png" width="1080" height="2424" alt="A phone showing the device's captive portal: a form asking for a Wi-Fi network and a Deepgram API key">
       <figcaption>A captive portal logs you into your device using a mobile phone.</figcaption>
     </figure>
   </div>
   <div class="cta-row" style="margin-top:36px">
     <a class="btn" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/releases/latest">Get the latest release →</a>
-    <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent"><svg class="gh" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.88-2.91-2.79 0-.82.29-1.49.77-2.01-.08-.2-.34-1 .07-2.08 0 0 .62-.2 2.03.77a6.9 6.9 0 0 1 1.85-.25c.63 0 1.26.08 1.85.25 1.41-.98 2.03-.77 2.03-.77.41 1.08.15 1.88.07 2.08.48.52.77 1.18.77 2.01 0 1.92-1.14 2.59-2.92 2.79.3.26.56.76.56 1.54 0 1.07-.01 1.94-.01 2.21 0 .21.15.46.55.38A7.99 7.99 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>Read the source</a>
+    <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent"><svg class="gh" aria-hidden="true" focusable="false"><use href="#gh"></use></svg>Read the source</a>
   </div>
 </section>
 
