@@ -33,7 +33,7 @@ body{
 .hair{height:4px;background:linear-gradient(90deg,var(--pink),var(--peach),var(--mint),var(--blue))}
 .wrap{width:min(1120px,92vw);margin-inline:auto}
 h1,h2,h3{font-family:Chivo,ui-sans-serif,system-ui,sans-serif;text-wrap:balance;margin:0}
-h1{font-weight:900;font-size:clamp(40px,6.4vw,76px);line-height:1.02;letter-spacing:-.028em}
+h1{font-weight:900;font-size:clamp(40px,7.6vw,92px);line-height:1.02;letter-spacing:-.028em}
 h2{font-weight:900;font-size:clamp(26px,3.4vw,38px);line-height:1.1;letter-spacing:-.02em}
 h3{font-weight:700;font-size:18px;letter-spacing:-.01em}
 p{margin:0}
@@ -48,16 +48,19 @@ a{color:var(--blue)}
 nav{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:22px 0}
 nav svg{display:block;width:118px;height:auto;color:var(--fg)}
 .ghost{
+  display:inline-flex;align-items:center;gap:8px;
   font-size:14px;font-weight:500;color:var(--fg-dim);text-decoration:none;
   border:1px solid var(--line);border-radius:999px;padding:8px 16px;white-space:nowrap;
   transition:border-color .18s,color .18s;
 }
+/* The mark inherits the link's colour, so it dims and lifts with the label. */
+.gh{width:16px;height:16px;flex:none}
 .ghost:hover,.ghost:focus-visible{color:var(--fg);border-color:var(--fg-faint)}
 
 /* ---- hero ---- */
-.hero{display:grid;grid-template-columns:1.05fr .95fr;gap:clamp(32px,5vw,72px);align-items:center;padding:clamp(24px,4vw,56px) 0 var(--sp)}
-.hero-copy{display:flex;flex-direction:column;gap:26px;max-width:56ch}
-.lede{font-size:clamp(18px,1.5vw,21px);color:var(--fg-dim);max-width:46ch}
+.hero{display:flex;flex-direction:column;gap:clamp(36px,4.5vw,60px);padding:clamp(24px,4vw,56px) 0 var(--sp)}
+.hero-copy{display:flex;flex-direction:column;gap:26px}
+.lede{font-size:clamp(18px,1.6vw,22px);color:var(--fg-dim);max-width:64ch}
 .lede b{color:var(--fg);font-weight:600}
 .cta-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
 .btn{
@@ -77,12 +80,11 @@ nav svg{display:block;width:118px;height:auto;color:var(--fg)}
 .hero-meta span{display:inline-flex;align-items:center;gap:7px}
 .dot{width:5px;height:5px;border-radius:50%;background:var(--mint)}
 
-.orb-stage{position:relative;aspect-ratio:1;width:100%;max-width:460px;margin-inline:auto}
-.orb-stage canvas{display:block;width:100%;height:100%}
-.orb-cap{
-  position:absolute;left:50%;bottom:-6px;transform:translateX(-50%);
-  font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--fg-faint);white-space:nowrap;
+.hero-shot{border:1px solid var(--line);border-radius:20px;overflow:hidden;background:#000}
+.hero-shot img{display:block;width:100%;height:auto}
+.hero-cap{
+  margin-top:14px;font-family:"IBM Plex Mono",monospace;font-size:11px;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--fg-faint);
 }
 
 /* ---- generic section ---- */
@@ -97,22 +99,11 @@ section{padding-block:var(--sp);border-top:1px solid var(--line)}
 .stage p{font-size:15px;color:var(--fg-dim)}
 .arrow{align-self:center;color:var(--fg-faint);font-size:20px;line-height:1}
 
-/* ---- photo ---- */
-.shot{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#000}
-.shot img{display:block;width:100%;height:auto}
-.shot-cap{margin-top:14px;font-size:13px;color:var(--fg-faint);max-width:62ch}
-
 /* ---- ask list ---- */
 .asks{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:14px;overflow:hidden}
 .ask{background:var(--ink);padding:24px 22px;display:flex;flex-direction:column;gap:8px}
 .ask .said{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--mint)}
 .ask p{font-size:14px;color:var(--fg-dim)}
-
-/* ---- telemetry ---- */
-.tlm{background:#08080a;border:1px solid var(--line);border-radius:14px;padding:22px;overflow-x:auto}
-.tlm pre{margin:0;font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.85;color:var(--fg-dim);white-space:pre}
-.tlm b{color:var(--fg);font-weight:500}
-.tlm .ok{color:var(--mint)}
 
 /* ---- specs ---- */
 .specs{width:100%;border-collapse:collapse;font-size:15px}
@@ -123,7 +114,11 @@ section{padding-block:var(--sp);border-top:1px solid var(--line)}
 .spec-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px}
 
 /* ---- get it: also a real sequence ---- */
-.steps{display:grid;gap:18px;counter-reset:s}
+.get{display:grid;grid-template-columns:1fr 1fr;gap:clamp(24px,3.5vw,44px);align-items:start}
+.portal{margin:0;position:sticky;top:32px}
+.portal img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:16px;background:#000}
+.portal figcaption{margin-top:14px;font-size:13px;color:var(--fg-faint)}
+.steps{display:grid;gap:18px;counter-reset:s -1}
 .step{display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:start;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px}
 .step::before{
   counter-increment:s;content:counter(s,decimal-leading-zero);
@@ -141,8 +136,8 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
 :focus-visible{outline:2px solid var(--blue);outline-offset:3px;border-radius:4px}
 
 @media (max-width:900px){
-  .hero{grid-template-columns:1fr;gap:44px}
-  .orb-stage{max-width:380px;order:-1}
+  .get{grid-template-columns:1fr}
+  .portal{position:static;max-width:420px;margin-inline:auto}
   .path{grid-template-columns:1fr;gap:12px}
   .arrow{transform:rotate(90deg);justify-self:center}
 }
@@ -160,17 +155,18 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
     <svg viewBox="0 0 800 155" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Deepgram">
       <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M91.6075 17.8668C102.954 29.3925 109.056 44.6272 108.816 60.7592V60.7393C108.318 93.2226 81.019 119.644 47.9773 119.644H1.55537C0.677983 119.644 0.239288 118.587 0.857449 117.949L23.4502 95.2366C23.8291 94.8578 24.3276 94.6384 24.866 94.6384H48.416C67.3596 94.6384 83.2324 79.4835 83.7907 60.8789C84.0699 51.3871 80.5803 42.4138 73.96 35.5941C67.3397 28.7744 58.4661 25.0255 48.9942 25.0255H25.0255V63.7503C25.0255 64.0893 24.7663 64.3485 24.4273 64.3485H0.59822C0.259229 64.3485 0 64.0893 0 63.7503V0.598196C0 0.259204 0.259229 0 0.59822 0H48.9942C65.1263 0 80.2612 6.34112 91.6075 17.8668ZM159.645 32.0842C130.452 32.0842 117.132 54.4577 117.132 76.3126L117.112 76.3326C117.112 98.0281 132.147 120.9 161.34 120.9C182.238 120.9 198.47 109.255 202.178 91.0687C202.258 90.6899 201.959 90.3309 201.58 90.3309H179.546C179.287 90.3309 179.067 90.5104 178.987 90.7696C176.973 97.8286 170.712 101.438 161.34 101.438C149.396 101.438 141.718 93.9203 140.003 81.7963H201.261C201.58 81.7963 201.839 81.577 201.859 81.2579C202.019 79.4234 202.159 77.0505 202.159 74.0993C202.159 54.4577 188.838 32.0842 159.645 32.0842ZM159.645 49.4925C171.091 49.4925 177.751 57.1696 178.429 66.7411H140.342C142.396 54.7767 148.897 49.4925 159.645 49.4925ZM212.568 76.3126C212.568 54.4577 225.888 32.0842 255.081 32.0842C284.274 32.0842 297.595 54.4577 297.595 74.0993C297.595 77.0505 297.455 79.4234 297.295 81.2579C297.276 81.577 297.016 81.7963 296.697 81.7963H235.44C237.154 93.9203 244.832 101.438 256.776 101.438C266.148 101.438 272.41 97.8286 274.424 90.7696C274.503 90.5104 274.723 90.3309 274.982 90.3309H297.016C297.395 90.3309 297.694 90.6899 297.615 91.0687C293.906 109.255 277.674 120.9 256.776 120.9C227.583 120.9 212.548 98.0281 212.548 76.3326L212.568 76.3126ZM273.865 66.7411C273.187 57.1696 266.527 49.4925 255.081 49.4925C244.333 49.4925 237.832 54.7767 235.779 66.7411H273.865ZM333.947 33.4601H311.414V33.4202C311.075 33.4202 310.815 33.6795 310.815 34.0185V153.722C310.815 154.061 311.075 154.321 311.414 154.321H333.947C334.285 154.321 334.545 154.061 334.545 153.722V111.807C339.151 117.61 347.526 120.86 357.257 120.86C382.023 120.86 398.754 103.272 398.754 76.4722C398.754 49.6719 383.379 32.0842 359.132 32.0842C348.025 32.0842 339.669 36.192 334.545 42.8522V34.0583C334.545 33.7194 334.285 33.4601 333.947 33.4601ZM375.184 76.4921C375.184 90.8294 366.829 100.401 354.186 100.401C341.564 100.401 333.189 90.989 333.189 76.4921C333.189 61.9952 341.564 52.4237 354.186 52.4237C366.809 52.4237 375.184 62.1548 375.184 76.4921ZM433.451 136.315C433.829 135.936 434.328 135.736 434.866 135.736H459.074C466.412 135.736 471.537 129.934 471.537 122.077V110.811C467.09 117.132 458.037 120.881 447.967 120.881C422.523 120.881 407.328 103.293 407.328 76.4926C407.328 49.6923 422.523 32.1047 447.628 32.1047C458.217 32.1047 466.572 36.033 471.537 42.0152V34.0788C471.537 33.7398 471.796 33.4805 472.135 33.4805H494.668C495.007 33.4805 495.267 33.7398 495.267 34.0788V124.669C495.267 142.436 482.465 154.381 463.003 154.381H417.877C416.98 154.381 416.541 153.304 417.179 152.686L433.451 136.355V136.315ZM451.736 100.382C464.717 100.382 472.913 90.9895 472.913 76.4727C472.913 61.9559 464.717 52.4043 451.736 52.4043C438.755 52.4043 430.739 61.9758 430.739 76.4727C430.739 90.9696 439.114 100.382 451.736 100.382ZM536.484 118.906V77.669H536.504C536.504 62.9727 541.788 53.2416 553.573 53.2416H567.153C567.492 53.2416 567.751 52.9824 567.751 52.6434V34.0388C567.751 33.6998 567.492 33.4406 567.153 33.4406H558.179C547.591 33.4406 541.09 37.0099 536.484 47.7779V34.0388C536.484 33.6998 536.225 33.4406 535.886 33.4406H513.353C513.014 33.4406 512.755 33.6998 512.755 34.0388V118.906C512.755 119.245 513.014 119.505 513.353 119.505H535.886C536.225 119.505 536.484 119.245 536.484 118.906ZM575.348 95.0973C575.348 78.1876 587.991 67.9381 606.934 67.9381H621.272C625.539 67.9381 627.753 65.2062 627.753 61.6169C627.753 54.4382 622.289 49.493 612.558 49.493C602.827 49.493 596.964 55.6546 596.525 62.5939C596.525 62.913 596.266 63.1523 595.947 63.1523H575.987C575.628 63.1523 575.348 62.8532 575.368 62.4943C576.545 45.5447 590.483 32.0648 613.754 32.0648C635.609 32.0648 651.482 44.7072 651.482 64.1693V118.886C651.482 119.225 651.223 119.485 650.884 119.485H628.351C628.012 119.485 627.753 119.225 627.753 118.886V107.54C624.841 115.556 615.29 120.861 603.505 120.861C586.934 120.861 575.328 109.754 575.328 95.0773L575.348 95.0973ZM609.666 103.632C621.112 103.632 627.772 95.0973 627.772 84.1698V82.9733H610.524C603.186 82.9733 598.22 87.4201 598.22 94.0803C598.22 99.7235 603.006 103.652 609.666 103.652V103.632ZM689.09 33.4601H666.557L666.597 33.4402C666.258 33.4402 665.999 33.6995 665.999 34.0384V118.906C665.999 119.245 666.258 119.504 666.597 119.504H689.13C689.469 119.504 689.728 119.245 689.728 118.906V70.6695C689.728 59.5625 696.029 52.2243 705.94 52.2243C715.152 52.2243 721.135 59.5625 721.135 70.6695V118.906C721.135 119.245 721.394 119.504 721.733 119.504H744.266C744.605 119.504 744.864 119.245 744.864 118.906V70.6695C744.864 59.5625 751.165 52.2243 761.076 52.2243C770.288 52.2243 776.271 59.5625 776.271 70.6695V118.906C776.271 119.245 776.53 119.504 776.869 119.504H799.402C799.741 119.504 800 119.245 800 118.906V63.1518C800 45.923 787.876 32.0842 769.271 32.0842C755.453 32.0842 744.685 39.4224 740.417 47.7975C736.31 37.548 727.595 32.0842 714.116 32.0842C702.49 32.0842 694.294 37.7274 689.688 45.5841V34.0583C689.688 33.7194 689.429 33.4601 689.09 33.4601Z"></path>
     </svg>
-    <a class="ghost" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent">View the source →</a>
+    <a class="ghost" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent"><svg class="gh" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.88-2.91-2.79 0-.82.29-1.49.77-2.01-.08-.2-.34-1 .07-2.08 0 0 .62-.2 2.03.77a6.9 6.9 0 0 1 1.85-.25c.63 0 1.26.08 1.85.25 1.41-.98 2.03-.77 2.03-.77.41 1.08.15 1.88.07 2.08.48.52.77 1.18.77 2.01 0 1.92-1.14 2.59-2.92 2.79.3.26.56.76.56 1.54 0 1.07-.01 1.94-.01 2.21 0 .21.15.46.55.38A7.99 7.99 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>View the source →</a>
   </nav>
 
   <header class="hero">
     <div class="hero-copy">
       <p class="eyebrow">Open source · ESP32-S3</p>
-      <h1>A voice agent the size of a coaster.</h1>
+      <h1>A voice agent the size of a pocketwatch.</h1>
       <p class="lede">Microphone to Deepgram to speaker, over <b>one WebSocket</b>, held open by the board itself. No phone in the loop. No laptop. No bridge process on your desk pretending to be the device.</p>
       <div class="cta-row">
         <a class="btn" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent">Build it yourself →</a>
         <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/releases/latest">Download the firmware</a>
+        <a class="btn-2" href="https://console.deepgram.com/signup">Get your FREE API Key</a>
       </div>
       <div class="hero-meta">
         <span><i class="dot"></i>Apache-2.0</span>
@@ -178,9 +174,11 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
         <span><i class="dot"></i>Flashes in 13 seconds</span>
       </div>
     </div>
-    <div class="orb-stage">
-      <canvas id="orb" aria-label="An animated sphere of small illuminated dots, the face the device shows while it is speaking"></canvas>
-      <p class="orb-cap">456 dots · 18 rings · live</p>
+    <div>
+      <div class="hero-shot">
+        <img src="images/device-orb.png" alt="The round device on a black surface, its display showing a sphere of blue dots labelled speaking">
+      </div>
+      <p class="hero-cap">456 dots · 18 rings · drawn on-device</p>
     </div>
   </header>
 </div>
@@ -189,9 +187,9 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
 
 <section>
   <div class="sec-head">
-    <p class="eyebrow">The whole loop, on the board</p>
-    <h2>Three chips and a socket.</h2>
-    <p>Audio is captured, sent, answered and played without leaving the device. The greeting proves the output half by itself — Deepgram speaks before the microphone has said anything.</p>
+    <p class="eyebrow">The whole loop, one board</p>
+    <h2>Tiny hardware with personality.</h2>
+    <p>A 466 × 466 round AMOLED, unmodified and out of the box. The face is drawn on-device at ~25 frames a second, its behaviour driven by the session state — connecting, thinking, speaking, idle.</p>
   </div>
   <div class="path">
     <div class="stage">
@@ -216,43 +214,18 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
 
 <section>
   <div class="sec-head">
-    <p class="eyebrow">Not a render</p>
-    <h2>This is the actual board.</h2>
-  </div>
-  <div class="shot">
-    <img src="images/device-orb.png" alt="The round device on a black surface, its display showing a sphere of blue dots labelled speaking">
-  </div>
-  <p class="shot-cap">A 466 × 466 round AMOLED, unmodified and out of the box. The orb is drawn on-device at ~25 frames a second, its behaviour driven by the session state — connecting, thinking, speaking, idle.</p>
-</section>
-
-<section>
-  <div class="sec-head">
     <p class="eyebrow">Tools wired to its own hardware</p>
     <h2>Ask it to change, and it changes.</h2>
     <p>Not settings. The agent holds tools that reach the codec, the display and the session, so the way you reconfigure this device is to mention it out loud.</p>
   </div>
   <div class="asks">
-    <div class="ask"><span class="said">“Turn it down a bit.”</span><p>One ES8311 register write. Deepgram never learns the volume, so nothing reloads.</p></div>
+    <div class="ask"><span class="said">“Turn it down a bit.”</span><p>One touch free UI, just ask for a volume change and it happens hands free.</p></div>
     <div class="ask"><span class="said">“Call yourself Ada.”</span><p>Saved to flash and folded into the system prompt as its own name.</p></div>
-    <div class="ask"><span class="said">“Show me the spectrum.”</span><p>Swaps the face: 24 bands mirrored into 48 bars, bass at twelve o'clock.</p></div>
-    <div class="ask"><span class="said">“Make the orb mint.”</span><p>Re-inks 456 dots at the single point where colour becomes pixels.</p></div>
-    <div class="ask"><span class="said">“Use a different voice.”</span><p>Reopens the session with the new voice and replays the history, because the in-place update is silently ignored upstream.</p></div>
-    <div class="ask"><span class="said">“Goodbye.”</span><p>Ends the turn. Nobody talking for a while and it sleeps on its own.</p></div>
+    <div class="ask"><span class="said">“Show me the spectrum.”</span><p>Two interchangeable faces: a vibrant spectrum analyzer or an intuitive, stylish orb.</p></div>
+    <div class="ask"><span class="said">“Make the orb teal.”</span><p>A simple ask customizes the color to fit your vibe.</p></div>
+    <div class="ask"><span class="said">“Use a different voice.”</span><p>Choose a Deepgram Flux voice that responds emotionally to your mood.</p></div>
+    <div class="ask"><span class="said">“Goodbye.”</span><p>When the conversation is over, the device drops into low power mode conserving battery and tokens.</p></div>
   </div>
-</section>
-
-<section>
-  <div class="sec-head">
-    <p class="eyebrow">One line per second, over serial</p>
-    <h2>It tells you what it is doing.</h2>
-    <p>Every counter here splits a failure in half. Audio arriving but not playing is a codec problem; audio playing but no reply is a capture problem. You never have to guess which half broke.</p>
-  </div>
-  <div class="tlm">
-<pre>TLM up=6.1 face=<b>orb</b> beh=<b>SPEAKING</b> src=agent sess=<b>ready</b> frames=25 fps=25.0
-    draw=17.8/22.1 amp=0.417/0.592 low=0.34/0.49 mid=0.36/0.56 high=0.23/0.35
-    turns=<b>1</b> mic=38400 rx=<b>107520</b> played=<b>107520</b> drop=<span class="ok">0</span> heap=5917691</pre>
-  </div>
-  <p class="shot-cap">Captured from a board mid-sentence. <span class="mono">played</span> matching <span class="mono">rx</span> with <span class="mono">drop=0</span> is a healthy turn.</p>
 </section>
 
 <section>
@@ -280,35 +253,47 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
 
 <section>
   <div class="sec-head">
-    <p class="eyebrow">Three steps, no toolchain</p>
+    <p class="eyebrow">Four steps, no toolchain</p>
     <h2>Get one running.</h2>
     <p>The published image carries no API key and no network, so it comes up asking for both.</p>
   </div>
-  <div class="steps">
-    <div class="step">
-      <div>
-        <h3>Download the image</h3>
-        <p>One file: bootloader, partition table and app together, so flashing needs to know nothing about the layout.</p>
+  <div class="get">
+    <div class="steps">
+      <div class="step">
+        <div>
+          <h3>Get your free API key</h3>
+          <p>A <a href="https://console.deepgram.com/signup">Deepgram API key</a>, it comes preloaded with $200 to use, no credit card required.</p>
+        </div>
       </div>
-    </div>
-    <div class="step">
-      <div>
-        <h3>Write it to the board</h3>
-        <p>With <span class="mono">esptool</span> and the board in download mode.</p>
-        <code>esptool.py -c esp32s3 -p /dev/YOUR-PORT \
+      <div class="step">
+        <div>
+          <h3>Download the image</h3>
+          <p>One file: bootloader, partition table and app together, so flashing needs to know nothing about the layout.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>Write it to the board</h3>
+          <p>With <span class="mono">esptool</span> and the board in download mode.</p>
+          <code>esptool.py -c esp32s3 -p /dev/YOUR-PORT \
   write_flash 0x0 deepgram_agent-merged.bin</code>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>Scan the QR on the panel</h3>
+          <p>It raises its own encrypted access point and shows the code. Your phone joins, a page asks for your network and your Deepgram API key, and it reboots talking.</p>
+        </div>
       </div>
     </div>
-    <div class="step">
-      <div>
-        <h3>Scan the QR on the panel</h3>
-        <p>It raises its own encrypted access point and shows the code. Your phone joins, a page asks for your network and your Deepgram API key, and it reboots talking.</p>
-      </div>
-    </div>
+    <figure class="portal">
+      <img src="images/portal.png" alt="A phone showing the device's captive portal: a form asking for a Wi-Fi network and a Deepgram API key">
+      <figcaption>A captive portal logs you into your device using a mobile phone.</figcaption>
+    </figure>
   </div>
   <div class="cta-row" style="margin-top:36px">
     <a class="btn" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/releases/latest">Get the latest release →</a>
-    <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent">Read the source</a>
+    <a class="btn-2" href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent"><svg class="gh" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.88-2.91-2.79 0-.82.29-1.49.77-2.01-.08-.2-.34-1 .07-2.08 0 0 .62-.2 2.03.77a6.9 6.9 0 0 1 1.85-.25c.63 0 1.26.08 1.85.25 1.41-.98 2.03-.77 2.03-.77.41 1.08.15 1.88.07 2.08.48.52.77 1.18.77 2.01 0 1.92-1.14 2.59-2.92 2.79.3.26.56.76.56 1.54 0 1.07-.01 1.94-.01 2.21 0 .21.15.46.55.38A7.99 7.99 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>Read the source</a>
   </div>
 </section>
 
@@ -323,70 +308,6 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
 </footer>
 
 </div>
-
-<script>
-/* The orb, the way the firmware builds it: rings of latitude with
-   cosine-tapered longitude counts, depth-sorted back to front. 18 rings,
-   456 dots -- the same figures orb_geometry.h carries. */
-(function () {
-  var cv = document.getElementById('orb');
-  if (!cv) return;
-  var ctx = cv.getContext('2d');
-  var RINGS = 18, TARGET = 456;
-  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  var pts = [], sum = 0, i, r;
-  for (r = 0; r < RINGS; r++) sum += Math.cos(-Math.PI / 2 + Math.PI * (r + 0.5) / RINGS);
-  for (r = 0; r < RINGS; r++) {
-    var lat = -Math.PI / 2 + Math.PI * (r + 0.5) / RINGS;
-    var n = Math.max(4, Math.round(TARGET * Math.cos(lat) / sum));
-    for (i = 0; i < n; i++) {
-      var lon = (i / n) * Math.PI * 2 + r * 0.55;
-      pts.push({ lat: lat, lon: lon, ring: r });
-    }
-  }
-
-  var dpr = 1, size = 0;
-  function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    size = cv.clientWidth;
-    cv.width = size * dpr; cv.height = size * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-  window.addEventListener('resize', resize); resize();
-
-  function frame(t) {
-    var time = t / 1000;
-    var spin = still ? 0.6 : time * 0.19;
-    /* A slow swell standing in for speech amplitude. */
-    var amp = still ? 0.34 : 0.30 + 0.16 * Math.sin(time * 1.7) + 0.06 * Math.sin(time * 4.3);
-    var cx = size / 2, cy = size / 2, R = size * 0.36;
-
-    ctx.clearRect(0, 0, size, size);
-    var out = [];
-    for (i = 0; i < pts.length; i++) {
-      var p = pts[i];
-      var wob = 1 + amp * 0.07 * Math.sin(p.lat * 5 + time * 2.4 + p.ring);
-      var cl = Math.cos(p.lat) * wob, sl = Math.sin(p.lat) * wob;
-      var lo = p.lon + spin;
-      out.push({ x: cx + R * cl * Math.cos(lo), y: cy + R * sl, z: cl * Math.sin(lo) });
-    }
-    out.sort(function (a, b) { return a.z - b.z; });
-
-    for (i = 0; i < out.length; i++) {
-      var o = out[i];
-      var d = (o.z + 1) / 2;                    /* 0 back, 1 front */
-      var rad = size * (0.0035 + 0.0058 * d) * (0.85 + amp * 0.5);
-      ctx.globalAlpha = 0.14 + 0.86 * d * d;
-      ctx.fillStyle = d > 0.86 ? '#eaf6ff' : '#38bdf8';
-      ctx.beginPath(); ctx.arc(o.x, o.y, rad, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    if (!still) requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
-})();
-</script>
 
 </body>
 </html>
