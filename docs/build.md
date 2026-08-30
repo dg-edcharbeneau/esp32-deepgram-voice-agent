@@ -62,7 +62,9 @@ in.
 | [main/agent_name.c](../main/agent_name.c) | what the agent is called: NVS, validation, and the factory default |
 | [main/agent_prompt.c](../main/agent_prompt.c) | assembles the persona in PSRAM: block order, build gating, `{{placeholders}}` |
 | [main/prompt/](../main/prompt/) | the persona itself, one `.md` per named block — edit these, not a Kconfig string |
-| [main/audio_io.c](../main/audio_io.c) | both codecs: ES7210 capture, ES8311 playback, mono↔stereo, gating |
+| [main/audio_io.c](../main/audio_io.c) | both codecs: ES7210 capture, ES8311 playback, mono↔stereo, gating, and the canceller + uplink VAD when `CONFIG_AEC_ENABLE` is on |
+| [main/audio_codecs.c](../main/audio_codecs.c) | the BSP's audio bring-up with all four ES7210 inputs enabled, which is what powers the echo-reference lane. Only used by the `CONFIG_AEC_ENABLE` build |
+| [main/heap_probe.c](../main/heap_probe.c) | allocation-failure hook and a 50 ms floor sampler. Default off — it names the size and caps of a failed allocation, which the `TLM` line cannot |
 | [main/ui.c](../main/ui.c) | panel and touch bring-up, status label, QR overlay, frame timer, audio levels, face dispatch |
 | [main/ui_face.h](../main/ui_face.h) | the face vtable and per-frame render context |
 | [main/face_orb.c](../main/face_orb.c) | orb face: behaviour selection and the 280 ms crossfade |

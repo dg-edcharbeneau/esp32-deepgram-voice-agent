@@ -39,8 +39,25 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 | Option | Default | When to change it |
 |---|---|---|
 | `CONFIG_MIC_IN_GAIN` | 24 dB | raise if mic peaks stay near zero while you talk |
-| `CONFIG_AUDIO_OUT_VOLUME` | 100 | speaker too quiet or clipping |
+| `CONFIG_AUDIO_OUT_VOLUME` | 70 | speaker too quiet, or clipping at the top of the range |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
+| `CONFIG_HEAP_PROBE` | off | chasing an allocation failure — names the size and caps that failed, which the `TLM` line cannot |
+
+### Echo cancellation and full duplex
+
+Off by default; the shipping build is half duplex. Turning it on is two options,
+and the second is the behaviour change. See
+[notes/echo-cancellation.md](notes/echo-cancellation.md) for the measurements.
+
+| Option | Default | When to change it |
+|---|---|---|
+| `CONFIG_AEC_ENABLE` | off | on to cancel the echo. Costs ~14.7 kB internal RAM and ~6 fps; the mic stays gated until you also change the next one |
+| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | on | off for full duplex — the agent can then be talked over. Turn it off only after the canceller is known to work |
+| `CONFIG_AEC_UPLINK_VAD` | on | leave on. Withholds blocks with no speech during playback; without it the uplink saturates TLS and the session drops |
+| `CONFIG_AEC_UPLINK_VAD_PEAK` | 400 | raise if the reply keeps the uplink open, lower if quiet interruptions are missed. Read `out=` in the `mic peak` log |
+| `CONFIG_AEC_NLP_LEVEL` | normal | more suppression, but it suppresses hardest during double-talk — the barge-in moment |
+| `CONFIG_AEC_REF_GAIN_DB` | 12 dB | reference lane too quiet or clipping; check `ref=` in the `mic peak` log |
+| `CONFIG_AEC_FULL_DUPLEX_MAX_VOLUME` | 100 | lower only if barge-in works quietly and fails loud. Below 100 it silently reverts to half duplex above that volume while the prompt still promises full |
 
 ---
 

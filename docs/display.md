@@ -63,8 +63,15 @@ ahead and finish while the speaker was still talking. The tap sits in
 90 ms, the depth of the I2S DMA.
 
 **The mic tap sits after the half-duplex gate**, so the display shows what
-actually goes upstream. Because that gate is unconditional, the two sources are
-never live at once.
+actually goes upstream. In the default build that gate is unconditional, so the
+two sources are never live at once.
+
+In a `CONFIG_AEC_ENABLE` build the tap also sits after the canceller, so the orb
+draws the *cancelled* signal rather than the raw microphone — and with the gate
+open the two sources can be live together, which is the point. The uplink VAD
+deliberately does not gate the tap: the ring keeps drawing the room even on
+blocks withheld from the network, because a ring that freezes while the agent
+talks reads as broken.
 
 **There is no FFT in the default path.** The orb needs a scalar RMS for gesture
 depth and three bands — from two cascaded one-pole crossovers at 250 Hz and

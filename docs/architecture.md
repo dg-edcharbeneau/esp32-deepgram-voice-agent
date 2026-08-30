@@ -44,7 +44,7 @@ flowchart TB
     end
 
     subgraph audio["Audio"]
-        aio["audio_io.c<br/><i>duplex I2S, playback ring, capture task</i>"]
+        aio["audio_io.c<br/><i>duplex I2S, playback ring, capture task,<br/>optional AEC + uplink VAD</i>"]
     end
 
     subgraph disp["Display"]
@@ -111,8 +111,10 @@ Three things in that picture are load-bearing:
   so it stays in step with the speaker instead of racing ahead and finishing
   while the device is still talking.
 - **Capture is gated while the agent talks, and parked when nothing wants it.**
-  The gate is the stand-in for echo cancellation — see audio-path.md's "Echo: why
-  capture is gated" — and it sits *below* the read, so a gated task still reads
+  The gate is the stand-in for echo cancellation in the default build — see
+  audio-path.md's "Echo: why capture is gated"; `CONFIG_AEC_ENABLE` plus
+  `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS=n` replaces it with a real canceller and
+  opens the microphone. It sits *below* the read, so a gated task still reads
   and downmixes and throws the result away. That is fine for the length of a
   reply, and wasteful for the 88% of the device's life with no session at all,
   so `capture_task` has a second tier above the read: when the session gate is
@@ -123,8 +125,10 @@ Three things in that picture are load-bearing:
 - **Barge-in drops queued audio.** When Deepgram says the user started speaking,
   anything still in the ring is a reply they have already talked over. A tap on
   the centre button while the speaker is busy does the same flush deliberately —
-  see "The tap interrupt" below, which is the only barge-in the user has, since
-  the microphone is gated exactly when they would be talking over it.
+  see "The tap interrupt" below. In the default build the tap is the *only*
+  barge-in there is, because the microphone is gated exactly when someone would
+  be talking over it; in a `CONFIG_AEC_ENABLE` full-duplex build the voice path
+  works too and the tap remains as the interrupt that needs no canceller.
 
 ## Session lifecycle
 
@@ -319,15 +323,16 @@ it copies and frees. Three properties are worth keeping:
   mangles a name starting with a digit into an extra leading underscore, so
   `10-formatting.md` would be a trap; the C table is the single place the shape
   of the prompt is stated.
-- **Nothing is build-gated any more**, but the rule that governed the gates
-  still governs any new block: a prompt describing a build you did not make is
-  worse than a shorter one, because the model asserts it confidently. Both
-  former gates were removed with their Kconfig options — the build is Flux-only,
-  so `substance-flux.md` is unconditional, and `half-duplex.md` is the only
-  duplex block left (`docs/notes/echo-cancellation.md`). That block is where
-  the model is told
-  it cannot be talked over but can be tapped, and told to say so when someone is
-  trying and failing to interrupt.
+- **One block is build-gated, and the rule is why.** A prompt describing a build
+  you did not make is worse than a shorter one, because the model asserts it
+  confidently. The build is Flux-only, so `substance-flux.md` is unconditional.
+  The duplex block is not: `half-duplex.md` tells the model it cannot be talked
+  over but can be tapped, `full-duplex.md` tells it to stop the moment someone
+  speaks and never to offer the tap as the way in, and `agent_prompt.c` selects
+  between them on `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` — the same symbol that
+  decides the gate in `audio_io.c`, so the two cannot drift apart. The gate was
+  briefly opened without this, and the device told a user with an open
+  microphone to "tap the middle of the screen to stop me".
 - **The frame does not grow with the prompt.** `agent_prompt_build()` measures
   80 bytes of stack against an 11 kB result, which matters because
   `send_settings()` already sits at 2,944 B of the WebSocket task's 6,144 — see
@@ -445,7 +450,7 @@ sequenceDiagram
     loop while ready
         C->>U: enqueue 80 ms frame, never blocks
         U->>W: send_bin, holds the client lock
-        W-->>C: agent PCM → playback, mic gated while it talks
+        W-->>C: agent PCM → playback, mic gated while it talks (default build)
     end
 
     Note over M: idle 15 s, or a tap

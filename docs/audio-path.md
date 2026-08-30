@@ -23,6 +23,14 @@ message and both codecs.
 matching the proven configuration; Deepgram is mono both ways. Playback
 duplicates each mono sample into L+R, capture averages L+R back down to one.
 
+With `CONFIG_AEC_ENABLE` the *width* changes but the channel count does not: the
+ES7210 emits a 4x16-bit TDM frame and the S3 reads it as 2 channels x 32 bits,
+because RX and TX share BCLK/WS in full duplex and cannot be configured
+separately. Each 32-bit word carries two 16-bit lanes, ordered
+`[ref, mic, dead, mic]`, and capture averages the two microphone lanes while the
+reference feeds the canceller. Playback left-justifies each mono sample into the
+32-bit slot. See [notes/echo-cancellation.md](notes/echo-cancellation.md).
+
 **Sample alignment is enforced at both ends.** This one caused intermittent
 loud static, so it is worth understanding. PCM here is 16-bit, but nothing
 upstream respects sample boundaries — the WebSocket transport hands over
@@ -57,15 +65,21 @@ misalign the first sample of the next reply.
 
 ### Echo: why capture is gated
 
-Speaker and mic sit centimetres apart and there is no echo cancellation here, so
-anything the agent says is captured and sent straight back — and the agent starts
-answering itself. Capture is dropped while playback is active, plus a 300 ms
-tail for audio already in the I2S DMA. This is unconditional — the build option
-that used to switch it off was removed once `docs/notes/echo-cancellation.md` closed the
-question.
+**In the default build there is no echo cancellation**, and the speaker and mic
+sit centimetres apart, so anything the agent says is captured and sent straight
+back — and the agent starts answering itself. Capture is dropped while playback
+is active, plus a 300 ms tail for audio already in the I2S DMA.
 
 It is a crude fix and it costs barge-in: with it on you cannot interrupt the
 agent, and `UserStartedSpeaking` will not fire mid-reply.
+
+**`CONFIG_AEC_ENABLE` changes this, and it is off by default.** It puts esp-sr's
+standalone AEC in the capture path and switches the ES7210 to 4-channel TDM for
+the hardware echo-reference lane; `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` then
+decides whether the gate below stays shut. With both set for full duplex the
+device can be talked over mid-sentence. The rest of this section describes the
+default build; see [notes/echo-cancellation.md](notes/echo-cancellation.md) for
+the other one.
 
 **The real answer is not server-side, and an earlier version of this file was
 wrong to say it was.** Deepgram's
@@ -132,9 +146,10 @@ a **double-talk detector** rather than full cancellation: learn the room's
 coupling ratio while only the agent speaks, then flag any mic level above that
 ratio as a second voice, needing no adaptive filter and no 70 kB.
 
-**That is now disproven, with numbers.** Measured on 2026-08-25 with the gate off,
-the signal-to-echo ratio at the microphone is **-11 dB** — the person is four times
-quieter than the device's own voice. Because the microphone sums power, a talker
+**That is now disproven, with numbers.** Measured on 2026-08-25 with the gate off
+**at `CONFIG_AUDIO_OUT_VOLUME=100`** — the volume matters and was not recorded at
+the time — the signal-to-echo ratio at the microphone is **-11 dB**, i.e. the
+person is four times quieter than the device's own voice. Because the microphone sums power, a talker
 at the echo's own level raises the mic by 3.0 dB and a typical talker by **0.33 dB**,
 which no threshold can separate from noise. The reference lane does not rescue it:
 `9479446`'s own numbers put the lane *quieter* than the microphones, an echo return
@@ -146,18 +161,26 @@ Espressif's own test vectors against their own output's 18.3, and with it runnin
 the device stops answering itself in an empty room -- one turn where before there
 were sixteen in twenty-four seconds.
 
-**It still does not give barge-in, and full duplex is off.** Two independent
-reasons: streaming the microphone through the agent's reply saturates the TCP send
-queue until a TLS allocation fails and the session drops, and even while that
-audio was reaching Deepgram it never distinguished a person talking over the agent
-from the residual echo. The interrupt on this device is a **tap on the centre
-button while the agent is speaking**, which works in any room and needs no
-canceller.
+**It did not give barge-in when first tried, and both reasons have since been
+resolved.** They were: streaming the microphone through the agent's reply
+saturates the TCP send queue until a TLS allocation fails and the session drops,
+and even while that audio was reaching Deepgram it never distinguished a person
+talking over the agent from the residual echo.
 
-The whole investigation, including the negative result and the measurement errors
-made along the way, is in [notes/echo-cancellation.md](notes/echo-cancellation.md).
-The canceller, the bench and the four-channel reference lane are all still in
-the tree, default-off, for whoever picks it up.
+The second was a volume artifact — every measurement above was taken at volume
+100. The first was bandwidth rather than cancellation, and is fixed by sending
+less: `CONFIG_AEC_UPLINK_VAD` forwards a block during playback only when the
+**post-AEC** level clears a threshold, so residual echo costs no uplink and a
+real interruption still gets through.
+
+**Full duplex now works**, measured across volumes 70 and 100, and is available
+behind `CONFIG_AEC_ENABLE` — still off by default, so the shipping build is the
+gated one this section describes. The **tap on the centre button** stays
+regardless: it works in any room, needs no canceller, and is the right interrupt
+for a build without one.
+
+The whole investigation, including the measurement errors made along the way, is
+in [notes/echo-cancellation.md](notes/echo-cancellation.md).
 
 **Update, 2026-08-25: the 70 kB was the AFE, not the canceller.** esp-sr also
 ships a standalone AEC — `aec_create_from_config()` / `aec_process()`, no ring
