@@ -5,7 +5,8 @@
 > instructions.
 >
 > **Its conclusion was superseded on 2026-08-30.** Full duplex now works on this
-> board and is in the tree behind `CONFIG_AEC_ENABLE`. Both reasons recorded
+> board and is the shipping default (`CONFIG_AEC_ENABLE=y`,
+> `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS=n`). Both reasons recorded
 > below for abandoning it were real, and both were measured at
 > `CONFIG_AUDIO_OUT_VOLUME=100` — the one volume at which the arithmetic cannot
 > work. See **[The retry, at a lower volume](#the-retry-at-a-lower-volume)** at
@@ -1111,9 +1112,11 @@ this device is reported anywhere in this document, because none has been made.**
 
 ## The retry, at a lower volume
 
-Investigated 2026-08-29 to 2026-08-30. **Full duplex works.** It is in the tree
-behind `CONFIG_AEC_ENABLE`, default off, with `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS`
-as the one setting that opens the microphone.
+Investigated 2026-08-29 to 2026-08-30. **Full duplex works, and it ships.**
+`CONFIG_AEC_ENABLE` defaults on and `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` defaults
+off, so a clean checkout builds a device that can be talked over. Setting the
+gate back on is the way to half duplex, and is what to do when bringing the
+canceller up on unfamiliar hardware.
 
 ### What was actually wrong
 

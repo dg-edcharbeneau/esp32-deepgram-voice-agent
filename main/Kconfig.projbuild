@@ -214,17 +214,19 @@ menu "Deepgram Agent Device"
 
     config AEC_ENABLE
         bool "Cancel the echo in the live capture path"
-        default n
+        default y
         help
             Puts esp-sr's standalone AEC between the microphone and everything
-            downstream -- Deepgram, the orb's level, the instrumentation.
+            downstream -- Deepgram, the orb's level, the instrumentation. ON by
+            default: this is what makes the device interruptible, and turning it
+            off returns it to half duplex.
 
-            Turning this on also switches the microphone to the 4-channel TDM
-            capture in audio_codecs.c, because the canceller needs the hardware
+            It also switches the microphone to the 4-channel TDM capture in
+            audio_codecs.c, because the canceller needs the hardware
             echo-reference lane (ES7210 MIC3) that the BSP's own bring-up leaves
-            unpowered. With this off, the audio path is byte-for-byte the
-            shipping half-duplex one, which is what makes the A/B measurement
-            in docs/notes/echo-cancellation.md meaningful.
+            unpowered. With this off, the audio path is byte-for-byte the old
+            half-duplex one, which is what makes the A/B measurement in
+            docs/notes/echo-cancellation.md repeatable.
 
             AEC_MODE_FD_LOW_COST, chosen by measurement rather than by the
             published table: 17.3 dB of ERLE on Espressif's own test vectors
@@ -238,34 +240,35 @@ menu "Deepgram Agent Device"
             bytes" this help used to cite was wrong.
 
             THIS ALONE DOES NOT GIVE BARGE-IN. It cleans the microphone;
-            MIC_GATE_WHILE_AGENT_SPEAKS is what still closes it. Turn the gate
-            off separately, and only once this has been shown to work -- with
-            the gate on, a broken canceller costs nothing.
+            MIC_GATE_WHILE_AGENT_SPEAKS is what decides whether the microphone
+            is open. Both are set for full duplex by default. When bringing the
+            canceller up on new hardware, turn the gate back ON first -- with the
+            gate closed a broken canceller costs nothing.
 
     config MIC_GATE_WHILE_AGENT_SPEAKS
         bool "Drop captured audio while the agent is speaking"
-        default y
+        default n
         depends on AEC_ENABLE
         help
-            The half-duplex gate. ON is the shipping behaviour and the safe
-            default: the speaker and microphone sit centimetres apart, so
-            without it anything the agent says is captured and sent straight
-            back and the agent starts answering itself.
+            The half-duplex gate. OFF by default, which is what lets the agent be
+            talked over: the microphone stays open while it speaks and the
+            canceller keeps it from hearing itself.
 
-            Turning it OFF is the barge-in experiment, and it is one setting
-            rather than a code change deliberately. It is only worth trying at a
-            speaker volume where the arithmetic can work: the signal-to-echo
-            ratio at the microphone is strongly volume-dependent, and this
-            board's amplifier goes non-linear between 85 and 100, where ERLE
-            collapses by 31 dB with the microphone nowhere near clipping. At
-            AUDIO_OUT_VOLUME=100 the required ERLE is 30.1 dB against ~19
-            delivered and no filter length recovers it. Set the volume to 70
-            first -- and note volume_load() prefers the NVS-saved level, so a
-            device that has been set to 100 stays there until NVS is erased.
+            Turn it ON to go back to half duplex. That is the right move when
+            bringing the canceller up on unfamiliar hardware -- with the gate
+            closed a canceller that does not work costs nothing, and the ERLE
+            can be read from the "mic peak ... out=" log before anything depends
+            on it. It is also the correct setting for any board where
+            cancellation cannot reach the required ERLE, because an uncancelled
+            open microphone during playback is the self-conversation, not
+            barge-in.
 
-            When AEC_ENABLE is off this option does not appear and the gate is
-            unconditional, which is correct: an uncancelled open microphone
-            during playback is the self-conversation, not barge-in.
+            Measured on this board, full duplex holds at every volume: 22.4 dB
+            mean ERLE at volume 70 and 23.2 dB at 100, barge-in firing at both.
+
+            The prompt follows this symbol -- full-duplex.md when it is off,
+            half-duplex.md when it is on -- so the model is never told it can be
+            talked over by a build that gates the microphone.
 
 
     config AEC_FULL_DUPLEX_MAX_VOLUME

@@ -63,23 +63,25 @@ drain task, which waits in 50 ms slices rather than forever, discards the queued
 audio and its carry byte itself. Dropping the carry matters: keeping it would
 misalign the first sample of the next reply.
 
-### Echo: why capture is gated
+### Echo, and why the microphone can stay open
 
-**In the default build there is no echo cancellation**, and the speaker and mic
-sit centimetres apart, so anything the agent says is captured and sent straight
-back — and the agent starts answering itself. Capture is dropped while playback
-is active, plus a 300 ms tail for audio already in the I2S DMA.
+The speaker and mic sit centimetres apart, so without cancellation anything the
+agent says is captured and sent straight back — and the agent starts answering
+itself. **`CONFIG_AEC_ENABLE` is on by default** and is what stops that: esp-sr's
+standalone AEC sits in the capture path, and the ES7210 runs in 4-channel TDM so
+the hardware echo-reference lane is powered and sample-aligned with the
+microphones.
 
-It is a crude fix and it costs barge-in: with it on you cannot interrupt the
-agent, and `UserStartedSpeaking` will not fire mid-reply.
+With it, `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` is off and the microphone stays
+open while the agent talks. You can cut in mid-sentence; `UserStartedSpeaking`
+fires during playback and the reply stops.
 
-**`CONFIG_AEC_ENABLE` changes this, and it is off by default.** It puts esp-sr's
-standalone AEC in the capture path and switches the ES7210 to 4-channel TDM for
-the hardware echo-reference lane; `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` then
-decides whether the gate below stays shut. With both set for full duplex the
-device can be talked over mid-sentence. The rest of this section describes the
-default build; see [notes/echo-cancellation.md](notes/echo-cancellation.md) for
-the other one.
+**Turning `CONFIG_AEC_ENABLE` off returns the device to half duplex**, where
+capture is dropped for the length of playback plus a 300 ms tail for audio
+already in the I2S DMA. That is the crude fix, and it costs barge-in entirely:
+you cannot interrupt by voice, only by tapping. It is the right setting for
+hardware where cancellation cannot reach the ERLE this board reaches — see
+[notes/echo-cancellation.md](notes/echo-cancellation.md).
 
 **The real answer is not server-side, and an earlier version of this file was
 wrong to say it was.** Deepgram's
@@ -173,11 +175,9 @@ less: `CONFIG_AEC_UPLINK_VAD` forwards a block during playback only when the
 **post-AEC** level clears a threshold, so residual echo costs no uplink and a
 real interruption still gets through.
 
-**Full duplex now works**, measured across volumes 70 and 100, and is available
-behind `CONFIG_AEC_ENABLE` — still off by default, so the shipping build is the
-gated one this section describes. The **tap on the centre button** stays
-regardless: it works in any room, needs no canceller, and is the right interrupt
-for a build without one.
+**Full duplex works and is the shipping default**, measured across volumes 70
+and 100. The **tap on the centre button** stays regardless: it works in any room,
+needs no canceller, and remains the interrupt for a half-duplex build.
 
 The whole investigation, including the measurement errors made along the way, is
 in [notes/echo-cancellation.md](notes/echo-cancellation.md).

@@ -63,12 +63,11 @@ ahead and finish while the speaker was still talking. The tap sits in
 90 ms, the depth of the I2S DMA.
 
 **The mic tap sits after the half-duplex gate**, so the display shows what
-actually goes upstream. In the default build that gate is unconditional, so the
-two sources are never live at once.
+actually goes upstream. It also sits after the canceller, so the orb draws the
+*cancelled* signal rather than the raw microphone.
 
-In a `CONFIG_AEC_ENABLE` build the tap also sits after the canceller, so the orb
-draws the *cancelled* signal rather than the raw microphone — and with the gate
-open the two sources can be live together, which is the point. The uplink VAD
+Because the gate is off by default, the two sources can be live together — the
+agent speaking and someone talking over it — which is the point. The uplink VAD
 deliberately does not gate the tap: the ring keeps drawing the room even on
 blocks withheld from the network, because a ring that freezes while the agent
 talks reads as broken.

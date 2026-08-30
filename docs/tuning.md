@@ -45,14 +45,15 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 
 ### Echo cancellation and full duplex
 
-Off by default; the shipping build is half duplex. Turning it on is two options,
-and the second is the behaviour change. See
+Full duplex is the shipping default: the canceller is on and the mic gate is off,
+so the agent can be talked over. These are the knobs for changing that or for
+bringing it up on different hardware. See
 [notes/echo-cancellation.md](notes/echo-cancellation.md) for the measurements.
 
 | Option | Default | When to change it |
 |---|---|---|
-| `CONFIG_AEC_ENABLE` | off | on to cancel the echo. Costs ~14.7 kB internal RAM and ~6 fps; the mic stays gated until you also change the next one |
-| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | on | off for full duplex — the agent can then be talked over. Turn it off only after the canceller is known to work |
+| `CONFIG_AEC_ENABLE` | on | off returns the device to half duplex — no canceller, no voice barge-in, and ~14.7 kB internal RAM and ~6 fps back |
+| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | off | on to close the mic during playback while keeping the canceller. The setting to reach for when bringing this up on unfamiliar hardware |
 | `CONFIG_AEC_UPLINK_VAD` | on | leave on. Withholds blocks with no speech during playback; without it the uplink saturates TLS and the session drops |
 | `CONFIG_AEC_UPLINK_VAD_PEAK` | 400 | raise if the reply keeps the uplink open, lower if quiet interruptions are missed. Read `out=` in the `mic peak` log |
 | `CONFIG_AEC_NLP_LEVEL` | normal | more suppression, but it suppresses hardest during double-talk — the barge-in moment |

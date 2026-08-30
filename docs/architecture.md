@@ -111,10 +111,11 @@ Three things in that picture are load-bearing:
   so it stays in step with the speaker instead of racing ahead and finishing
   while the device is still talking.
 - **Capture is gated while the agent talks, and parked when nothing wants it.**
-  The gate is the stand-in for echo cancellation in the default build — see
-  audio-path.md's "Echo: why capture is gated"; `CONFIG_AEC_ENABLE` plus
-  `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS=n` replaces it with a real canceller and
-  opens the microphone. It sits *below* the read, so a gated task still reads
+  The gate is off by default — `CONFIG_AEC_ENABLE` puts a real canceller in the
+  path and the microphone stays open, so the device can be talked over. Setting
+  `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` brings the half-duplex gate back for
+  hardware that needs it; see audio-path.md. When it is on it sits *below* the
+  read, so a gated task still reads
   and downmixes and throws the result away. That is fine for the length of a
   reply, and wasteful for the 88% of the device's life with no session at all,
   so `capture_task` has a second tier above the read: when the session gate is
@@ -125,10 +126,11 @@ Three things in that picture are load-bearing:
 - **Barge-in drops queued audio.** When Deepgram says the user started speaking,
   anything still in the ring is a reply they have already talked over. A tap on
   the centre button while the speaker is busy does the same flush deliberately —
-  see "The tap interrupt" below. In the default build the tap is the *only*
-  barge-in there is, because the microphone is gated exactly when someone would
-  be talking over it; in a `CONFIG_AEC_ENABLE` full-duplex build the voice path
-  works too and the tap remains as the interrupt that needs no canceller.
+  see "The tap interrupt" below. Both routes are live by default: the voice path
+  because the microphone stays open, and the tap because it works in any room and
+  needs no canceller. In a half-duplex build the tap is the *only* barge-in
+  there is, because the microphone is gated exactly when someone would be
+  talking over it.
 
 ## Session lifecycle
 
@@ -450,7 +452,7 @@ sequenceDiagram
     loop while ready
         C->>U: enqueue 80 ms frame, never blocks
         U->>W: send_bin, holds the client lock
-        W-->>C: agent PCM → playback, mic gated while it talks (default build)
+        W-->>C: agent PCM → playback, mic stays open (cancelled)
     end
 
     Note over M: idle 15 s, or a tap
