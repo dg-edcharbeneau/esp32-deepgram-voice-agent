@@ -85,6 +85,8 @@ h1{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:30px;line-hei
 .bars .tr:hover .br{filter:brightness(1.12)}
 .bars .vl{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
 .bars .nm.rest,.bars .vl.rest{color:var(--muted)}
+.bars .br.ghost{background:repeating-linear-gradient(135deg,var(--free),var(--free) 5px,transparent 5px,transparent 10px);border:1px solid var(--rule-2);border-left:none}
+.bars .br.crit{background:var(--crit)}
 
 .flashrow{display:flex;flex-direction:column;gap:10px}
 .fbar{display:flex;height:26px;border-radius:4px;overflow:hidden;background:var(--surface-2);gap:2px}
@@ -130,6 +132,12 @@ footer{color:var(--muted);font-size:12px;font-family:"IBM Plex Mono",monospace;b
     </div>
   </div>
 
+  <section class="card" id="rt-card" hidden>
+    <h2 id="rt-h"></h2>
+    <div class="bars" id="rtbars"></div>
+    <p class="note" id="rt-note"></p>
+  </section>
+
   <section class="card">
     <h2 id="comp-h"></h2>
     <div class="stack" id="stack"></div>
@@ -166,7 +174,7 @@ footer{color:var(--muted);font-size:12px;font-family:"IBM Plex Mono",monospace;b
     <p>Task stacks, driver and TLS buffers, and every heap allocation come out of that
       free figure once the firmware runs. A TLS session alone commonly holds tens of
       kilobytes for the life of a connection, and none of it appears here.</p>
-    <p>The number that settles it is free internal heap and largest free block on a
+    <p id="cav-3">The number that settles it is free internal heap and largest free block on a
       live boot &mdash; <code>esp_get_free_internal_heap_size()</code> and
       <code>heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)</code>, which is where
       fragmentation shows up. That needs the board attached.</p>
@@ -329,9 +337,58 @@ if (DATA.partSize) {
   document.getElementById("flash-card").remove();
 }
 
-document.getElementById("cav-1").innerHTML =
-  "Every number above is <strong>link time</strong>. The "+big(DATA.ramFree)+
-  " of headroom is what the image leaves free before a single task starts.";
+/* runtime ----------------------------------------------------------------- */
+const RT = DATA.runtime;
+if (RT) {
+  document.getElementById("rt-card").hidden = false;
+  document.getElementById("rt-h").textContent =
+    "Measured on device — free internal heap" +
+    (RT.samples ? " over "+RT.samples+" samples" : "");
+  const rows = [
+    {k:"link-time free", v:DATA.ramFree, c:"var(--s3)", d:"what the image leaves"},
+    {k:"runtime free (mean)", v:RT.avg, c:"var(--s2)", d:"once tasks and heap are up"},
+    {k:"runtime free (low-water)", v:RT.min, c:"var(--s1)", d:"worst sample observed"}
+  ];
+  if (RT.largest) rows.push(
+    {k:"largest free block", v:RT.largest, c:"var(--crit)", d:"biggest single allocation possible"});
+  const rb = document.getElementById("rtbars"), rmax = DATA.ramFree;
+  rows.forEach(r => {
+    const nm = document.createElement("div");
+    nm.className = "nm"; nm.textContent = r.k;
+    const tr = document.createElement("div");
+    tr.className = "tr"; tr.tabIndex = 0; tr.setAttribute("role","img");
+    tr.setAttribute("aria-label", r.k+" "+cm(r.v)+" bytes");
+    const br = document.createElement("div");
+    br.className = "br"; br.style.width = (r.v/rmax*100)+"%"; br.style.background = r.c;
+    tr.appendChild(br);
+    bind(tr, "<b>"+r.k+"</b> &middot; "+r.d+"<br>"+cm(r.v)+" B &middot; "+kb(r.v));
+    const vl = document.createElement("div");
+    vl.className = "vl"; vl.textContent = kb(r.v);
+    rb.append(nm, tr, vl);
+  });
+  const pctLeft = RT.min/DATA.ramFree*100;
+  document.getElementById("rt-note").innerHTML =
+    "Running the firmware claims <strong>"+kb(RT.claimed)+"</strong> of the link-time headroom — "+
+    "task stacks, driver and TLS buffers, and the heap. What is actually left at the low-water "+
+    "mark is "+kb(RT.min)+", or "+pctLeft.toFixed(0)+"% of what the static figure suggested." +
+    (RT.largest ? " And the largest single block is only "+kb(RT.largest)+" of that — the gap "+
+      "between free and contiguous is fragmentation, and it is the number a large allocation "+
+      "actually has to fit inside." : "") +
+    (RT.note ? " <span style='color:var(--muted)'>"+RT.note+"</span>" : "");
+}
+
+document.getElementById("cav-1").innerHTML = RT
+  ? "The section and archive figures above are <strong>link time</strong> — what the image "+
+    "claims before a single task starts. The measured card is the one to trust for headroom."
+  : "Every number above is <strong>link time</strong>. The "+big(DATA.ramFree)+
+    " of headroom is what the image leaves free before a single task starts.";
+if (RT) {
+  document.getElementById("cav-3").innerHTML =
+    "Those runtime figures come from a live boot with the board attached. They are a "+
+    "<em>sample</em>, not a bound — a path that never ran during the capture cannot show "+
+    "up in them, so treat the low-water mark as the best case you have measured, not the worst "+
+    "the firmware can reach.";
+}
 document.getElementById("foot").textContent =
   "esp_idf_size on " + DATA.project + ".map · generated by the esp-ram-board skill";
 </script>

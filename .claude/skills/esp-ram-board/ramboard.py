@@ -69,6 +69,15 @@ def main():
     ap.add_argument("-o", "--out", default="ram-board.html", help="output HTML path")
     ap.add_argument("--top", type=int, default=12, help="archives to chart individually (default: 12)")
     ap.add_argument("--title", default=None, help="page title (default: derived from project name)")
+    rt = ap.add_argument_group(
+        "runtime (optional)",
+        "Measured free internal heap from a live boot. Supply these and the board "
+        "stops being link-time-only and shows what the firmware actually leaves free.")
+    rt.add_argument("--rt-free-min", type=int, help="lowest free internal heap observed (bytes)")
+    rt.add_argument("--rt-free-avg", type=int, help="mean free internal heap (bytes)")
+    rt.add_argument("--rt-largest", type=int, help="largest free internal block (bytes)")
+    rt.add_argument("--rt-samples", type=int, help="how many samples that came from")
+    rt.add_argument("--rt-note", default=None, help="one line on what the device was doing")
     args = ap.parse_args()
 
     build_dir = Path(args.build_dir).resolve()
@@ -154,7 +163,19 @@ def main():
         "partSize": part_size,
         "flashTop": [{"k": k, "v": v} for k, v in flash_top],
         "title": args.title or f"{ram_label} Headroom Board",
+        "runtime": None,
     }
+
+    if args.rt_free_min or args.rt_free_avg:
+        lo = args.rt_free_min or args.rt_free_avg
+        data["runtime"] = {
+            "min": lo,
+            "avg": args.rt_free_avg or lo,
+            "largest": args.rt_largest,
+            "samples": args.rt_samples,
+            "note": args.rt_note,
+            "claimed": (ram_total - ram_used) - lo,
+        }
 
     template = (HERE / "template.html").read_text()
     html = template.replace("__DATA__", json.dumps(data, indent=2))
@@ -167,9 +188,18 @@ def main():
     print(f"  {ram_label}: {ram_used:,} used of {ram_total:,} ({pct:.1f}%) — {ram_total - ram_used:,} free")
     if part_size:
         print(f"  flash: {bin_size:,} of {part_size:,} app partition ({bin_size / part_size * 100:.1f}%)")
+    if data["runtime"]:
+        r = data["runtime"]
+        print(f"  runtime free internal: {r['min']:,} low / {r['avg']:,} mean")
+        if r["largest"]:
+            print(f"  largest free block:    {r['largest']:,}"
+                  f" ({r['largest'] / r['min'] * 100:.0f}% of the low-water free)")
+        print(f"  runtime claims {r['claimed']:,} bytes the link-time figure showed as free")
     print(f"  wrote {out}")
-    print("\nLink-time only. Task stacks, heap, and TLS buffers come out of the free")
-    print("figure at runtime — confirm on device before treating it as headroom.")
+    if not data["runtime"]:
+        print("\nLink-time only. Task stacks, heap, and TLS buffers come out of the free")
+        print("figure at runtime — pass --rt-free-min/--rt-largest from a live boot,")
+        print("or say plainly in your reply that this is not measured headroom.")
 
 
 if __name__ == "__main__":
