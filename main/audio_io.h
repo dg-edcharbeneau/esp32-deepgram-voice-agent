@@ -33,6 +33,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "sdkconfig.h"
 
 /* Receives captured mono 16-bit PCM at DG_AUDIO_SAMPLE_RATE. Runs on the
  * capture task, so it must not block for long. */
@@ -57,10 +58,27 @@ typedef void (*audio_io_tap_t)(const int16_t *mono, size_t samples);
  * Published because dg_agent.c has to size its uplink queue in whole chunks, and
  * it was carrying its own literal 2560 with a comment pointing back here -- two
  * numbers that had to agree with nothing to make them. 1280 frames at 16 kHz is
- * 80 ms, the chunk size Flux recommends; audio_io.c's CAPTURE_FRAMES note has the
- * rest of the reasoning.
+ * 80 ms, the chunk size Flux recommends.
+ *
+ * NOT A CONSTANT any more -- see below.
  */
+/*
+ * 1024 with the canceller, 1280 without.
+ *
+ * aec_get_chunksize() returns 512 for every mode on this chip -- measured, and
+ * matching handle.frame_size -- so 1024 is exactly two AEC frames with no
+ * remainder. 1280 would leave an alternating 256/0 residue, and a partial frame
+ * fed to aec_process() is a frame of silence to the adaptive filter.
+ *
+ * The non-AEC path keeps 1280 so enabling the canceller is the only thing that
+ * changes the send cadence to Deepgram. audio_io_init() re-checks the divisor at
+ * runtime against the chunk size the library actually reports.
+ */
+#if CONFIG_AEC_ENABLE
+#define AUDIO_IO_CAPTURE_FRAMES 1024
+#else
 #define AUDIO_IO_CAPTURE_FRAMES 1280
+#endif
 #define AUDIO_IO_CAPTURE_BYTES  (AUDIO_IO_CAPTURE_FRAMES * (int)sizeof(int16_t))
 
 /* Opens both codecs at the shared rate and starts the playback task. */
@@ -170,3 +188,13 @@ int audio_io_adjust_volume(int delta);   /* returns the resulting level */
 bool audio_io_playback_active(void);
 
 void audio_io_stats(uint32_t *played, uint32_t *dropped, uint32_t *captured);
+
+/*
+ * Capture blocks withheld from the uplink by the post-AEC VAD while the agent
+ * was speaking. Zero unless CONFIG_AEC_UPLINK_VAD is on.
+ *
+ * Worth reporting because it is the only way to tell the gate working from the
+ * gate never firing: if this stays at zero through a reply, the uplink was
+ * continuous and the bandwidth wall is still there.
+ */
+uint32_t audio_io_uplink_suppressed(void);

@@ -2,8 +2,15 @@
 
 > **Historical finding**, investigated 2026-08-25 to 2026-08-26. This is the
 > record of a measurement and the decision it led to, not current setup
-> instructions. The gates and comments it justifies are still live in
-> `main/audio_io.c` and `main/ui.h` — read this before removing them.
+> instructions.
+>
+> **Its conclusion was superseded on 2026-08-30.** Full duplex now works on this
+> board and is the shipping default (`CONFIG_AEC_ENABLE=y`,
+> `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS=n`). Both reasons recorded
+> below for abandoning it were real, and both were measured at
+> `CONFIG_AUDIO_OUT_VOLUME=100` — the one volume at which the arithmetic cannot
+> work. See **[The retry, at a lower volume](#the-retry-at-a-lower-volume)** at
+> the end before acting on anything here.
 
 ## Summary
 
@@ -793,8 +800,17 @@ a clipped reference is a nonlinearity in the one signal that must be clean.
 
 ## Why full duplex was abandoned
 
+> **Superseded 2026-08-30.** Both reasons below were reproduced exactly and both
+> turned out to be conditional on things this section does not record. Reason 1
+> was bandwidth and is fixed by sending less, not by more ERLE. Reason 2 was
+> volume and disappears at 70. Kept unedited because the measurements are sound
+> and the reasoning is worth reading; see [The retry](#the-retry-at-a-lower-volume).
+
 Written 2026-08-26, after taking `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` off with the
 canceller running. Two reasons, either of which would be enough.
+
+**The volume these were taken at is not recorded anywhere in this section, and it
+is the single most important variable in it: `CONFIG_AUDIO_OUT_VOLUME=100`.**
 
 ### 1. The link cannot carry it
 
@@ -1091,3 +1107,132 @@ this device is reported anywhere in this document, because none has been made.**
 [repo]: https://github.com/espressif/esp-sr
 [changelog]: https://components.espressif.com/components/espressif/esp-sr/versions/2.1.1/changelog
 [box]: https://github.com/espressif/esp-box/issues/185
+
+---
+
+## The retry, at a lower volume
+
+Investigated 2026-08-29 to 2026-08-30. **Full duplex works, and it ships.**
+`CONFIG_AEC_ENABLE` defaults on and `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` defaults
+off, so a clean checkout builds a device that can be talked over. Setting the
+gate back on is the way to half duplex, and is what to do when bringing the
+canceller up on unfamiliar hardware.
+
+### What was actually wrong
+
+Neither of the two reasons above was wrong as a measurement. Both were
+conditional on something the section did not record.
+
+**Reason 2 was volume.** The signal-to-echo ratio at the microphone falls with
+speaker volume, and this board's amplifier goes non-linear between 85 and 100:
+ERLE collapses 31 dB with the microphone nowhere near clipping, so the distortion
+is in the analogue chain and no filter length recovers it.
+
+| speaker volume | SER at mic | ERLE needed | predicted | **measured** |
+|---|---|---|---|---|
+| 55 | -3.1 dB | 9.1 | ~40 | — |
+| **70** | -9.2 dB | 15.2 | 20.5 | **22.4 dB, barge-in fires** |
+| 85 | -16.3 dB | 22.3 | ~30 | — |
+| **100** | -24.1 dB | 30.1 | 19.3 | **23.2 dB, barge-in fires** |
+
+At volume 70, `FD_LOW_COST` with `nlp=NORMAL` delivered **22.4 dB mean ERLE** over
+24 playback samples, and `UserStartedSpeaking` **fires during playback**.
+
+**The volume ceiling was then tested and retracted.** The prediction above says
+volume 100 needs 30.1 dB against 19.3 delivered and therefore cannot work; the
+gate was originally set to fall back to half duplex above 85 on that basis.
+Measured directly on 2026-08-30 it is wrong for this unit: **23.2 dB mean over 34
+samples at volume 100**, statistically indistinguishable from volume 70, with
+barge-in firing and a ~22 minute session showing zero allocation failures and
+zero dropped frames. Audible clipping does appear at 100 and does not break
+either the canceller or the interruption.
+
+`CONFIG_AEC_FULL_DUPLEX_MAX_VOLUME` therefore defaults to **100**, so the
+fallback never fires. The knob is kept because the amplifier non-linearity it
+guards against is a real effect another unit may show — but on this board it was
+a prediction that measurement did not support, and it should not have been
+shipped as a default without being tested. **One caveat: the ERLE floor at 100
+is noisier than at 70** (several blocks at 2-10 dB). Some of those are
+double-talk, where low ERLE is correct; whether any are genuine failures is
+unsettled, and a missed interruption is a floor event, not a mean event.
+
+**Reason 1 was bandwidth, and it is not an AEC problem at all.** With the gate
+open the link failed again, with precisely the original signature — the heap probe
+caught `ALLOC FAILED: 1630 bytes caps=0x0000080c` (`INTERNAL|DMA|8BIT`) eight
+times, `esp-aes: Failed to allocate memory`, largest free block collapsing
+14,336 -> 2,304 B inside 600 ms. More ERLE cannot help this; 22.4 dB was already
+ample. Sending less can.
+
+### The fix: gate the uplink on the cancelled signal
+
+`CONFIG_AEC_UPLINK_VAD`. While the agent is speaking, forward a capture block
+upstream only if the **post-AEC** peak clears `CONFIG_AEC_UPLINK_VAD_PEAK`
+(default 400), with a 1 s hangover. Residual echo runs 5-40 counts and never
+reaches the threshold; somebody talking over the agent reaches 533-1607. Outside
+playback the uplink is continuous and unchanged.
+
+It must be measured on the **cancelled** signal. The raw lanes carry the agent's
+own voice at full strength and would hold the uplink open for the whole reply,
+which is the behaviour being removed.
+
+| | gate open | + uplink VAD |
+|---|---|---|
+| `ALLOC FAILED` 1,630 B | 8 | **0** |
+| session drops | yes | **0** |
+| `updrop` / `txdrop` | 42 / 39 | **0 / 0** |
+| worst largest-free block | 2,304 B | **9,216 B** |
+| barge-in fires | yes | **yes** |
+
+The 9,216 B figure is the worst seen by the 50 ms heap probe over the longest
+capture (816 TLM samples, ~22 min at volume 100); shorter runs bottomed out at
+12,800. That difference is the whole point of the caveat — a capture is a sample,
+not a bound, and the longer sample found the lower floor. It is still ~5.6x the
+1,630 B allocation that kills the link, and nothing failed.
+
+`vadsup` in the TLM line counts withheld blocks. If it stays at zero through a
+reply the gate never fired and the wall is still there.
+
+### The cost, and a correction
+
+`main/audio_io.c` asserted for months that `FD_LOW_COST` costs **16 bytes** of
+internal RAM. That came from an archived bench and was carried forward unchecked.
+Measured on this board, steady state past 20 s uptime, live session, gate closed,
+AEC the only variable — 39 samples against 33:
+
+| | AEC off | AEC on | delta |
+|---|---|---|---|
+| `int` free | 70,260 B | 55,564 B | **-14,696** |
+| `intmax` largest | 34,816 B | 22,528 B | **-12,288** |
+| fps | 26.2 | 19.7 | -6.5 |
+
+The 16 B figure is wrong and has been corrected in the source. 22.5 kB of largest
+free block is still 13x the 1,630 B allocation that kills the link, and far from
+the 3,584 B the AFE attempt died at — a real price, not a fatal one.
+
+### What still gates it
+
+- **Volume — retracted, see above.** `CONFIG_AEC_FULL_DUPLEX_MAX_VOLUME` now
+  defaults to 100 and the fallback never fires. Lowering it costs barge-in above
+  that volume *without telling the user*, because the prompt is chosen at build
+  time and will still describe full duplex — which is precisely why it is not on
+  by default.
+- **The prompt.** `prompt/full-duplex.md` vs `prompt/half-duplex.md`, selected by
+  the same Kconfig symbol as the gate. Before this existed the device told a user
+  with an open microphone to "tap the middle of the screen to stop me".
+- **The touch-ring interrupt stays regardless.** It works in every room, needs no
+  canceller, and is the right interrupt for a device without cancellation.
+
+### Two instrumentation traps, both hit here
+
+- **`ialloc` in the TLM line is `allocated_blocks`, not allocation failures.** It
+  reads ~500 at idle and always has. Allocation failures are only visible through
+  the hook in `main/heap_probe.c` (`CONFIG_HEAP_PROBE`, default off). Any test of
+  the link needs the probe armed; TLM alone cannot see the failure.
+- **A level log on a fixed timer measures silence.** The 3 s mic-peak line landed
+  during playback in only 2 of 11 samples, and one of those two was quiet enough
+  to read as a dead reference lane. It was not dead; it was undersampled. The log
+  now samples every 500 ms while the agent speaks, which is the only moment an
+  echo canceller can be judged. This is the second time this file records a
+  measurement error of exactly this shape — the first was the level probe that sat
+  upstream of `aec_process()` and reported uncancelled audio for an entire
+  investigation.

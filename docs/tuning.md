@@ -39,8 +39,26 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 | Option | Default | When to change it |
 |---|---|---|
 | `CONFIG_MIC_IN_GAIN` | 24 dB | raise if mic peaks stay near zero while you talk |
-| `CONFIG_AUDIO_OUT_VOLUME` | 100 | speaker too quiet or clipping |
+| `CONFIG_AUDIO_OUT_VOLUME` | 70 | speaker too quiet, or clipping at the top of the range |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
+| `CONFIG_HEAP_PROBE` | off | chasing an allocation failure — names the size and caps that failed, which the `TLM` line cannot |
+
+### Echo cancellation and full duplex
+
+Full duplex is the shipping default: the canceller is on and the mic gate is off,
+so the agent can be talked over. These are the knobs for changing that or for
+bringing it up on different hardware. See
+[notes/echo-cancellation.md](notes/echo-cancellation.md) for the measurements.
+
+| Option | Default | When to change it |
+|---|---|---|
+| `CONFIG_AEC_ENABLE` | on | off returns the device to half duplex — no canceller, no voice barge-in, and ~14.7 kB internal RAM and ~6 fps back |
+| `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | off | on to close the mic during playback while keeping the canceller. The setting to reach for when bringing this up on unfamiliar hardware |
+| `CONFIG_AEC_UPLINK_VAD` | on | leave on. Withholds blocks with no speech during playback; without it the uplink saturates TLS and the session drops |
+| `CONFIG_AEC_UPLINK_VAD_PEAK` | 400 | raise if the reply keeps the uplink open, lower if quiet interruptions are missed. Read `out=` in the `mic peak` log |
+| `CONFIG_AEC_NLP_LEVEL` | normal | more suppression, but it suppresses hardest during double-talk — the barge-in moment |
+| `CONFIG_AEC_REF_GAIN_DB` | 12 dB | reference lane too quiet or clipping; check `ref=` in the `mic peak` log |
+| `CONFIG_AEC_FULL_DUPLEX_MAX_VOLUME` | 100 | lower only if barge-in works quietly and fails loud. Below 100 it silently reverts to half duplex above that volume while the prompt still promises full |
 
 ---
 

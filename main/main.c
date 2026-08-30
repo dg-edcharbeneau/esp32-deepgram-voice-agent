@@ -41,6 +41,7 @@
 #include "agent_name.h"
 #include "audio_io.h"
 #include "boot_button.h"
+#include "heap_probe.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "ui.h"
@@ -639,6 +640,11 @@ static void enter_provisioning(void)
 
 void app_main(void)
 {
+    /*
+     * FIRST, so the allocation-failure hook is armed before anything large is
+     * allocated. Compiles to nothing unless CONFIG_HEAP_PROBE is on.
+     */
+    heap_probe_start();
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -993,7 +999,7 @@ void app_main(void)
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
-                 " txdrop=%" PRIu32
+                 " txdrop=%" PRIu32 " vadsup=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
                  " ialloc=%u",
                  (double)esp_timer_get_time() / 1000000.0,
@@ -1006,6 +1012,7 @@ void app_main(void)
                  t.peak_mic, t.peak_agent,
                  s_turns, captured, s_audio_bytes, played, dropped,
                  dg_agent_audio_dropped(), dg_agent_transport_dropped(),
+                 audio_io_uplink_suppressed(),
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),

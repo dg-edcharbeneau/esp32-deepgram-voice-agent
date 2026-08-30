@@ -116,3 +116,20 @@ CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 # follows a panic -- which matters on a board whose USB link is easy to lose.
 CONFIG_ESP_COREDUMP_ENABLE_TO_UART=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# Speaker volume. A PREFERENCE, not a constraint -- and it was written as a
+# constraint first, which was wrong.
+#
+# The claim was that echo cancellation forces a low volume: an archived table
+# put this board's amplifier into non-linearity between 85 and 100, requiring
+# 30.1 dB of ERLE against ~19 delivered. Measured on hardware 2026-08-30 that
+# does not hold -- 23.2 dB mean at volume 100 against 22.4 at 70, barge-in
+# firing at both, and a ~22 minute session at 100 with zero allocation failures.
+#
+# 70 stays the default for an ordinary reason: 100 audibly clips on this
+# speaker. Nothing breaks if it is raised, and CONFIG_AEC_FULL_DUPLEX_MAX_VOLUME
+# no longer gates anything at its default of 100.
+#
+# Note volume_load() prefers the NVS-saved level over this default, so a device
+# already set to something else stays there until NVS is erased.
+CONFIG_AUDIO_OUT_VOLUME=70
