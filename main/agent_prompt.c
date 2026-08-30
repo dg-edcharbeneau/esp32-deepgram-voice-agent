@@ -35,7 +35,11 @@ PROMPT_BLOCK(conversation_md);
 PROMPT_BLOCK(speaking_md);
 PROMPT_BLOCK(substance_md);
 PROMPT_BLOCK(substance_flux_md);
+#if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS || !CONFIG_AEC_ENABLE
 PROMPT_BLOCK(half_duplex_md);
+#else
+PROMPT_BLOCK(full_duplex_md);
+#endif
 PROMPT_BLOCK(boundaries_md);
 PROMPT_BLOCK(session_md);
 
@@ -65,9 +69,25 @@ static const block_t s_blocks[] = {
      * than server-side VAD. Continues the list of true things substance.md ends
      * with, hence the flag. */
     { substance_flux_md_start, substance_flux_md_end, true },
-    /* Half duplex: the mic is deaf while the agent speaks, and the interrupt is
-     * the centre button. See the gate in audio_io.c and docs/notes/echo-cancellation.md. */
+    /*
+     * DUPLEX, AND IT IS BUILD-GATED BECAUSE THE BUILD ACTUALLY DIFFERS.
+     *
+     * The rule above -- a prompt that describes a build you did not make is
+     * worse than a shorter one -- is exactly why this one gate came back. The
+     * two builds give the user opposite instructions: tap to interrupt, versus
+     * just talk. Telling a full-duplex device to offer the tap was observed on
+     * hardware ("Tap the middle of the screen to stop me", said while the mic
+     * was open and listening), and the model says it confidently either way.
+     *
+     * Follows CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS, which is the same symbol that
+     * decides the gate in audio_io.c, so the two cannot drift apart. See
+     * docs/notes/echo-cancellation.md.
+     */
+#if CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS || !CONFIG_AEC_ENABLE
     { half_duplex_md_start,  half_duplex_md_end,  false },
+#else
+    { full_duplex_md_start,  full_duplex_md_end,  false },
+#endif
     { boundaries_md_start,   boundaries_md_end,   false },
     { session_md_start,      session_md_end,      false },
 };

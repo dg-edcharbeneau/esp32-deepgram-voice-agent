@@ -7,6 +7,8 @@ idf_component_register(
         boot_button.c
         dg_agent.c
         audio_io.c
+        audio_codecs.c
+        heap_probe.c
         ui.c
         face_spectrum.c
         orb_geometry.c
@@ -39,7 +41,11 @@ idf_component_register(
         prompt/speaking.md
         prompt/substance.md
         prompt/substance-flux.md
+        # Both duplex blocks are embedded; agent_prompt.c picks one at compile
+        # time from CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS. The unused one costs
+        # flash rodata and no RAM.
         prompt/half-duplex.md
+        prompt/full-duplex.md
         prompt/boundaries.md
         prompt/session.md
     REQUIRES
@@ -56,6 +62,7 @@ idf_component_register(
         lvgl__lvgl
         espressif__esp_lvgl_adapter
         espressif__esp-dsp
+        espressif__esp-sr
         espressif__button
 )
 
