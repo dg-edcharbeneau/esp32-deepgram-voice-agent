@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-30
+
+### Added
+
+- **Full duplex, and it is the default.** The microphone stays open while the
+  agent speaks, so it can be interrupted by talking. esp-sr's standalone AEC
+  (`AEC_MODE_FD_LOW_COST`) runs in the capture path and the ES7210 moves to
+  4-channel TDM so the hardware echo-reference lane is powered and sample
+  aligned. `CONFIG_AEC_ENABLE` (default on) and
+  `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` (default off) control it.
+- `CONFIG_AEC_UPLINK_VAD`: during playback, only blocks whose **post-AEC** level
+  clears a threshold are sent upstream. Without it the continuous 32 kB/s uplink
+  starves the TLS path of internal DMA memory and the session drops -- the
+  failure that ended the previous full-duplex attempt. It is a bandwidth fix,
+  not an echo fix.
+- `main/audio_codecs.c`: the BSP's audio bring-up with all four ES7210 inputs
+  enabled, which is what powers the echo-reference lane.
+- `main/heap_probe.c` (`CONFIG_HEAP_PROBE`, default off): allocation-failure hook
+  and a 50 ms floor sampler. It names the size and caps of a failed allocation,
+  which the `TLM` line cannot.
+- `main/prompt/full-duplex.md`, selected against `half-duplex.md` by the same
+  Kconfig symbol as the gate, so the model is never told it can be talked over by
+  a build that gates the microphone.
+- `vadsup` in the `TLM` line: capture blocks withheld from the uplink.
+
+### Changed
+
+- `CONFIG_AUDIO_OUT_VOLUME` defaults to 70 rather than 100. A preference, not a
+  constraint -- 100 audibly clips on this speaker but full duplex works there.
+- The microphone level log samples every 500 ms while the agent speaks instead of
+  every 3 s, and reports the **post-AEC** level. On a fixed timer it mostly
+  sampled silence, which is the only moment the canceller cannot be judged in.
+- Documentation throughout `docs/` and the landing page now describe a device
+  that can be talked over.
+
+### Fixed
+
+- `main/audio_io.c` claimed the canceller costs **16 bytes** of internal RAM,
+  carried forward unchecked from an archived bench. Measured on hardware it costs
+  **~14.7 kB**, and about 6 fps.
+
+### Notes
+
+Measured on this board: 22.4 dB mean ERLE at volume 70 and 23.2 dB at 100,
+barge-in firing at both, and a ~22 minute session with zero allocation failures
+and zero dropped frames. Worst observed largest free internal block is 9,216 B,
+against the 1,630 B allocation whose failure kills the link.
+
+The tap on the centre button still interrupts, in both builds. It works in any
+room and needs no canceller.
+
 ## [0.1.0] - 2026-08-28
 
 ### Added
