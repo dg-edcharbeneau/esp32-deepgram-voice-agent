@@ -524,6 +524,37 @@ static void capture_task(void *arg)
             continue;
         }
 
+#if CONFIG_MIC_LEVEL_LOG
+        /*
+         * DECIDED BEFORE THE WORK, NOT AFTER IT -- which is the whole reason this
+         * sits up here rather than next to the ESP_LOGI that consumes it.
+         *
+         * The post-AEC peak needs its own pass over the block, and it used to run
+         * on every block while being printed at most every 500 ms: seven passes
+         * in eight computed and thrown away, on the capture task, inside the
+         * budget the canceller had just made tight. Knowing here whether the line
+         * will print is what lets that pass be skipped.
+         *
+         * TWO RATES, AND THE FAST ONE IS THE POINT. A flat 3 s timer samples
+         * whatever it lands on, and what it lands on is mostly silence: across
+         * four captures only 2 of 11 samples fell during playback, which is the
+         * only moment an echo canceller can be judged at all. The first read of
+         * those two suggested the reference lane was dead; it was not, it was
+         * undersampled. So while the agent is speaking, log every 500 ms.
+         */
+        const int64_t now = esp_timer_get_time();
+        bool want_level_log = false;
+        if (audio_io_playback_active() && now >= next_speak_log) {
+            next_speak_log = now + 500000;
+            next_level_log = now + 3000000;
+            want_level_log = true;
+        } else if (now >= next_level_log) {
+            next_level_log = now + 3000000;
+            next_speak_log = now;
+            want_level_log = true;
+        }
+#endif
+
 #if CONFIG_AEC_ENABLE
         /*
          * ONE runtime test, used by every AEC site below.
@@ -601,9 +632,11 @@ static void capture_task(void *arg)
              * line was computed in the downmix loop, upstream of aec_process(),
              * and had always been showing the uncancelled microphone. */
 #if CONFIG_MIC_LEVEL_LOG
-            for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
-                int32_t a = (mono[i] < 0) ? -(int32_t)mono[i] : (int32_t)mono[i];
-                if (a > peak_post) peak_post = a;
+            if (want_level_log) {
+                for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
+                    int32_t a = (mono[i] < 0) ? -(int32_t)mono[i] : (int32_t)mono[i];
+                    if (a > peak_post) peak_post = a;
+                }
             }
 #endif
 
@@ -646,29 +679,7 @@ static void capture_task(void *arg)
          * combined meter would just look "quiet" -- this shows which channel is
          * actually live.
          */
-        /*
-         * TWO RATES, AND THE FAST ONE IS THE POINT.
-         *
-         * A flat 3 s timer samples whatever it lands on, and what it lands on is
-         * mostly silence: across four captures only 2 of 11 samples fell during
-         * playback, which is the only moment an echo canceller can be judged at
-         * all. The first read of those two suggested the reference lane was dead;
-         * it was not, it was undersampled.
-         *
-         * So while the agent is speaking, log every block-quantised 500 ms. The
-         * ERLE is out against L/R at that moment and nowhere else.
-         */
-        int64_t now = esp_timer_get_time();
-        if (audio_io_playback_active() && now >= next_speak_log) {
-            next_speak_log = now + 500000;
-            next_level_log = now + 3000000;
-        } else if (now >= next_level_log) {
-            next_level_log = now + 3000000;
-            next_speak_log = now;
-        } else {
-            goto no_level_log;
-        }
-        {
+        if (want_level_log) {
 #if CONFIG_AEC_ENABLE
             /*
              * L and R are the RAW microphone lanes; `out` is what actually
@@ -687,8 +698,6 @@ static void capture_task(void *arg)
                      audio_io_playback_active() ? " (gated: agent speaking)" : "");
 #endif
         }
-no_level_log:
-        ;
 #endif
 
         /*
