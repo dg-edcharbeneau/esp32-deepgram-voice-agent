@@ -1,0 +1,337 @@
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --ground:#f6f8f9; --surface:#ffffff; --surface-2:#eef1f4;
+  --ink:#0f1418; --ink-2:#4b5661; --muted:#7d8894;
+  --rule:#e0e5ea; --rule-2:#cdd5dc;
+  --s1:#184f95; --s2:#2a78d6; --s3:#5598e7; --s4:#86b6ef;
+  --free:#d7dde3; --good:#16794f; --good-bg:#e4f2ea;
+  --warn:#8a5a00; --warn-bg:#fbf0dc; --crit:#a3272a; --crit-bg:#fbe6e6;
+  --shadow:0 1px 2px rgba(15,20,24,.06),0 8px 24px -16px rgba(15,20,24,.28);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --ground:#0e1114; --surface:#161a1e; --surface-2:#1d2328;
+    --ink:#eef1f4; --ink-2:#a8b3bd; --muted:#7f8b96;
+    --rule:#262d33; --rule-2:#333c44;
+    --s1:#184f95; --s2:#256abf; --s3:#3987e5; --s4:#6da7ec;
+    --free:#2a3238; --good:#3fae7b; --good-bg:#152a21;
+    --warn:#d8a13c; --warn-bg:#2b2415; --crit:#e07172; --crit-bg:#2d1819;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --ground:#0e1114; --surface:#161a1e; --surface-2:#1d2328;
+  --ink:#eef1f4; --ink-2:#a8b3bd; --muted:#7f8b96;
+  --rule:#262d33; --rule-2:#333c44;
+  --s1:#184f95; --s2:#256abf; --s3:#3987e5; --s4:#6da7ec;
+  --free:#2a3238; --good:#3fae7b; --good-bg:#152a21;
+  --warn:#d8a13c; --warn-bg:#2b2415; --crit:#e07172; --crit-bg:#2d1819;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+  font-size:15px; line-height:1.6; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:960px;margin:0 auto;padding:40px 24px 72px;display:flex;flex-direction:column;gap:28px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.num{font-variant-numeric:tabular-nums}
+
+header{display:flex;flex-direction:column;gap:10px;padding-bottom:4px}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.eyebrow span{white-space:nowrap}
+.eyebrow i{font-style:normal;color:var(--rule-2)}
+h1{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:30px;line-height:1.2;margin:0;letter-spacing:-.02em;text-wrap:balance}
+.sub{color:var(--ink-2);max-width:62ch;margin:0}
+
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:24px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:18px}
+.card h2{font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);margin:0}
+.card .note{margin:0;color:var(--ink-2);font-size:13.5px;max-width:70ch}
+
+.tiles{display:grid;grid-template-columns:1.35fr 1fr;gap:16px}
+@media (max-width:680px){.tiles{grid-template-columns:1fr}}
+.tile{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:22px 24px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:6px}
+.tile .lbl{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted)}
+.hero-n{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;font-weight:600;letter-spacing:-.03em;line-height:1;color:var(--s2)}
+.tile.major .hero-n{font-size:60px}
+.tile.minor .hero-n{font-size:40px;color:var(--ink)}
+.tile .of{color:var(--ink-2);font-size:13.5px}
+.pill{align-self:flex-start;margin-top:6px;display:inline-flex;align-items:center;gap:6px;background:var(--good-bg);color:var(--good);border-radius:999px;padding:3px 11px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-weight:500;letter-spacing:.04em}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.pill.crit{background:var(--crit-bg);color:var(--crit)}
+
+.stack{display:flex;width:100%;height:44px;border-radius:5px;overflow:hidden;background:var(--surface-2);gap:2px}
+.seg{position:relative;cursor:default;transition:filter .12s ease}
+.seg:hover,.seg:focus-visible{filter:brightness(1.12)}
+.seg:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.scale{display:flex;justify-content:space-between;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);border-top:1px solid var(--rule);padding-top:6px;margin-top:-8px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 22px}
+.lg{display:flex;align-items:baseline;gap:8px;font-size:13px;color:var(--ink-2)}
+.lg .sw{width:10px;height:10px;border-radius:2px;flex:none;transform:translateY(1px)}
+.lg b{font-family:"IBM Plex Mono",monospace;font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
+
+.bars{display:grid;grid-template-columns:auto 1fr auto;gap:5px 14px;align-items:center}
+.bars .nm{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-2);white-space:nowrap;text-align:right}
+.bars .tr{background:transparent;height:15px;display:flex;align-items:center}
+.bars .br{height:15px;border-radius:0 3px 3px 0;transition:filter .12s ease}
+.bars .tr:hover .br{filter:brightness(1.12)}
+.bars .vl{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
+.bars .nm.rest,.bars .vl.rest{color:var(--muted)}
+
+.flashrow{display:flex;flex-direction:column;gap:10px}
+.fbar{display:flex;height:26px;border-radius:4px;overflow:hidden;background:var(--surface-2);gap:2px}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:680px){.split{grid-template-columns:1fr}}
+
+.caveat{border-left:3px solid var(--s2);background:var(--surface);border-radius:0 10px 10px 0;padding:20px 24px;display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--rule);border-right:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+.caveat h2{font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;color:var(--s2);margin:0}
+.caveat p{margin:0;color:var(--ink-2);max-width:68ch}
+.caveat code{font-family:"IBM Plex Mono",monospace;font-size:12.5px;background:var(--surface-2);padding:1px 5px;border-radius:3px;color:var(--ink)}
+
+details{border-top:1px solid var(--rule);padding-top:14px}
+summary{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.06em;color:var(--muted);cursor:pointer}
+summary:focus-visible{outline:2px solid var(--ink);outline-offset:3px;border-radius:3px}
+table{border-collapse:collapse;width:100%;margin-top:14px;font-size:13px}
+th,td{text-align:right;padding:6px 10px;border-bottom:1px solid var(--rule);font-variant-numeric:tabular-nums;font-family:"IBM Plex Mono",monospace}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.tblwrap{overflow-x:auto}
+
+#tip{position:fixed;z-index:9;pointer-events:none;opacity:0;transition:opacity .1s ease;background:var(--ink);color:var(--ground);font-family:"IBM Plex Mono",monospace;font-size:12px;line-height:1.5;padding:7px 10px;border-radius:5px;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+footer{color:var(--muted);font-size:12px;font-family:"IBM Plex Mono",monospace;border-top:1px solid var(--rule);padding-top:14px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+<div class="wrap">
+  <header>
+    <div class="eyebrow" id="eyebrow"></div>
+    <h1>Where the memory went, and what is left</h1>
+    <p class="sub" id="sub"></p>
+  </header>
+
+  <div class="tiles">
+    <div class="tile major">
+      <div class="lbl" id="ram-lbl">Internal RAM free</div>
+      <div class="hero-n" id="ram-free"></div>
+      <div class="of" id="ram-of"></div>
+      <span class="pill" id="ram-pill"></span>
+    </div>
+    <div class="tile minor">
+      <div class="lbl">Flash free (app partition)</div>
+      <div class="hero-n" id="flash-free"></div>
+      <div class="of" id="flash-of"></div>
+    </div>
+  </div>
+
+  <section class="card">
+    <h2 id="comp-h"></h2>
+    <div class="stack" id="stack"></div>
+    <div class="scale" id="scale"></div>
+    <div class="legend" id="legend"></div>
+    <p class="note" id="comp-note"></p>
+  </section>
+
+  <section class="card">
+    <h2 id="arch-h"></h2>
+    <div class="bars" id="bars"></div>
+    <p class="note" id="arch-note"></p>
+    <details>
+      <summary>Show data table</summary>
+      <div class="tblwrap"><table id="tbl">
+        <thead><tr><th>Archive</th><th>Bytes</th><th>Share of used</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </details>
+  </section>
+
+  <section class="card" id="flash-card">
+    <h2>Flash, for contrast</h2>
+    <div class="flashrow">
+      <div class="fbar" id="fbar"></div>
+      <div class="legend" id="flegend"></div>
+    </div>
+    <p class="note" id="flash-note"></p>
+  </section>
+
+  <section class="caveat">
+    <h2>What this chart cannot see</h2>
+    <p id="cav-1"></p>
+    <p>Task stacks, driver and TLS buffers, and every heap allocation come out of that
+      free figure once the firmware runs. A TLS session alone commonly holds tens of
+      kilobytes for the life of a connection, and none of it appears here.</p>
+    <p>The number that settles it is free internal heap and largest free block on a
+      live boot &mdash; <code>esp_get_free_internal_heap_size()</code> and
+      <code>heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)</code>, which is where
+      fragmentation shows up. That needs the board attached.</p>
+  </section>
+
+  <footer id="foot"></footer>
+</div>
+<div id="tip" role="status" aria-live="polite"></div>
+
+<script>
+const DATA = __DATA__;
+
+const RAMP = ["var(--s1)","var(--s2)","var(--s3)","var(--s4)"];
+const TOTAL = DATA.ramTotal, USED = DATA.ramUsed;
+const kb = b => (b/1024).toFixed(1)+" KB";
+const mb = b => (b/1048576).toFixed(2)+" MB";
+const pc = (b,t) => t ? (b/t*100).toFixed(2)+"%" : "-";
+const cm = b => b.toLocaleString("en-US");
+const big = b => b >= 1048576 ? mb(b) : kb(b);
+const unit = b => b >= 1048576 ? "MB" : "KB";
+const val = b => b >= 1048576 ? (b/1048576).toFixed(2) : (b/1024).toFixed(1);
+/* "an 8 MB partition", "an 11 KB buffer" — spoken form, not first letter */
+const art = s => /^(8|11|18)/.test(s) ? "an " : "a ";
+
+const tip = document.getElementById("tip");
+function bind(el, html){
+  const show = e => {
+    tip.innerHTML = html; tip.style.opacity = 1;
+    const r = tip.getBoundingClientRect(), box = el.getBoundingClientRect();
+    const x = e.clientX !== undefined ? e.clientX : box.left + box.width/2;
+    const y = e.clientY !== undefined ? e.clientY : box.top;
+    tip.style.left = Math.min(Math.max(8, x - r.width/2), innerWidth - r.width - 8) + "px";
+    tip.style.top  = Math.max(8, y - r.height - 12) + "px";
+  };
+  el.addEventListener("mousemove", show);
+  el.addEventListener("focus", show);
+  el.addEventListener("mouseleave", () => tip.style.opacity = 0);
+  el.addEventListener("blur", () => tip.style.opacity = 0);
+}
+
+/* header ------------------------------------------------------------------ */
+const parts = [DATA.project, DATA.target, DATA.idf, "link-time"].filter(Boolean);
+document.getElementById("eyebrow").innerHTML =
+  parts.map(p => "<span>"+p+"</span>").join('<i>/</i>');
+document.getElementById("ram-lbl").textContent = "Internal RAM free ("+DATA.ramLabel+")";
+
+const usedPct = USED/TOTAL*100;
+document.getElementById("ram-free").innerHTML =
+  val(DATA.ramFree)+'<span style="font-size:26px;letter-spacing:0"> '+unit(DATA.ramFree)+'</span>';
+document.getElementById("ram-of").textContent =
+  "of "+big(TOTAL)+" total — "+usedPct.toFixed(1)+"% used by the linked image";
+
+const pill = document.getElementById("ram-pill");
+if (usedPct < 60)      pill.textContent = "comfortable at link time";
+else if (usedPct < 80) { pill.textContent = "worth watching"; pill.classList.add("warn"); }
+else                   { pill.textContent = "tight — verify on device"; pill.classList.add("crit"); }
+
+if (DATA.partSize) {
+  const free = DATA.partSize - DATA.binSize;
+  document.getElementById("flash-free").innerHTML =
+    val(free)+'<span style="font-size:20px;letter-spacing:0"> '+unit(free)+'</span>';
+  document.getElementById("flash-of").textContent =
+    "of "+mb(DATA.partSize)+" app partition — image is "+mb(DATA.binSize);
+  document.getElementById("sub").textContent =
+    "Flash is not the constraint on this board — internal RAM is. Two very different stories, measured from the same build.";
+} else {
+  document.getElementById("flash-free").innerHTML =
+    val(DATA.binSize)+'<span style="font-size:20px;letter-spacing:0"> '+unit(DATA.binSize)+'</span>';
+  document.getElementById("flash-of").textContent = "image size — no partition table found to compare against";
+  document.getElementById("sub").textContent =
+    "Static footprint of the linked image: what the build claims before a single task starts.";
+}
+
+/* composition ------------------------------------------------------------- */
+document.getElementById("comp-h").textContent =
+  DATA.ramLabel+" composition — "+cm(TOTAL)+" bytes";
+document.getElementById("scale").innerHTML =
+  "<span>0</span><span>"+big(TOTAL/2)+"</span><span>"+big(TOTAL)+"</span>";
+
+const segs = DATA.sections.map((s,i) => ({k:s.k, v:s.v, d:s.d, c: RAMP[i % RAMP.length]}))
+  .concat([{k:"free", v:DATA.ramFree, d:"unclaimed at link time", c:"var(--free)"}]);
+const stack = document.getElementById("stack"), legend = document.getElementById("legend");
+segs.forEach(s => {
+  const d = document.createElement("div");
+  d.className = "seg"; d.style.flex = s.v+" 0 0"; d.style.background = s.c;
+  d.tabIndex = 0; d.setAttribute("role","img");
+  d.setAttribute("aria-label", s.k+" "+cm(s.v)+" bytes, "+pc(s.v,TOTAL)+" of "+DATA.ramLabel);
+  bind(d, "<b>"+s.k+"</b> &middot; "+s.d+"<br>"+cm(s.v)+" B &middot; "+kb(s.v)+" &middot; "+pc(s.v,TOTAL));
+  stack.appendChild(d);
+  const l = document.createElement("div");
+  l.className = "lg";
+  l.innerHTML = '<span class="sw" style="background:'+s.c+'"></span><span>'+s.k+
+    ' <b>'+kb(s.v)+'</b> <span style="color:var(--muted)">'+pc(s.v,TOTAL)+'</span></span>';
+  legend.appendChild(l);
+});
+const biggest = DATA.sections[0];
+document.getElementById("comp-note").innerHTML =
+  "Sections in descending order. <span class='mono'>"+biggest.k+"</span> ("+biggest.d+") is "+
+  kb(biggest.v)+" — "+pc(biggest.v,USED)+" of everything used.";
+
+/* archives ---------------------------------------------------------------- */
+document.getElementById("arch-h").textContent =
+  "Who holds the "+DATA.ramLabel+" — top "+DATA.archives.length+" archives";
+const rows = DATA.archives.concat(
+  DATA.restBytes > 0 ? [{k:"everything else ("+DATA.restCount+" archives)", v:DATA.restBytes, rest:true}] : []);
+const bars = document.getElementById("bars"), max = rows[0].v;
+const tbody = document.querySelector("#tbl tbody");
+rows.forEach((r,i) => {
+  const nm = document.createElement("div");
+  nm.className = "nm" + (r.rest ? " rest" : "");
+  nm.textContent = r.rest ? r.k : r.k.replace(/^lib/,"").replace(/\.a$/,"");
+  const tr = document.createElement("div");
+  tr.className = "tr"; tr.tabIndex = 0; tr.setAttribute("role","img");
+  tr.setAttribute("aria-label", r.k+" "+cm(r.v)+" bytes, "+pc(r.v,USED)+" of used");
+  const br = document.createElement("div");
+  br.className = "br"; br.style.width = (r.v/max*100)+"%";
+  br.style.background = r.rest ? "var(--free)" : RAMP[Math.min(3, Math.floor(i/rows.length*4))];
+  tr.appendChild(br);
+  bind(tr, "<b>"+r.k+"</b><br>"+cm(r.v)+" B &middot; "+kb(r.v)+"<br>"+pc(r.v,USED)+" of "+DATA.ramLabel+" used");
+  const vl = document.createElement("div");
+  vl.className = "vl" + (r.rest ? " rest" : ""); vl.textContent = kb(r.v);
+  bars.append(nm, tr, vl);
+  const row = tbody.insertRow();
+  row.insertCell().textContent = r.k;
+  row.insertCell().textContent = cm(r.v);
+  row.insertCell().textContent = pc(r.v,USED);
+});
+const charted = DATA.archives.reduce((a,b) => a+b.v, 0);
+document.getElementById("arch-note").innerHTML =
+  "The charted "+DATA.archives.length+" archives hold "+kb(charted)+" — "+pc(charted,USED)+
+  " of everything used. Framework and radio components normally dominate; first-party code is "+
+  "usually a small slice, which is why growth here is rarely where you look first.";
+
+/* flash ------------------------------------------------------------------- */
+if (DATA.partSize) {
+  const F = [
+    {k:"app image", v:DATA.binSize, c:"var(--s2)"},
+    {k:"free in app partition", v:DATA.partSize-DATA.binSize, c:"var(--free)"}
+  ];
+  const fbar = document.getElementById("fbar"), flegend = document.getElementById("flegend");
+  F.forEach(s => {
+    const d = document.createElement("div");
+    d.className = "seg"; d.style.flex = s.v+" 0 0"; d.style.background = s.c;
+    d.tabIndex = 0; d.setAttribute("role","img");
+    d.setAttribute("aria-label", s.k+" "+cm(s.v)+" bytes");
+    bind(d, "<b>"+s.k+"</b><br>"+cm(s.v)+" B &middot; "+mb(s.v)+" &middot; "+pc(s.v,DATA.partSize));
+    fbar.appendChild(d);
+    const l = document.createElement("div");
+    l.className = "lg";
+    l.innerHTML = '<span class="sw" style="background:'+s.c+'"></span><span>'+s.k+
+      ' <b>'+mb(s.v)+'</b> <span style="color:var(--muted)">'+pc(s.v,DATA.partSize)+'</span></span>';
+    flegend.appendChild(l);
+  });
+  const t = DATA.flashTop[0];
+  document.getElementById("flash-note").innerHTML =
+    "The binary is "+cm(DATA.binSize)+" bytes in "+art(mb(DATA.partSize))+mb(DATA.partSize)+" partition."+
+    (t ? " The largest single tenant of the ELF is <span class='mono'>"+t.k+"</span> at "+
+         cm(t.v)+" bytes." : "");
+} else {
+  document.getElementById("flash-card").remove();
+}
+
+document.getElementById("cav-1").innerHTML =
+  "Every number above is <strong>link time</strong>. The "+big(DATA.ramFree)+
+  " of headroom is what the image leaves free before a single task starts.";
+document.getElementById("foot").textContent =
+  "esp_idf_size on " + DATA.project + ".map · generated by the esp-ram-board skill";
+</script>
