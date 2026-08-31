@@ -47,6 +47,10 @@ flowchart TB
         aio["audio_io.c<br/><i>duplex I2S, playback ring, capture task,<br/>optional AEC + uplink VAD</i>"]
     end
 
+    subgraph power["Power"]
+        bat["battery.c<br/><i>AXP2101 fuel gauge, read-only, own sampler</i>"]
+    end
+
     subgraph disp["Display"]
         ui["ui.c<br/><i>panel, touch, canvas, frame timer, VAD</i>"]
         spectrum["face_spectrum.c<br/><i>FFT bars</i>"]
@@ -55,9 +59,9 @@ flowchart TB
         raster["orb_raster.c<br/><i>dots to pixels</i>"]
     end
 
-    main --> session & aio & ui & boot & sta & creds & prov & voices
+    main --> session & aio & ui & boot & sta & creds & prov & voices & bat
     session --> agent
-    agent --> voices & faces & colors & ui & aio & prompt & aname
+    agent --> voices & faces & colors & ui & aio & prompt & aname & bat
     prompt --> voices & faces & colors & aname
     agent -. "on_reload_required" .-> session
     boot -. "toggle / erase+reboot" .-> session
@@ -236,7 +240,7 @@ while the setup QR is up.
 
 ```mermaid
 flowchart LR
-    tlm["main.c telemetry loop<br/><i>1 Hz</i>"] -->|"stopped > 30 s"| want["ui_set_sleep(true)<br/><i>a request, not an act</i>"]
+    tlm["main.c telemetry loop<br/><i>1 Hz</i>"] -->|"stopped > 30 s<br/>or charge < critical"| want["ui_set_sleep(true)<br/><i>a request, not an act</i>"]
     want --> lvgl["LVGL task applies it<br/><i>refuses during the display test</i>"]
     lvgl --> panel["frame timer 200 ms<br/>brightness 15%"]
     touch(["touch"]) -.->|"withdraws the request<br/>and wakes at once"| lvgl
@@ -252,6 +256,13 @@ Three things about that shape:
   withdraws it and wakes the panel there and then without telling the loop. So
   the loop reads `ui_is_asleep()` back and *detects* the wake edge rather than
   assuming it, restarting the 30 s count from the wake.
+- **A critical battery is the one thing that outranks the session.** Below
+  `CONFIG_BATTERY_CRITICAL_PCT` the loop holds the panel asleep whether or not a
+  session is running, checked *ahead* of the branch that would otherwise wake it
+  — the panel is the largest draw on the board and dimming it is the only lever
+  this firmware has over the remaining charge. The session itself is left alone:
+  a device that hangs up mid-sentence to save power is worse than one that goes
+  dark and keeps talking.
 - **Asleep it keeps drawing, slowly and dim.** A frozen or black panel reads as a
   crashed device, and the LVGL worker has to stay running for touch to be as
   responsive asleep as awake — which is what rules out the adapter's own
@@ -303,6 +314,8 @@ one, Deepgram would call a web service instead of asking the device:
 | Function | Effect | Gated on |
 | --- | --- | --- |
 | `adjust_volume` | One ES8311 register write, effective on the next sample | always |
+| `set_volume` | Same write, absolute rather than relative; both go through `audio_io_set_volume()` | always |
+| `get_battery` | Reads only. Copies `battery.c`'s last sample and describes it | `CONFIG_BATTERY` |
 | `set_face` | `ui_set_face()` — the frame timer picks it up | always |
 | `set_color` | `ui_set_orb_color()` — same handoff; orb only | always |
 | `start_display_test` | Deferred to `AgentAudioDone`, then stops the session and hands the screen to `ui_start_display_test()` | always |
@@ -552,6 +565,7 @@ would ask for 434 kB.
 | `session_ctl` | 4 | 0 | start/stop/restart/reload, away from audio |
 | `dg_keepalive` | 4 | — | `KeepAlive` during silence |
 | `prov_dns` | 5 | — | captive-portal DNS, only while provisioning |
+| `battery` | 1 | 0 | one AXP2101 read every 5 s, and nothing else |
 | `main` | — | — | telemetry line, idle-timeout check |
 
 LVGL sits *below* both audio tasks on the core they share, deliberately: a

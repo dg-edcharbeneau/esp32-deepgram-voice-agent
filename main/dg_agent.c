@@ -495,8 +495,9 @@ static void handle_function_call(const cJSON *root)
         if (strcmp(name->valuestring, "get_battery") == 0) {
             battery_status_t bat;
             bool ok = battery_get(&bat);
-            ESP_LOGI(TAG, "EVT battery -> ok=%d pct=%d mv=%d chg=%d",
-                     (int)ok, bat.percent, bat.millivolts, (int)bat.charging);
+            ESP_LOGI(TAG, "EVT battery -> ok=%d pct=%d mv=%d chg=%d full=%d chgst=%d",
+                     (int)ok, bat.percent, bat.millivolts, (int)bat.charging,
+                     (int)bat.full, bat.chg_state);
 
             /*
              * Four answers, and the distinction between them is the point.
@@ -514,6 +515,15 @@ static void handle_function_call(const cJSON *root)
                 snprintf(content, sizeof(content),
                          "Battery is at %d percent and charging. Say so briefly.",
                          bat.percent);
+            } else if (bat.full) {
+                /* Plugged in and done. Reported as its own case because
+                 * "not charging" would be true here and would read as a fault,
+                 * and because the charger stops at a configured voltage that
+                 * need not be 100% on the gauge -- so the number is worth
+                 * saying alongside it rather than being smoothed to "full". */
+                snprintf(content, sizeof(content),
+                         "Battery is at %d percent and done charging, still plugged "
+                         "in. Say so briefly.", bat.percent);
             } else if (bat.low) {
                 snprintf(content, sizeof(content),
                          "Battery is at %d percent and not charging. Say so and suggest "

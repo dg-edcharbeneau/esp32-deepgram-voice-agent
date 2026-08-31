@@ -32,9 +32,23 @@ typedef struct {
     /* Cell voltage in millivolts, unsmoothed. Diagnostic: it is what tells a
      * log reader whether a percentage is believable. */
     int millivolts;
-    /* Current is flowing INTO the cell. Not the same as "USB is plugged in":
-     * a full battery on USB reads charging=false, which is correct. */
+    /*
+     * The cell is still filling. Derived from the AXP2101's charge STATE
+     * MACHINE (trickle, pre-charge, CC, CV), not from its current-direction
+     * field: the direction falls back to standby as the charge tapers into
+     * constant-voltage, so a bolt keyed to it vanished while the charger was
+     * still working. Gated on VBUS, so it is never true on a device running off
+     * the cell.
+     */
     bool charging;
+    /* Charge complete, cable still in. Distinct from !charging, which is also
+     * true on battery -- "full" and "not charging" mean opposite things to
+     * whoever is holding the device. */
+    bool full;
+    /* The raw charge state machine, 0-5 (trickle, pre, CC, CV, done, not
+     * charging), or -1 before the first read. Diagnostic: "charging stopped at
+     * 70%" is answered by which state it stopped in, and nothing else. */
+    int chg_state;
     /* percent has fallen to CONFIG_BATTERY_LOW_PCT, with hysteresis on the way
      * back up so a cell sitting on the threshold does not chatter. */
     bool low;

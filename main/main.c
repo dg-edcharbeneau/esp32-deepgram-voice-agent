@@ -1051,7 +1051,7 @@ void app_main(void)
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
                  " txdrop=%" PRIu32 " vadsup=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
-                 " ialloc=%u bat=%d mv=%d chg=%d",
+                 " ialloc=%u bat=%d mv=%d chg=%d chgst=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1071,6 +1071,11 @@ void app_main(void)
                  /* -1, not 0: "no reading" and "flat" have to be told apart by
                   * anything parsing this line. */
                  bat_ok ? bat.percent : -1, bat_ok ? bat.millivolts : -1,
-                 (int)bat.charging);
+                 (int)bat.charging,
+                 /* The raw AXP2101 charge state, 0-5, or -1 before the first
+                  * read. Which state a charge stopped in is the only thing that
+                  * distinguishes "hit the configured target voltage" from
+                  * "something else stopped it". */
+                 bat.chg_state);
     }
 }

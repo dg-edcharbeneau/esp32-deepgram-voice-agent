@@ -11,6 +11,8 @@ greeting round-trips through Deepgram's LLM and TTS and comes back as PCM. That
 is the end-to-end proof:
 
 ```
+I (1100) battery: AXP2101 at 0x34, sampling every 5000 ms
+I (1105) battery: charge target REG64=03 -> 4.2V
 I (1234) wifi: connecting to "YourSSID"
 I (3456) wifi: got ip 192.168.1.87
 I (3460) dg_agent: connecting to wss://agent.deepgram.com/v1/agent/converse
@@ -26,6 +28,22 @@ I (7405) main: turn complete, 96000 audio bytes received
 I (9000) audio_io: mic peak L=1842 R=17 
 I (13400) main: ready | turns=1 mic=64000 B rx=96000 B played=96000 B dropped=0 B | heap=8412300 B
 ```
+
+Two of those lines are the battery's whole boot output, and both are worth
+reading rather than skipping:
+
+- **`AXP2101 at 0x34`** means the PMU answered a probe. `no AXP2101 at 0x34` in
+  its place is not fatal — the rest of the firmware runs, the indicator simply
+  never appears and `get_battery` says it cannot read the battery — but it means
+  the shared I2C bus or the chip is not where this build expects.
+- **`charge target REG64=03 -> 4.2V`** is the voltage the charger stops at, read
+  once and never written. This is the line that explains a cell which charges
+  part-way and stops: a target of 4.0 V or 4.1 V leaves a 4.2 V cell genuinely
+  short, and the gauge then parks well under 100% with nothing wrong. Pair it
+  with `chgst=` on the TLM line, which is the charge state machine — `2` is
+  constant-current, `3` constant-voltage, `4` done, `5` not charging. A plateau
+  at `chgst=4` with `mv` near the target is the charger finishing normally; a
+  plateau at `chgst=5` well below it is something else stopping it.
 
 The counters separate the failure modes:
 

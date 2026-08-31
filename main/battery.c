@@ -20,28 +20,59 @@ static const char *TAG = "battery";
 #define AXP2101_HZ   400000
 
 /*
- * The four registers this module reads, and nothing else.
+ * The registers this module reads, and nothing else. Offsets and field layouts
+ * cross-checked against XPowersLib (src/XPowersAXP2101.hpp, src/XPowersParams.hpp,
+ * src/REG/AXP2101Constants.h), which is the reference implementation for this
+ * part, and confirmed against this board.
  *
  * REG00 PMU status 1  -- bit 5 is VBUS (USB) present.
- * REG01 PMU status 2  -- bits 6:5 are the battery current direction:
- *                        00 standby, 01 charging, 10 discharging.
+ * REG01 PMU status 2  -- two separate fields:
+ *                        [7:5] battery current direction, a THREE bit field:
+ *                              000 standby, 001 charging, 010 discharging.
+ *                        [2:0] the charge state machine: 0 trickle, 1 pre,
+ *                              2 constant current, 3 constant voltage,
+ *                              4 done, 5 not charging.
  * REG34/35 VBAT ADC   -- 14 bits across two registers, already in millivolts;
  *                        REG34 carries the high 6 bits.
+ * REG64 CV target     -- [2:0] the voltage charging stops at: 1=4.0 V, 2=4.1,
+ *                        3=4.2, 4=4.35, 5=4.4. Logged once at startup and never
+ *                        touched: it explains a cell that stops part-full, and
+ *                        changing it is a write to a chip that also owns the
+ *                        display rails.
  * REGA4 gauge percent -- 0-100 from the on-chip fuel gauge, 0xFF when it has
  *                        nothing to report.
  *
- * CONFIG_BATTERY_DUMP_REGS logs all of them once per sample so the first flash
- * on real hardware confirms these offsets against the board instead of against
- * a datasheet reading. Turn it off once the numbers have been seen to move.
+ * CONFIG_BATTERY_DUMP_REGS logs the sampled ones every sample, which is how the
+ * offsets were confirmed on hardware in the first place.
  */
 #define REG_STATUS1   0x00
 #define REG_STATUS2   0x01
 #define REG_VBAT_H    0x34
+#define REG_CV_TARGET 0x64
 #define REG_GAUGE     0xA4
 
 #define STATUS1_VBUS_GOOD   (1u << 5)
-#define STATUS2_DIR_MASK    (3u << 5)
-#define STATUS2_DIR_CHARGE  (1u << 5)
+
+/*
+ * THREE bits, not two.
+ *
+ * The first version masked 0x60 and ignored bit 7, which happened to agree on
+ * this board because bit 7 reads 0 -- but XPowersLib compares the whole of
+ * [7:5] against 1, and a set bit 7 would have made this report charging when
+ * the chip was saying something else entirely.
+ */
+#define STATUS2_DIR_SHIFT   5
+#define STATUS2_DIR_STANDBY 0x00
+#define STATUS2_DIR_CHARGE  0x01
+#define STATUS2_DIR_DISCHG  0x02
+
+/* The charge state machine in [2:0]. CV and DONE are the two that matter here:
+ * both are reached with the cable still in. */
+#define STATUS2_CHG_MASK    0x07
+#define STATUS2_CHG_CC      2
+#define STATUS2_CHG_CV      3
+#define STATUS2_CHG_DONE    4
+#define STATUS2_CHG_STOP    5
 
 /* Median of five. The gauge is already filtered on-chip, but the dots quantise
  * to 25% steps, so a reading resting on a boundary would toggle a dot every
@@ -75,6 +106,8 @@ static volatile bool s_valid;
 static volatile int  s_percent;
 static volatile int  s_millivolts;
 static volatile bool s_charging;
+static volatile bool s_full;
+static volatile int  s_chg_state = -1;
 static volatile bool s_low;
 
 static esp_err_t reg_read(uint8_t reg, uint8_t *out, size_t len)
@@ -141,14 +174,38 @@ static void sampler_task(void *arg)
         }
 
         int mv = (int)(((uint16_t)(vbat[0] & 0x3F) << 8) | vbat[1]);
-        bool charging = (status2 & STATUS2_DIR_MASK) == STATUS2_DIR_CHARGE;
+
+        const unsigned dir = (unsigned)status2 >> STATUS2_DIR_SHIFT;
+        const unsigned chg = (unsigned)status2 & STATUS2_CHG_MASK;
+        const bool vbus = (status1 & STATUS1_VBUS_GOOD) != 0;
+
+        /*
+         * CHARGING MEANS THE CELL IS STILL FILLING, not "current is measurably
+         * flowing in this instant".
+         *
+         * Direction alone was wrong on the bench: as the charge tapers into
+         * constant-voltage the direction field falls back to standby, so the
+         * bolt vanished while the charger was still working -- which reads as a
+         * charger that gave up. The state machine is the honest source: trickle,
+         * pre-charge, CC and CV are all still charging. DONE is not, and is
+         * reported separately, because "full" and "not charging" mean opposite
+         * things to whoever is holding the device.
+         *
+         * Gated on VBUS so a stale state field cannot claim charging on a device
+         * running off the cell -- the direction field is the corroborating
+         * reading, not the only one.
+         */
+        const bool active_phase = (chg <= STATUS2_CHG_CV);
+        bool charging = vbus && (dir == STATUS2_DIR_CHARGE || active_phase);
+        bool full = vbus && (chg == STATUS2_CHG_DONE);
 
         if (gauge > 100) {
             /* 0xFF means the gauge has no answer -- typically no cell attached,
              * which is exactly the case on a bench board running off USB. Report
              * "cannot read" rather than a number, and let the UI draw nothing. */
             s_valid = false;
-            s_charging = charging;
+            s_charging = false;
+            s_full = false;
             s_millivolts = mv;
             filled = 0;
             reported = -1;
@@ -184,17 +241,25 @@ static void sampler_task(void *arg)
         bool low = was_low ? (reported <= CONFIG_BATTERY_LOW_PCT + LOW_CLEAR_MARGIN)
                            : (reported <= CONFIG_BATTERY_LOW_PCT);
 
-        bool announce = (!s_valid) || (low != was_low) || (charging != s_charging);
+        bool announce = (!s_valid) || (low != was_low) ||
+                        (charging != s_charging) || (full != s_full) ||
+                        ((int)chg != s_chg_state);
 
         s_percent = reported;
         s_millivolts = mv;
         s_charging = charging;
+        s_full = full;
+        s_chg_state = (int)chg;
         s_low = low;
         s_valid = true;
 
         if (announce) {
-            ESP_LOGI(TAG, "EVT battery -> pct=%d mv=%d chg=%d low=%d",
-                     reported, mv, (int)charging, (int)low);
+            /* chgst is the raw state machine, because "charging stopped at 70%"
+             * is answered by which state it stopped IN and nothing else. */
+            ESP_LOGI(TAG, "EVT battery -> pct=%d mv=%d chg=%d full=%d low=%d "
+                          "chgst=%u dir=%u vbus=%d",
+                     reported, mv, (int)charging, (int)full, (int)low,
+                     chg, dir, (int)vbus);
         }
 
         vTaskDelay(pdMS_TO_TICKS(CONFIG_BATTERY_SAMPLE_MS));
@@ -243,6 +308,25 @@ void battery_start(void)
         return;
     }
 
+    /*
+     * The charge target, read once and reported.
+     *
+     * This is the number that explains a cell which charges to 70% and stops:
+     * the chip stops at the configured voltage, and 4.0 V or 4.1 V leaves a
+     * 4.2 V cell genuinely part-full. Read only -- raising it is a write to the
+     * chip that also feeds the panel and codec rails, and it is a decision
+     * about someone's battery, not a default to change quietly.
+     */
+    uint8_t cv = 0;
+    static const char *const cv_name[] = {
+        "reserved", "4.0V", "4.1V", "4.2V", "4.35V", "4.4V",
+    };
+    if (reg_read(REG_CV_TARGET, &cv, 1) == ESP_OK) {
+        const unsigned sel = cv & 0x07;
+        ESP_LOGI(TAG, "charge target REG64=%02x -> %s", cv,
+                 (sel < (sizeof(cv_name) / sizeof(cv_name[0]))) ? cv_name[sel] : "?");
+    }
+
     ESP_LOGI(TAG, "AXP2101 at 0x%02x, sampling every %d ms",
              AXP2101_ADDR, CONFIG_BATTERY_SAMPLE_MS);
 }
@@ -256,6 +340,8 @@ bool battery_get(battery_status_t *out)
     out->percent = s_percent;
     out->millivolts = s_millivolts;
     out->charging = s_charging;
+    out->full = s_full;
+    out->chg_state = s_chg_state;
     out->low = s_low;
     return out->valid;
 }

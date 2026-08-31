@@ -42,6 +42,10 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 | `CONFIG_AUDIO_OUT_VOLUME` | 70 | speaker too quiet, or clipping at the top of the range |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
 | `CONFIG_HEAP_PROBE` | off | chasing an allocation failure — names the size and caps that failed, which the `TLM` line cannot |
+| `CONFIG_BATTERY_SAMPLE_MS` | 5000 | rarely: charge is slow, and every sample is traffic on the bus touch and the codec share |
+| `CONFIG_BATTERY_LOW_PCT` | 20 | when the warning should start. Clears five points higher, so it cannot chatter |
+| `CONFIG_BATTERY_CRITICAL_PCT` | 8 | when the panel should be held dark to stretch the rest of the charge. 0 disables it |
+| `CONFIG_BATTERY_DUMP_REGS` | off | bring-up on a new board — logs the raw AXP2101 registers every sample. Off means the `EVT battery` state-change lines and the `TLM` fields are the instrument |
 
 ### Echo cancellation and full duplex
 
