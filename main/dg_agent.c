@@ -20,6 +20,7 @@
 #include "api_key.h"
 #include "audio_io.h"
 #include "battery.h"
+#include "wifi_sta.h"
 #include "dg_agent.h"
 #include "faces.h"
 #include "orb_colors.h"
@@ -538,6 +539,46 @@ static void handle_function_call(const cJSON *root)
         }
 #endif
 
+#if CONFIG_WIFI_SIGNAL
+        if (strcmp(name->valuestring, "get_signal_strength") == 0) {
+            wifi_signal_t sig;
+            bool ok = wifi_sta_get_signal(&sig);
+            ESP_LOGI(TAG, "EVT signal -> ok=%d rssi=%d bars=%d ch=%d weak=%d",
+                     (int)ok, (int)sig.rssi, (int)sig.bars, (int)sig.channel,
+                     (int)sig.weak);
+
+            /*
+             * THE dBm NEVER LEAVES THIS FUNCTION. "Minus sixty-two dBm" spoken
+             * aloud tells the listener nothing, and handing the model a number
+             * with no scale invites it to invent one -- so the bucket is turned
+             * into the sentence here, the same way the battery cases above hand
+             * over a phrasing rather than a policy.
+             *
+             * A standing irony worth knowing about: a link bad enough to matter
+             * may not deliver the tool call at all. What this tool describes is
+             * always a link that was good enough to carry the question.
+             */
+            if (!ok) {
+                snprintf(content, sizeof(content),
+                         "You cannot read your Wi-Fi signal right now. Say so plainly "
+                         "and do not guess.");
+            } else {
+                static const char *const PHRASE[5] = {
+                    "very weak. Say so and suggest moving closer to the router",
+                    "weak. Say so and mention you may cut out",
+                    "fair. Say so briefly",
+                    "good. Say so briefly",
+                    "excellent. Say so briefly",
+                };
+                const int b = (sig.bars > 4) ? 4 : sig.bars;
+                snprintf(content, sizeof(content),
+                         "Your Wi-Fi signal is %s.", PHRASE[b]);
+            }
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+#endif
+
         if (strcmp(name->valuestring, "set_face") == 0) {
             int index = -1;
             const char *wanted = NULL;
@@ -833,6 +874,28 @@ static esp_err_t send_settings(void)
     cJSON_AddStringToObject(bparams, "type", "object");
     cJSON_AddObjectToObject(bparams, "properties");
     cJSON_AddItemToArray(functions, get_battery);
+#endif
+
+#if CONFIG_WIFI_SIGNAL
+    /*
+     * The other reading tool, and gated for the same reason.
+     *
+     * "why do you keep cutting out" is the phrasing this exists for as much as
+     * "how is your wifi" -- the link is the most likely cause of a broken
+     * conversation and the model has no other way to see it.
+     */
+    cJSON *get_signal = cJSON_CreateObject();
+    cJSON_AddStringToObject(get_signal, "name", "get_signal_strength");
+    cJSON_AddStringToObject(get_signal, "description",
+                            "Read your OWN Wi-Fi signal strength. Use it whenever they "
+                            "ask about your wifi, your signal, your connection, or why "
+                            "you are cutting out or sounding choppy. You reach the "
+                            "network over Wi-Fi and this is the only way you can know "
+                            "how good that link is -- never guess or estimate it.");
+    cJSON *wparams = cJSON_AddObjectToObject(get_signal, "parameters");
+    cJSON_AddStringToObject(wparams, "type", "object");
+    cJSON_AddObjectToObject(wparams, "properties");
+    cJSON_AddItemToArray(functions, get_signal);
 #endif
 
     /*

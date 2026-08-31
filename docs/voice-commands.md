@@ -1,7 +1,8 @@
 # Changing things by asking
 
 Everything the agent can change about itself mid-conversation -- volume, name,
-face, orb colour, voice -- and what each one costs.
+face, orb colour, voice -- and what each one costs, plus the two things it can
+read about itself: charge and Wi-Fi signal.
 
 ## Changing the volume by asking
 
@@ -102,7 +103,7 @@ cannot invert against the WebSocket client's own recursive lock.
 
 ## Asking how much charge is left
 
-`get_battery` is the only tool here that changes nothing -- it reads. "How much
+`get_battery` is one of the two tools here that change nothing -- they read. "How much
 charge is left?", "are you plugged in?", "how long will you last?" all land on
 it, and it answers with a percentage the agent says out loud.
 
@@ -139,6 +140,64 @@ alongside it rather than being rounded up to "full".
 The dots on screen use the same reading, and the same hysteresed `low` flag, so
 what the device says and what it shows cannot disagree. See
 [the display](display.md) for where they are drawn.
+
+## Asking how the Wi-Fi is
+
+`get_signal_strength` is the other reading tool. "How's your wifi?", "how's your
+connection?" and "why do you keep cutting out?" all land on it.
+
+`esp_wifi_sta_get_ap_info()` returns the RSSI the Wi-Fi driver already has from
+the beacons it receives, so this costs no scan and no radio time -- unlike the
+scan in `main/wifi_prov.c`, which starves the link for hundreds of ms and only
+ever runs while there is no session. There is no sampling task; the number is
+read where it is used.
+
+**The dBm never reaches the model.** "Minus sixty-two dBm" spoken aloud tells the
+listener nothing, and a number with no scale attached invites the model to invent
+one, so `main/wifi_sta.c` buckets it and `dg_agent.c` turns the bucket into the
+sentence:
+
+| bars | dBm | what it says |
+|---|---|---|
+| 4 | >= -55 | "excellent" |
+| 3 | >= -67 | "good" |
+| 2 | >= -75 | "fair" |
+| 1 | >= -85 | "weak", and that it may cut out |
+| 0 | < -85 | "very weak", plus a suggestion to move closer to the router |
+| no association | -- | says it cannot read the signal, and is told not to guess |
+
+Buckets are **hysteresed by 3 dB on the way up only**: beacon RSSI walks several
+dB between beacons, so a device sitting at a boundary would otherwise flicker
+between two answers. Losing a bar is reported at once, because that is the
+reading worth acting on; gaining one waits for margin.
+
+There is a standing irony here worth knowing about when reading a log: a link bad
+enough to matter may never deliver the tool call at all. What this tool describes
+is always a link that was good enough to carry the question.
+
+The wifi icon on screen uses the same bucket and the same hysteresis, so what
+the device says and what it shows cannot disagree. See
+[the display](display.md) for how it is drawn. Independently of the tool, the
+driver's own RSSI threshold (`CONFIG_WIFI_SIGNAL_WEAK_DBM`, default -80 dBm) logs
+**one** line per excursion below it -- which is what puts a cause in the log
+immediately before the dropped audio that follows.
+
+One line, not one per crossing, and the difference was measured: the driver's
+threshold is one-shot, so the handler re-arms it, and re-arming while the link is
+still below it makes it fire again about once a second. A ten-second dip produced
+thirteen identical lines and buried the TLM output at the moment it was worth
+reading. So the arming is unconditional and the *line* is edge-triggered -- gated
+until `wifi_sta_get_signal()` sees the reading recover past the threshold plus the
+same 3 dB, which makes the 1 Hz reader the thing that decides an excursion has
+ended.
+
+Two limits worth knowing when reading a log. The driver's own averaging is
+coarser than the 1 Hz sample, so **not every dip visible in `rssi=` raises an
+event** -- measured dips to -80 dBm passed without one. And the 3 dB recovery
+margin can swallow a second crossing if the link only recovers part-way. Both are
+acceptable because `rssi=` is on the TLM line every second regardless: the
+warning is a convenience for spotting a cause quickly, the TLM line is the
+record.
 
 ## Changing its name by asking
 

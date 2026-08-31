@@ -4,6 +4,60 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Wi-Fi signal strength.** The link carries the whole session, and when it
+  degraded the only visible symptom was dropped audio with nothing in the log
+  saying the radio was the cause. `wifi_sta_get_signal()` now reads the RSSI of
+  the associated AP -- from `esp_wifi_sta_get_ap_info()`, which returns a value
+  the driver already holds, so there is no scan, no bus transaction and no
+  sampler task -- and three things use it:
+  - The familiar wifi glyph -- a dot with three arcs above it -- at 10 to 11
+    o'clock, in the orb's own colour, balancing the charge dots across the
+    panel. Four elements for four bars: the dot alone is one, each arc past it
+    is one more, the progression every phone draws. On screen while stopped or
+    asleep, and whenever the signal is weak. Free on the frame budget: 15.0 ms
+    draw with it up against 14.9 ms without.
+  - `rssi=`, `bars=` and `ch=` on the TLM line, `-1` each when there is no
+    association.
+  - `get_signal_strength`, so "how's your wifi?" and "why do you keep cutting
+    out?" are answered out loud. The dBm never reaches the model: a number with
+    no scale invites an invented one, so the bucket becomes the sentence.
+
+  dBm is bucketed to 0-4 bars with **3 dB of hysteresis on promotion only** --
+  beacon RSSI walks several dB between beacons, so a device sitting at a bucket
+  boundary would otherwise flicker between two answers, while a link that has
+  genuinely gone bad should be reported at once.
+
+  Separately, the driver's own RSSI threshold
+  (`CONFIG_WIFI_SIGNAL_WEAK_DBM`, -80 dBm) logs one line per excursion below it,
+  which puts a cause in the log immediately before the dropped audio that
+  follows. It is one-shot and re-armed in the handler -- without that there would
+  be exactly one warning per association -- but the line itself is
+  edge-triggered, because re-arming while still below the threshold makes the
+  driver fire about once a second. Measured on hardware: thirteen identical lines
+  for one ten-second dip before the gate, three lines for three dips after it.
+
+  Two limits, both verified rather than assumed: the driver's averaging is
+  coarser than the 1 Hz sample, so not every dip visible in `rssi=` raises an
+  event, and the 3 dB recovery margin can swallow a second crossing if the link
+  only recovers part-way. `rssi=` is on the TLM line every second regardless --
+  the event is a convenience, the TLM line is the record.
+
+  `CONFIG_WIFI_SIGNAL` (default on) compiles the whole thing out, and
+  `CONFIG_WIFI_SIGNAL_SHOW_BARS` drops just the row.
+
+### Changed
+
+- The two overlays now share the tint and the dim ratio (`UI_ARC_OVERLAY` in
+  `main/ui.c`) -- the "one colour, one dim step" rule that keeps an indicator
+  from reading as a foreign object on the glass. Each keeps its own geometry and
+  its own boxes, because a row of dots along a curve and a glyph that fills its
+  own box want opposite answers on how to clear themselves. No visible change to
+  the charge dots.
+
 ## [0.5.0] - 2026-08-31
 
 ### Fixed

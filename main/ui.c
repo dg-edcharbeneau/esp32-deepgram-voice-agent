@@ -92,6 +92,56 @@ static const char *TAG = "ui";
 #define INDICATOR_RGB_INTERRUPT 0xe8a54a
 #endif
 
+/*
+ * THE TWO ARC OVERLAYS, and what they share.
+ *
+ * Charge sits at 1-2 o'clock and Wi-Fi signal mirrors it at 10-11, both on the
+ * same radius, both as four dots. They are independently configurable, so the
+ * pieces neither one owns alone -- the radius, the dot size, the dim ratio, the
+ * tint and the box arithmetic -- live here rather than being duplicated into
+ * whichever one happens to be compiled in.
+ */
+#define UI_ARC_OVERLAY (CONFIG_BATTERY_SHOW_DOTS || CONFIG_WIFI_SIGNAL_SHOW_BARS)
+
+#if UI_ARC_OVERLAY
+/*
+ * COLOUR COMES FROM THE ORB, not from constants here.
+ *
+ * Whoever set the orb's colour picked the one colour this device shows, and an
+ * indicator in its own fixed palette reads as a foreign object on the glass --
+ * particularly the bolt, which was warm amber over whatever the orb happened to
+ * be. So every dot, the bolt and every signal arc take s_tint_rgb, and a "set
+ * your colour to teal" moves them along with everything else.
+ *
+ * Unlit parts are the SAME hue at a quarter brightness rather than a neutral
+ * grey: it keeps each indicator reading as one object, and the contrast between
+ * lit and unlit survives on every colour in the catalog, which a fixed grey does
+ * not -- against a dark blue orb the old grey was brighter than the lit dots.
+ *
+ * A quarter, not a half: at a half the two states are hard to tell apart at
+ * arm's length on the darker colours, which is the whole job of an indicator.
+ */
+#define ARC_SPENT_NUM 1
+#define ARC_SPENT_DEN 4
+
+/* Per channel, so the hue is preserved and only the brightness moves. */
+static inline lv_color_t arc_tint(uint32_t rgb, int num, int den)
+{
+    const uint32_t r = ((rgb >> 16) & 0xFF) * (uint32_t)num / (uint32_t)den;
+    const uint32_t g = ((rgb >> 8) & 0xFF) * (uint32_t)num / (uint32_t)den;
+    const uint32_t b = (rgb & 0xFF) * (uint32_t)num / (uint32_t)den;
+    return lv_color_make((uint8_t)r, (uint8_t)g, (uint8_t)b);
+}
+
+/*
+ * Slop around every box an overlay clears, for the anti-aliased edge of the
+ * shape inside it. Both overlays black their own boxes and invalidate them --
+ * the canvas keeps its pixels, so an indicator that hides by simply not drawing
+ * leaves its last state on the glass for good.
+ */
+#define ARC_SLOP 2
+#endif /* UI_ARC_OVERLAY */
+
 #if CONFIG_BATTERY_SHOW_DOTS
 /*
  * CHARGE, AS FOUR DOTS ON THE OUTER CURVE, 1 TO 2 O'CLOCK.
@@ -130,35 +180,6 @@ static const lv_point_t BATTERY_DOT_XY[BATTERY_DOTS] = {
     {406, 133},  /* 60 deg -- 2 o'clock */
 };
 
-/*
- * COLOUR COMES FROM THE ORB, not from constants here.
- *
- * Whoever set the orb's colour picked the one colour this device shows, and an
- * indicator in its own fixed palette reads as a foreign object on the glass --
- * particularly the bolt, which was warm amber over whatever the orb happened to
- * be. So dots and bolt all take s_tint_rgb, and a "set your colour to teal"
- * moves them along with everything else.
- *
- * Spent dots are the SAME hue at a quarter brightness rather than a neutral
- * grey: it keeps the row reading as one object, and the contrast between held
- * and spent survives on every colour in the catalog, which a fixed grey does
- * not -- against a dark blue orb the old grey was brighter than the lit dots.
- *
- * A quarter, not a half: at a half the two states are hard to tell apart at
- * arm's length on the darker colours, which is the whole job of the row.
- */
-#define BATTERY_SPENT_NUM 1
-#define BATTERY_SPENT_DEN 4
-
-/* Per channel, so the hue is preserved and only the brightness moves. */
-static inline lv_color_t battery_tint(uint32_t rgb, int num, int den)
-{
-    const uint32_t r = ((rgb >> 16) & 0xFF) * (uint32_t)num / (uint32_t)den;
-    const uint32_t g = ((rgb >> 8) & 0xFF) * (uint32_t)num / (uint32_t)den;
-    const uint32_t b = (rgb & 0xFF) * (uint32_t)num / (uint32_t)den;
-    return lv_color_make((uint8_t)r, (uint8_t)g, (uint8_t)b);
-}
-
 /* The bolt continues the arc past the last dot. Half-width/half-height. */
 #define BATTERY_BOLT_X  421
 #define BATTERY_BOLT_Y  165
@@ -166,11 +187,10 @@ static inline lv_color_t battery_tint(uint32_t rgb, int num, int den)
 #define BATTERY_BOLT_HH 8
 
 /*
- * WHAT THE OVERLAY OWNS, as five small boxes rather than one large one.
+ * THE ROW AS FIVE SMALL BOXES rather than one large one.
  *
- * The canvas keeps its pixels, so this has to erase what it drew -- and on an
- * arc the bounding box of the row is ~90x120, about 10,800 pixels, which is as
- * much as the orb's entire per-frame clear. Clearing and invalidating each
+ * On an arc the bounding box of the row is ~90x120, about 10,800 pixels, which
+ * is as much as the orb's entire per-frame clear. Clearing and invalidating each
  * shape's own box instead costs ~1,300, and it is the same thing orb_raster.c
  * does for exactly the same reason.
  *
@@ -178,11 +198,9 @@ static inline lv_color_t battery_tint(uint32_t rgb, int num, int den)
  * appears only while charging cannot erase the bolt it left behind -- which is
  * the bug that put a bolt on screen after the cable came out.
  */
-#define BATTERY_SLOP 2
-
 static inline lv_area_t battery_dot_box(int i)
 {
-    const int32_t r = BATTERY_DOT_R + BATTERY_SLOP;
+    const int32_t r = BATTERY_DOT_R + ARC_SLOP;
     return (lv_area_t){
         .x1 = BATTERY_DOT_XY[i].x - r,
         .y1 = BATTERY_DOT_XY[i].y - r,
@@ -194,10 +212,91 @@ static inline lv_area_t battery_dot_box(int i)
 static inline lv_area_t battery_bolt_box(void)
 {
     return (lv_area_t){
-        .x1 = BATTERY_BOLT_X - BATTERY_BOLT_HW - BATTERY_SLOP,
-        .y1 = BATTERY_BOLT_Y - BATTERY_BOLT_HH - BATTERY_SLOP,
-        .x2 = BATTERY_BOLT_X + BATTERY_BOLT_HW + BATTERY_SLOP,
-        .y2 = BATTERY_BOLT_Y + BATTERY_BOLT_HH + BATTERY_SLOP,
+        .x1 = BATTERY_BOLT_X - BATTERY_BOLT_HW - ARC_SLOP,
+        .y1 = BATTERY_BOLT_Y - BATTERY_BOLT_HH - ARC_SLOP,
+        .x2 = BATTERY_BOLT_X + BATTERY_BOLT_HW + ARC_SLOP,
+        .y2 = BATTERY_BOLT_Y + BATTERY_BOLT_HH + ARC_SLOP,
+    };
+}
+#endif
+
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+/*
+ * SIGNAL, AS THE WI-FI ICON EVERYONE ALREADY KNOWS: a dot with three arcs
+ * fanning out above it, filling outward.
+ *
+ * Not a mirrored copy of the charge row, which is what this was first. Four dots
+ * on the opposite curve were structurally cheap and told the owner nothing --
+ * two identical rows on the same glass, and the only thing distinguishing "how
+ * full" from "how connected" was which side of the panel you were looking at.
+ * The wifi glyph needs no legend at all, which is the entire argument for it.
+ *
+ * FOUR ELEMENTS FOR FOUR BARS, and they line up exactly: the dot alone is one
+ * bar, each arc past it is one more. That is the same progression every phone
+ * and laptop draws, so a device showing dot-plus-one-arc is showing what its
+ * owner already reads as poor reception.
+ *
+ * PLACED at 315 degrees on the same radius 200 the charge row uses, so the two
+ * indicators balance across the panel, but drawn UPRIGHT rather than rotated to
+ * the tangent. A wifi glyph tipped 45 degrees stops being the familiar shape and
+ * starts being a decoration; the arcs have to fan straight up to read.
+ *
+ *     x = CENTER_X + 200*sin(315 deg) = 92,  y = CENTER_Y - 200*cos(315 deg) = 92
+ *
+ * The apex sits below that so the glyph's mass, not its lowest point, lands on
+ * the mark.
+ */
+#define SIGNAL_APEX_X   92
+#define SIGNAL_APEX_Y   103
+
+/* The dot. Filled circle centred on the apex. */
+#define SIGNAL_DOT_R    3
+
+/*
+ * The three arcs, OUTER radius each -- lv_draw_arc() puts the outer edge at
+ * `radius` and grows inward, the same convention draw_indicators() records for
+ * the touch ring. Six px of pitch at three px of stroke leaves three px of gap,
+ * which is what keeps the arcs from reading as one thick band at arm's length.
+ */
+#define SIGNAL_ARC_W    3
+static const uint16_t SIGNAL_ARC_R[3] = { 10, 16, 22 };
+
+/*
+ * A 90-degree fan centred on straight up. LVGL angles put 0 at 3 o'clock and
+ * increase clockwise, so up is 270 and the fan runs 225 to 315.
+ *
+ * 90 degrees rather than the 120 some icon sets use: the arcs have to clear the
+ * dot without crowding it, and a wider fan at this size closes the gap between
+ * the innermost arc's ends and the dot until the two touch.
+ */
+#define SIGNAL_ANGLE_START 225
+#define SIGNAL_ANGLE_END   315
+
+/*
+ * ONE box for the whole glyph, unlike the charge row's five.
+ *
+ * The opposite call to the one battery_dot_box() documents, and for the opposite
+ * reason: four dots strung along an arc have a bounding box ten times the ink,
+ * while this glyph fills its own box -- the arcs span it horizontally and the
+ * dot holds the bottom. Per-shape boxes here would be four overlapping
+ * rectangles adding up to more than the one they sit in.
+ *
+ * ~37x30, about 1,100 pixels, which is a little less than the charge row's five
+ * boxes cost together.
+ *
+ * The widest points are the outermost arc's two ENDS, at 225 and 315 degrees:
+ * 22*cos(45) = 15.6 either side of the apex. The top is the same arc at 270,
+ * a full 22 above it.
+ */
+static inline lv_area_t signal_box(void)
+{
+    const int32_t outer = SIGNAL_ARC_R[2];
+    const int32_t half_w = 16;   /* ceil(22 * cos 45) */
+    return (lv_area_t){
+        .x1 = SIGNAL_APEX_X - half_w - ARC_SLOP,
+        .y1 = SIGNAL_APEX_Y - outer - ARC_SLOP,
+        .x2 = SIGNAL_APEX_X + half_w + ARC_SLOP,
+        .y2 = SIGNAL_APEX_Y + SIGNAL_DOT_R + ARC_SLOP,
     };
 }
 #endif
@@ -648,6 +747,19 @@ static volatile bool s_bat_valid;
  * outlived the charging cable. Whatever put ink there has to take it away. */
 static bool s_bat_drawn;
 #endif
+
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+/* Written by ui_set_signal from main's telemetry task, read by the frame timer.
+ * Independent words, per the setter contract in ui.h: store here, apply there.
+ * Nothing in this file calls into the Wi-Fi driver. */
+static volatile int  s_sig_bars;
+static volatile bool s_sig_weak;
+static volatile bool s_sig_valid;
+
+/* Whether ink from this overlay is currently on the canvas -- the same
+ * load-bearing flag as s_bat_drawn, for the same reason. LVGL task only. */
+static bool s_sig_drawn;
+#endif
 static volatile bool s_failed;
 
 /*
@@ -867,6 +979,19 @@ bool ui_is_asleep(void)
 void ui_set_stopped(bool stopped)
 {
     s_stopped = stopped;
+}
+
+void ui_set_signal(int bars, bool weak, bool valid)
+{
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+    s_sig_bars = bars;
+    s_sig_weak = weak;
+    s_sig_valid = valid;
+#else
+    (void)bars;
+    (void)weak;
+    (void)valid;
+#endif
 }
 
 void ui_set_battery(int percent, bool charging, bool low, bool valid)
@@ -1178,30 +1303,13 @@ static void draw_indicators(void)
 
 #if CONFIG_BATTERY_SHOW_DOTS
 /*
- * Draw the charge dots, and a bolt while current is going in.
+ * The charge row's draw path. Down here rather than with its geometry above
+ * because these touch the canvas and the orb's tint, and both are declared
+ * further down this file.
  *
- * CALLED AFTER THE FACE, for the reason draw_indicators() documents at length:
- * the orb clears only the boxes its own dots occupied last frame, so an overlay
- * drawn first comes out moth-eaten. Same consequence too -- this has to
- * invalidate its own bounding box, because nothing else knows it drew.
- *
- * WHEN IT IS ON SCREEN
- *
- * Stopped, or asleep, or low, or charging. The first two are the states in which
- * someone is looking at the device rather than talking to it, and the last two
- * are the ones they need to know about whatever they are doing. Not during a
- * conversation at full charge: the face is the point then, and a gauge that is
- * always up is just clutter that also costs an invalidated box every frame.
- *
- * Nothing is drawn before the first sample (`valid`), so boot never flashes an
- * empty battery, and nothing is drawn under the QR overlay or the display test
- * -- both of those own the whole screen by design.
- */
-/*
- * Black every box the overlay owns and push them to the panel.
- *
- * Canvas is at 0,0 and covers the panel, so these are screen coordinates -- the
- * same assumption draw_indicators() and orb_raster.c record.
+ * Not shared with the signal glyph: it draws arcs rather than a row of dots, and
+ * owns one box rather than five. What the two do share is arc_tint() and the dim
+ * ratio, which is where the "one colour, one dim step" rule actually lives.
  */
 static void battery_wipe(lv_layer_t *layer)
 {
@@ -1231,7 +1339,29 @@ static void battery_invalidate(void)
     lv_area_t b = battery_bolt_box();
     lv_obj_invalidate_area(canvas_obj, &b);
 }
+#endif /* CONFIG_BATTERY_SHOW_DOTS */
 
+#if CONFIG_BATTERY_SHOW_DOTS
+/*
+ * Draw the charge dots, and a bolt while current is going in.
+ *
+ * CALLED AFTER THE FACE, for the reason draw_indicators() documents at length:
+ * the orb clears only the boxes its own dots occupied last frame, so an overlay
+ * drawn first comes out moth-eaten. Same consequence too -- this has to
+ * invalidate its own bounding box, because nothing else knows it drew.
+ *
+ * WHEN IT IS ON SCREEN
+ *
+ * Stopped, or asleep, or low, or charging. The first two are the states in which
+ * someone is looking at the device rather than talking to it, and the last two
+ * are the ones they need to know about whatever they are doing. Not during a
+ * conversation at full charge: the face is the point then, and a gauge that is
+ * always up is just clutter that also costs an invalidated box every frame.
+ *
+ * Nothing is drawn before the first sample (`valid`), so boot never flashes an
+ * empty battery, and nothing is drawn under the QR overlay or the display test
+ * -- both of those own the whole screen by design.
+ */
 static void draw_battery(void)
 {
     const bool show = s_bat_valid && s_qr_payload == NULL && !s_test_active &&
@@ -1282,8 +1412,8 @@ static void draw_battery(void)
 
     for (int i = 0; i < BATTERY_DOTS; i++) {
         dot.bg_color = (i < lit)
-                           ? battery_tint(s_tint_rgb, 1, 1)
-                           : battery_tint(s_tint_rgb, BATTERY_SPENT_NUM, BATTERY_SPENT_DEN);
+                           ? arc_tint(s_tint_rgb, 1, 1)
+                           : arc_tint(s_tint_rgb, ARC_SPENT_NUM, ARC_SPENT_DEN);
         lv_area_t a = {
             .x1 = BATTERY_DOT_XY[i].x - BATTERY_DOT_R,
             .y1 = BATTERY_DOT_XY[i].y - BATTERY_DOT_R,
@@ -1304,7 +1434,7 @@ static void draw_battery(void)
         lv_draw_triangle_dsc_t tri;
         lv_draw_triangle_dsc_init(&tri);
         tri.opa = LV_OPA_COVER;
-        tri.color = battery_tint(s_tint_rgb, 1, 1);
+        tri.color = arc_tint(s_tint_rgb, 1, 1);
 
         const int32_t x = BATTERY_BOLT_X;
         const int32_t y = BATTERY_BOLT_Y;
@@ -1326,6 +1456,115 @@ static void draw_battery(void)
     battery_invalidate();
 }
 #endif /* CONFIG_BATTERY_SHOW_DOTS */
+
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+/*
+ * The wifi glyph: a dot with three arcs above it, filling outward.
+ *
+ * Every rule it follows is the one recorded above draw_battery(): drawn after
+ * the face, wipes what it drew, invalidates its own box. Read that note first
+ * -- both bugs it describes apply here identically.
+ *
+ * WHEN IT IS ON SCREEN
+ *
+ * Stopped, or asleep, or weak. The first two are when someone is looking at the
+ * device rather than talking to it; the third is the one they need whatever they
+ * are doing, because it is the reason the conversation is about to break up.
+ * `weak` is wifi_sta.c's hysteresed flag and not a comparison made here, so the
+ * glyph does not appear and vanish while the device sits at the threshold.
+ *
+ * Nothing is drawn while there is no association (`valid`) -- during
+ * provisioning the panel is showing a QR code, and a signal icon beside it would
+ * be describing a link that does not exist yet.
+ */
+static void draw_signal(void)
+{
+    const bool show = s_sig_valid && s_qr_payload == NULL && !s_test_active &&
+                      (s_stopped || s_asleep || s_sig_weak);
+
+    const lv_area_t box = signal_box();
+    lv_layer_t layer;
+
+    if (!show) {
+        /* Nothing to show -- but if this drew last frame, the pixels are still
+         * there and only this function knows it. Wipe once, then stay quiet. */
+        if (s_sig_drawn) {
+            s_sig_drawn = false;
+            lv_canvas_init_layer(canvas_obj, &layer);
+            lv_draw_rect_dsc_t fill;
+            lv_draw_rect_dsc_init(&fill);
+            fill.bg_color = lv_color_black();
+            fill.bg_opa = LV_OPA_COVER;
+            fill.border_width = 0;
+            lv_draw_rect(&layer, &fill, &box);
+            lv_canvas_finish_layer(canvas_obj, &layer);
+            lv_obj_invalidate_area(canvas_obj, &box);
+        }
+        return;
+    }
+
+    /* Already bucketed to 0-4 by wifi_sta.c, which is where the dBm thresholds
+     * and their hysteresis live. Clamped anyway: this is a draw path, and a bad
+     * value here would index past the end of the arc table. */
+    int lit = s_sig_bars;
+    if (lit < 0) lit = 0;
+    if (lit > 4) lit = 4;
+
+    const lv_color_t on = arc_tint(s_tint_rgb, 1, 1);
+    const lv_color_t off = arc_tint(s_tint_rgb, ARC_SPENT_NUM, ARC_SPENT_DEN);
+
+    lv_canvas_init_layer(canvas_obj, &layer);
+
+    /* Black the box before drawing into it, every frame -- an arc going from
+     * bright to dim leaves the bright pixels around its anti-aliased edge
+     * otherwise, the same way a shrinking dot did on the charge row. */
+    lv_draw_rect_dsc_t fill;
+    lv_draw_rect_dsc_init(&fill);
+    fill.bg_color = lv_color_black();
+    fill.bg_opa = LV_OPA_COVER;
+    fill.border_width = 0;
+    lv_draw_rect(&layer, &fill, &box);
+
+    /* The dot is bar one, so it is lit for anything but a dead link. */
+    lv_draw_rect_dsc_t dot;
+    lv_draw_rect_dsc_init(&dot);
+    dot.radius = LV_RADIUS_CIRCLE;
+    dot.bg_opa = LV_OPA_COVER;
+    dot.border_width = 0;
+    dot.bg_color = (lit >= 1) ? on : off;
+    lv_area_t d = {
+        .x1 = SIGNAL_APEX_X - SIGNAL_DOT_R,
+        .y1 = SIGNAL_APEX_Y - SIGNAL_DOT_R,
+        .x2 = SIGNAL_APEX_X + SIGNAL_DOT_R,
+        .y2 = SIGNAL_APEX_Y + SIGNAL_DOT_R,
+    };
+    lv_draw_rect(&layer, &dot, &d);
+
+    /* Then one arc per remaining bar, innermost first. */
+    lv_draw_arc_dsc_t arc;
+    lv_draw_arc_dsc_init(&arc);
+    arc.center.x = SIGNAL_APEX_X;
+    arc.center.y = SIGNAL_APEX_Y;
+    arc.width = SIGNAL_ARC_W;
+    arc.start_angle = SIGNAL_ANGLE_START;
+    arc.end_angle = SIGNAL_ANGLE_END;
+    arc.opa = LV_OPA_COVER;
+    /* Rounded ends: the fan is what makes this read as the wifi icon rather than
+     * as three cut bands, and square ends on a 3 px stroke look chipped. */
+    arc.rounded = 1;
+
+    for (int i = 0; i < 3; i++) {
+        arc.radius = SIGNAL_ARC_R[i];
+        arc.color = (lit >= i + 2) ? on : off;
+        lv_draw_arc(&layer, &arc);
+    }
+
+    lv_canvas_finish_layer(canvas_obj, &layer);
+
+    s_sig_drawn = true;
+    lv_obj_invalidate_area(canvas_obj, &box);
+}
+#endif /* CONFIG_WIFI_SIGNAL_SHOW_BARS */
 
 /*
  * Creates or tears down the QR overlay to match what was last requested.
@@ -1829,6 +2068,12 @@ static void frame_timer_cb(lv_timer_t *timer)
 #if CONFIG_BATTERY_SHOW_DOTS
     /* After the ring, and inside the timing window for the same reason. */
     draw_battery();
+#endif
+
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+    /* The mirror of the row above, on the other side of the panel. Its boxes do
+     * not overlap the battery's, so the order between the two does not matter. */
+    draw_signal();
 #endif
 
     tlm_accumulate_frame(draw_start_us);

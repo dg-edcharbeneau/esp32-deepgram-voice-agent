@@ -148,6 +148,21 @@ void ui_set_stopped(bool stopped);
  */
 void ui_set_battery(int percent, bool charging, bool low, bool valid);
 
+/*
+ * Hand the display the latest Wi-Fi signal reading. Safe from any task, on the
+ * same store-here/apply-there contract as ui_set_battery above.
+ *
+ * `bars` is wifi_sta.c's hysteresed 0-4 bucket, not a dBm value and not a
+ * comparison the caller makes -- the dBm thresholds and the anti-flicker margin
+ * both live there, and a display that re-derived them would flicker. `weak` is
+ * likewise its flag; it is what keeps the icon on screen mid-conversation, which
+ * is the one time it is worth interrupting the face for.
+ *
+ * Ignored unless CONFIG_WIFI_SIGNAL_SHOW_BARS; see draw_signal() in ui.c for
+ * when the icon is actually on screen.
+ */
+void ui_set_signal(int bars, bool weak, bool valid);
+
 /* audio_io_tap_t-compatible. Agent audio wins when both are active. */
 void ui_feed_agent(const int16_t *mono, size_t samples);
 void ui_feed_mic(const int16_t *mono, size_t samples);

@@ -733,4 +733,57 @@ menu "Deepgram Agent Device"
 
             0 disables it.
 
+    config WIFI_SIGNAL
+        bool "Report Wi-Fi signal strength"
+        default y
+        help
+            The link is what carries the whole session, and when it degrades the
+            only visible symptom is dropped audio -- with nothing in the log
+            saying the radio was the cause. With this on, the RSSI of the
+            associated AP is read from the driver's own beacon cache and handed
+            to three readers: the bars on the screen, the TLM line, and the
+            agent's get_signal_strength function.
+
+            There is no sampling task and no scan. esp_wifi_sta_get_ap_info()
+            returns a value the driver already has, in microseconds -- a scan,
+            by contrast, would starve the link for hundreds of ms, which is why
+            the one in wifi_prov.c runs only while there is no session.
+
+            Off costs nothing: no code, no event handler.
+
+    config WIFI_SIGNAL_SHOW_BARS
+        bool "Show the signal icon on screen"
+        depends on WIFI_SIGNAL
+        default y
+        help
+            The familiar wifi glyph -- a dot with three arcs fanning out above
+            it -- at 10 to 11 o'clock, balancing the battery dots across the
+            panel. Four elements for four bars: the dot alone is one, each arc
+            past it is one more, which is the progression every phone draws.
+            Lit parts go bright, the rest go dim. It takes the orb's colour, so
+            set_color moves it too.
+
+            Shown while the session is stopped, the display is asleep, or the
+            signal is weak. Not during a conversation: the face is the point
+            then, and a permanent gauge over it is clutter.
+
+    config WIFI_SIGNAL_WEAK_DBM
+        int "Weak-signal warning threshold (dBm)"
+        depends on WIFI_SIGNAL
+        default -80
+        range -99 -30
+        help
+            The driver raises WIFI_EVENT_STA_BSS_RSSI_LOW when the beacon RSSI
+            falls past this, and the handler logs one line per excursion. The
+            point is to put a cause in the log immediately BEFORE the dropped
+            audio that follows, at a moment the TLM cadence might otherwise
+            miss.
+
+            One line per excursion, not per crossing: the threshold is one-shot,
+            so re-arming it while the link is still below fires it again about
+            once a second. See s_weak_logged in wifi_sta.c.
+
+            -80 dBm is roughly where a 2.4 GHz link starts retrying enough to
+            matter to a 16 kHz stream. Raise it toward -70 to be warned earlier.
+
 endmenu
