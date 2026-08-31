@@ -9,6 +9,7 @@ idf_component_register(
         audio_io.c
         audio_codecs.c
         heap_probe.c
+        battery.c
         ui.c
         face_spectrum.c
         orb_geometry.c

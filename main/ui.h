@@ -134,6 +134,20 @@ bool ui_is_asleep(void);
 
 void ui_set_stopped(bool stopped);
 
+/*
+ * Hand the display the latest battery reading. Safe from any task: it stores,
+ * and the frame timer draws.
+ *
+ * `valid` false means the reading is unavailable -- no cell, or the PMU did not
+ * answer -- and the indicator is then drawn not at all, rather than at zero.
+ * `low` is battery.c's hysteresed flag, not a comparison the caller makes, so
+ * the screen and the spoken answer agree on what "low" means.
+ *
+ * Nothing is shown at full charge during a conversation; see draw_battery() in
+ * ui.c for when the dots are on screen and why.
+ */
+void ui_set_battery(int percent, bool charging, bool low, bool valid);
+
 /* audio_io_tap_t-compatible. Agent audio wins when both are active. */
 void ui_feed_agent(const int16_t *mono, size_t samples);
 void ui_feed_mic(const int16_t *mono, size_t samples);

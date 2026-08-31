@@ -642,4 +642,95 @@ menu "Deepgram Agent Device"
             which pins the speaking gesture at its maximum for entire sentences
             and throws away every bit of expression it has.
 
+    config BATTERY
+        bool "Read the battery from the AXP2101 power-management IC"
+        default y
+        help
+            The board charges and runs from a single Li-ion cell through an
+            AXP2101, which carries its own fuel gauge. With this on, a low
+            priority task reads charge, cell voltage and charge direction off
+            that chip and hands them to three readers: the dots on the screen,
+            the TLM line, and the agent's get_battery function.
+
+            The module only ever READS the AXP2101. That chip also owns the
+            rails feeding the AMOLED panel and the codec, so a driver that
+            configures regulators is a way to brown the display out; this one
+            has no write path at all.
+
+            Off costs nothing: no task, no I2C device, no code.
+
+    config BATTERY_SHOW_DOTS
+        bool "Show the charge dots on screen"
+        depends on BATTERY
+        default y
+        help
+            Four dots following the display's outer curve from 1 to 2 o'clock,
+            each worth a quarter of the charge, filling clockwise. Dots still
+            held go bright, spent ones go dim, so 50% reads as two bright then
+            two dim. A bolt continues the arc past them while current is going
+            into the cell. All of it takes the orb's colour, so set_color moves
+            the row too.
+
+            They are drawn while the session is stopped or the display is
+            asleep, and whenever the charge is low or the cell is charging. Not
+            during a conversation: the face is the point then, and a permanent
+            gauge over it is clutter.
+
+            This is separate from UI_SHOW_INDICATORS on purpose. That one is a
+            bench aid that draws the invisible touch target; this is a thing an
+            owner of the device actually wants.
+
+    config BATTERY_DUMP_REGS
+        bool "Log the raw AXP2101 registers on every sample"
+        depends on BATTERY
+        default n
+        help
+            BRING-UP TOOL. It prints REG00, REG01, REG34/35 and REGA4 verbatim
+            once per sample.
+
+            Turn it on for the first flash on a new board, watch the numbers
+            with USB plugged in and again on battery, and confirm the bits move
+            the way the register comments claim. Turn it off afterwards -- at
+            the default sample interval it is a line every five seconds
+            forever, and it says nothing the TLM line does not.
+
+    config BATTERY_SAMPLE_MS
+        int "Battery sample interval (ms)"
+        depends on BATTERY
+        default 5000
+        range 500 600000
+        help
+            Charge is a slow signal and every sample is a transaction on the bus
+            that touch, the codec and the RTC also share, so this is deliberately
+            far slower than the 1 s TLM line. The TLM line simply repeats the
+            last sample between reads.
+
+            Note the filter is a median of five, so the reported percentage
+            settles about five intervals after a change.
+
+    config BATTERY_LOW_PCT
+        int "Low battery threshold (percent)"
+        depends on BATTERY
+        default 20
+        range 1 90
+        help
+            At or below this, the dots stay on screen whatever else is
+            happening and the device says so once. It clears five points higher,
+            so a cell resting on the line does not chatter the warning.
+
+    config BATTERY_CRITICAL_PCT
+        int "Critical battery threshold (percent)"
+        depends on BATTERY
+        default 8
+        range 0 50
+        help
+            At or below this the display is put to sleep and left there: the
+            panel is the largest single draw on the board, and dimming it is the
+            only lever this firmware has to make the remaining charge last.
+
+            The session is left alone -- a device that hangs up mid-sentence to
+            save power is worse than one that goes dark and keeps talking.
+
+            0 disables it.
+
 endmenu

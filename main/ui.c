@@ -48,6 +48,7 @@
 #include "esp_lv_adapter_input.h"
 
 #include "audio_io.h"
+#include "battery.h"
 #include "orb_colors.h"
 #include "ui.h"
 #include "ui_face.h"
@@ -89,6 +90,116 @@ static const char *TAG = "ui";
 /* Warm, and deliberately the loudest thing the overlay does: it marks the one
  * moment when a tap means something other than start/stop. */
 #define INDICATOR_RGB_INTERRUPT 0xe8a54a
+#endif
+
+#if CONFIG_BATTERY_SHOW_DOTS
+/*
+ * CHARGE, AS FOUR DOTS ON THE OUTER CURVE, 1 TO 2 O'CLOCK.
+ *
+ * Four because the reading is worth a quarter each and nobody reads a
+ * percentage off a glance. Spent dots are dimmed rather than removed: a row
+ * that keeps its length says "three of four" at a glance, where a shrinking row
+ * of two dots is indistinguishable from a device that has decided to draw two
+ * dots.
+ *
+ * ON THE CURVE, not along a radius. The first version put them on the 3 o'clock
+ * horizontal, which is a straight line across a round display and reads as
+ * something that fell off a rectangular screen. Following the edge is what the
+ * panel shape is for. They fill CLOCKWISE from 1 o'clock, so the row reads the
+ * way the numbers on a clock face do.
+ *
+ * Positions are precomputed rather than trigonometry in the draw path: this
+ * runs every frame, and four sines per frame to arrive at four constants is a
+ * cost with nothing to show for it. Derived at radius 200 from centre --
+ * 33 px in from the 233 px panel edge, which clears the curve with room for
+ * the dot and its anti-aliasing -- at 30, 40, 50 and 60 degrees clockwise from
+ * 12 o'clock, with the bolt continuing the same arc at 70:
+ *
+ *     x = CENTER_X + 200*sin(a),  y = CENTER_Y - 200*cos(a)
+ *
+ * Change the radius or the angles and change these together; there is no
+ * runtime check that they still lie on a circle.
+ */
+#define BATTERY_DOTS  4
+#define BATTERY_DOT_R 5
+
+static const lv_point_t BATTERY_DOT_XY[BATTERY_DOTS] = {
+    {333, 60},   /* 30 deg -- 1 o'clock */
+    {362, 80},   /* 40 deg */
+    {386, 104},  /* 50 deg */
+    {406, 133},  /* 60 deg -- 2 o'clock */
+};
+
+/*
+ * COLOUR COMES FROM THE ORB, not from constants here.
+ *
+ * Whoever set the orb's colour picked the one colour this device shows, and an
+ * indicator in its own fixed palette reads as a foreign object on the glass --
+ * particularly the bolt, which was warm amber over whatever the orb happened to
+ * be. So dots and bolt all take s_tint_rgb, and a "set your colour to teal"
+ * moves them along with everything else.
+ *
+ * Spent dots are the SAME hue at a quarter brightness rather than a neutral
+ * grey: it keeps the row reading as one object, and the contrast between held
+ * and spent survives on every colour in the catalog, which a fixed grey does
+ * not -- against a dark blue orb the old grey was brighter than the lit dots.
+ *
+ * A quarter, not a half: at a half the two states are hard to tell apart at
+ * arm's length on the darker colours, which is the whole job of the row.
+ */
+#define BATTERY_SPENT_NUM 1
+#define BATTERY_SPENT_DEN 4
+
+/* Per channel, so the hue is preserved and only the brightness moves. */
+static inline lv_color_t battery_tint(uint32_t rgb, int num, int den)
+{
+    const uint32_t r = ((rgb >> 16) & 0xFF) * (uint32_t)num / (uint32_t)den;
+    const uint32_t g = ((rgb >> 8) & 0xFF) * (uint32_t)num / (uint32_t)den;
+    const uint32_t b = (rgb & 0xFF) * (uint32_t)num / (uint32_t)den;
+    return lv_color_make((uint8_t)r, (uint8_t)g, (uint8_t)b);
+}
+
+/* The bolt continues the arc past the last dot. Half-width/half-height. */
+#define BATTERY_BOLT_X  421
+#define BATTERY_BOLT_Y  165
+#define BATTERY_BOLT_HW 4
+#define BATTERY_BOLT_HH 8
+
+/*
+ * WHAT THE OVERLAY OWNS, as five small boxes rather than one large one.
+ *
+ * The canvas keeps its pixels, so this has to erase what it drew -- and on an
+ * arc the bounding box of the row is ~90x120, about 10,800 pixels, which is as
+ * much as the orb's entire per-frame clear. Clearing and invalidating each
+ * shape's own box instead costs ~1,300, and it is the same thing orb_raster.c
+ * does for exactly the same reason.
+ *
+ * The BOLT'S box is cleared whether or not a bolt is drawn in it. A region that
+ * appears only while charging cannot erase the bolt it left behind -- which is
+ * the bug that put a bolt on screen after the cable came out.
+ */
+#define BATTERY_SLOP 2
+
+static inline lv_area_t battery_dot_box(int i)
+{
+    const int32_t r = BATTERY_DOT_R + BATTERY_SLOP;
+    return (lv_area_t){
+        .x1 = BATTERY_DOT_XY[i].x - r,
+        .y1 = BATTERY_DOT_XY[i].y - r,
+        .x2 = BATTERY_DOT_XY[i].x + r,
+        .y2 = BATTERY_DOT_XY[i].y + r,
+    };
+}
+
+static inline lv_area_t battery_bolt_box(void)
+{
+    return (lv_area_t){
+        .x1 = BATTERY_BOLT_X - BATTERY_BOLT_HW - BATTERY_SLOP,
+        .y1 = BATTERY_BOLT_Y - BATTERY_BOLT_HH - BATTERY_SLOP,
+        .x2 = BATTERY_BOLT_X + BATTERY_BOLT_HW + BATTERY_SLOP,
+        .y2 = BATTERY_BOLT_Y + BATTERY_BOLT_HH + BATTERY_SLOP,
+    };
+}
 #endif
 
 /* Rows per LVGL render chunk, in internal RAM: 466 * rows * 2 bytes. Must stay
@@ -518,6 +629,25 @@ static lv_obj_t *qr_obj;
 static bool s_session_live;
 
 static volatile bool s_stopped;
+
+#if CONFIG_BATTERY_SHOW_DOTS
+/* Written by ui_set_battery from main's telemetry task, read by the frame timer.
+ * Four independent words, per the setter contract in ui.h: store here, apply
+ * there. Nothing in this file reads the AXP2101 -- an I2C transfer on the LVGL
+ * task would land straight in the frame budget. */
+static volatile int  s_bat_percent;
+static volatile bool s_bat_charging;
+static volatile bool s_bat_low;
+static volatile bool s_bat_valid;
+
+/* Whether ink from this overlay is currently on the canvas. LVGL task only.
+ *
+ * Load-bearing: the canvas KEEPS what was drawn into it, so hiding the
+ * indicator by simply not drawing leaves the last dots and the last bolt up
+ * for good -- which is exactly what happened on the bench, where the bolt
+ * outlived the charging cable. Whatever put ink there has to take it away. */
+static bool s_bat_drawn;
+#endif
 static volatile bool s_failed;
 
 /*
@@ -737,6 +867,21 @@ bool ui_is_asleep(void)
 void ui_set_stopped(bool stopped)
 {
     s_stopped = stopped;
+}
+
+void ui_set_battery(int percent, bool charging, bool low, bool valid)
+{
+#if CONFIG_BATTERY_SHOW_DOTS
+    s_bat_percent = percent;
+    s_bat_charging = charging;
+    s_bat_low = low;
+    s_bat_valid = valid;
+#else
+    (void)percent;
+    (void)charging;
+    (void)low;
+    (void)valid;
+#endif
 }
 
 void ui_set_behaviour(ui_behaviour_t behaviour)
@@ -1030,6 +1175,157 @@ static void draw_indicators(void)
     lv_obj_invalidate_area(canvas_obj, &area);
 }
 #endif /* CONFIG_UI_SHOW_INDICATORS */
+
+#if CONFIG_BATTERY_SHOW_DOTS
+/*
+ * Draw the charge dots, and a bolt while current is going in.
+ *
+ * CALLED AFTER THE FACE, for the reason draw_indicators() documents at length:
+ * the orb clears only the boxes its own dots occupied last frame, so an overlay
+ * drawn first comes out moth-eaten. Same consequence too -- this has to
+ * invalidate its own bounding box, because nothing else knows it drew.
+ *
+ * WHEN IT IS ON SCREEN
+ *
+ * Stopped, or asleep, or low, or charging. The first two are the states in which
+ * someone is looking at the device rather than talking to it, and the last two
+ * are the ones they need to know about whatever they are doing. Not during a
+ * conversation at full charge: the face is the point then, and a gauge that is
+ * always up is just clutter that also costs an invalidated box every frame.
+ *
+ * Nothing is drawn before the first sample (`valid`), so boot never flashes an
+ * empty battery, and nothing is drawn under the QR overlay or the display test
+ * -- both of those own the whole screen by design.
+ */
+/*
+ * Black every box the overlay owns and push them to the panel.
+ *
+ * Canvas is at 0,0 and covers the panel, so these are screen coordinates -- the
+ * same assumption draw_indicators() and orb_raster.c record.
+ */
+static void battery_wipe(lv_layer_t *layer)
+{
+    lv_draw_rect_dsc_t fill;
+    lv_draw_rect_dsc_init(&fill);
+    fill.bg_color = lv_color_black();
+    fill.bg_opa = LV_OPA_COVER;
+    fill.border_width = 0;
+
+    for (int i = 0; i < BATTERY_DOTS; i++) {
+        lv_area_t a = battery_dot_box(i);
+        lv_draw_rect(layer, &fill, &a);
+    }
+    lv_area_t b = battery_bolt_box();
+    lv_draw_rect(layer, &fill, &b);
+}
+
+/* Invalidate the same five boxes. Separate from the wipe because drawing goes
+ * through the layer and invalidation goes through the widget, and they have to
+ * happen either side of lv_canvas_finish_layer(). */
+static void battery_invalidate(void)
+{
+    for (int i = 0; i < BATTERY_DOTS; i++) {
+        lv_area_t a = battery_dot_box(i);
+        lv_obj_invalidate_area(canvas_obj, &a);
+    }
+    lv_area_t b = battery_bolt_box();
+    lv_obj_invalidate_area(canvas_obj, &b);
+}
+
+static void draw_battery(void)
+{
+    const bool show = s_bat_valid && s_qr_payload == NULL && !s_test_active &&
+                      (s_stopped || s_asleep || s_bat_low || s_bat_charging);
+
+    lv_layer_t layer;
+
+    if (!show) {
+        /* Nothing to show -- but if this drew last frame, the pixels are still
+         * there and only this function knows it. Wipe once, then stay quiet. */
+        if (s_bat_drawn) {
+            s_bat_drawn = false;
+            lv_canvas_init_layer(canvas_obj, &layer);
+            battery_wipe(&layer);
+            lv_canvas_finish_layer(canvas_obj, &layer);
+            battery_invalidate();
+        }
+        return;
+    }
+
+    /* Round to the nearest quarter rather than truncating: at 99% a truncating
+     * gauge shows three of four dots, which reads as a fault. */
+    int pct = s_bat_percent;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    const int lit = (pct * BATTERY_DOTS + 50) / 100;
+    const bool charging = s_bat_charging;
+
+    lv_canvas_init_layer(canvas_obj, &layer);
+
+    /*
+     * Black the boxes before drawing into them, every frame. Both faces use a
+     * black background -- the spectrum fills it, the orb clears its dot boxes to
+     * it -- so this is the same ground they draw on.
+     *
+     * Every frame rather than only on a change, because the alternatives all
+     * failed here: a bolt that stops being drawn leaves a bolt, and a dot going
+     * from bright to dim leaves the bright pixels around the edge of the smaller
+     * shape.
+     */
+    battery_wipe(&layer);
+
+    lv_draw_rect_dsc_t dot;
+    lv_draw_rect_dsc_init(&dot);
+    dot.radius = LV_RADIUS_CIRCLE;
+    dot.bg_opa = LV_OPA_COVER;
+    dot.border_width = 0;
+
+    for (int i = 0; i < BATTERY_DOTS; i++) {
+        dot.bg_color = (i < lit)
+                           ? battery_tint(s_tint_rgb, 1, 1)
+                           : battery_tint(s_tint_rgb, BATTERY_SPENT_NUM, BATTERY_SPENT_DEN);
+        lv_area_t a = {
+            .x1 = BATTERY_DOT_XY[i].x - BATTERY_DOT_R,
+            .y1 = BATTERY_DOT_XY[i].y - BATTERY_DOT_R,
+            .x2 = BATTERY_DOT_XY[i].x + BATTERY_DOT_R,
+            .y2 = BATTERY_DOT_XY[i].y + BATTERY_DOT_R,
+        };
+        lv_draw_rect(&layer, &dot, &a);
+    }
+
+    if (charging) {
+        /*
+         * The bolt, as the two triangles it actually is: upper-right wedge and
+         * lower-left wedge meeting at the middle. Drawn into the canvas rather
+         * than added as a label so it shares the wipe above -- which is what
+         * takes it away again when the cable comes out. Full-brightness tint,
+         * the same as a held dot: it is a state, not a quantity.
+         */
+        lv_draw_triangle_dsc_t tri;
+        lv_draw_triangle_dsc_init(&tri);
+        tri.opa = LV_OPA_COVER;
+        tri.color = battery_tint(s_tint_rgb, 1, 1);
+
+        const int32_t x = BATTERY_BOLT_X;
+        const int32_t y = BATTERY_BOLT_Y;
+
+        tri.p[0].x = x + BATTERY_BOLT_HW; tri.p[0].y = y - BATTERY_BOLT_HH;
+        tri.p[1].x = x - BATTERY_BOLT_HW; tri.p[1].y = y + 1;
+        tri.p[2].x = x + BATTERY_BOLT_HW; tri.p[2].y = y + 1;
+        lv_draw_triangle(&layer, &tri);
+
+        tri.p[0].x = x - BATTERY_BOLT_HW; tri.p[0].y = y + BATTERY_BOLT_HH;
+        tri.p[1].x = x + BATTERY_BOLT_HW; tri.p[1].y = y - 1;
+        tri.p[2].x = x - BATTERY_BOLT_HW; tri.p[2].y = y - 1;
+        lv_draw_triangle(&layer, &tri);
+    }
+
+    lv_canvas_finish_layer(canvas_obj, &layer);
+
+    s_bat_drawn = true;
+    battery_invalidate();
+}
+#endif /* CONFIG_BATTERY_SHOW_DOTS */
 
 /*
  * Creates or tears down the QR overlay to match what was last requested.
@@ -1528,6 +1824,11 @@ static void frame_timer_cb(lv_timer_t *timer)
     /* Last, and inside the timing window on purpose: the ring is not free, and a
      * cost excluded from the measurement is a cost nobody finds. */
     draw_indicators();
+#endif
+
+#if CONFIG_BATTERY_SHOW_DOTS
+    /* After the ring, and inside the timing window for the same reason. */
+    draw_battery();
 #endif
 
     tlm_accumulate_frame(draw_start_us);
