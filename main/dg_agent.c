@@ -449,6 +449,47 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+        if (strcmp(name->valuestring, "set_volume") == 0) {
+            int level = -1;
+            cJSON *sargs = function_args(fn);
+            if (sargs != NULL) {
+                const cJSON *l = cJSON_GetObjectItemCaseSensitive(sargs, "level");
+                if (cJSON_IsNumber(l)) {
+                    level = l->valueint;
+                }
+                cJSON_Delete(sargs);
+            }
+
+            if (level < 0) {
+                /* No usable level: ask rather than pick one on their behalf. */
+                ESP_LOGW(TAG, "EVT setvolume -> no level");
+                snprintf(content, sizeof(content),
+                         "No level was given. Ask how loud they want you, 20 to 100.");
+                send_function_response(id->valuestring, name->valuestring, content);
+                continue;
+            }
+
+            /*
+             * audio_io clamps to 20..100, so `now` can differ from what was
+             * asked for. Say which stop it landed on rather than reporting the
+             * number as if it were the request -- see adjust_volume above for
+             * why no reload is needed.
+             */
+            int now = audio_io_set_volume(level);
+            ESP_LOGI(TAG, "EVT setvolume req=%d -> %d", level, now);
+            if (now < level) {
+                snprintf(content, sizeof(content),
+                         "The loudest I go is %d, and I am there now. Say so.", now);
+            } else if (now > level) {
+                snprintf(content, sizeof(content),
+                         "The quietest I go is %d, and I am there now. Say so.", now);
+            } else {
+                snprintf(content, sizeof(content), "Volume is now %d out of 100.", now);
+            }
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
         if (strcmp(name->valuestring, "set_face") == 0) {
             int index = -1;
             const char *wanted = NULL;
@@ -685,10 +726,12 @@ static esp_err_t send_settings(void)
     cJSON *adjust_volume = cJSON_CreateObject();
     cJSON_AddStringToObject(adjust_volume, "name", "adjust_volume");
     cJSON_AddStringToObject(adjust_volume, "description",
-                            "Make yourself louder or quieter, relative to how loud you are "
-                            "now. Negative is quieter, positive is louder. The scale runs "
-                            "20 to 100, so once you are told you are at a limit, stop trying. "
-                            "A small change is about 10, a big one about 30.");
+                            "Make yourself louder or quieter BY A RELATIVE AMOUNT, for "
+                            "'a bit louder' or 'turn it down'. Negative is quieter, "
+                            "positive is louder. A small change is about 10, a big one "
+                            "about 30. The scale runs 20 to 100, so once you are told you "
+                            "are at a limit, stop trying. If they name a number to land on, "
+                            "use set_volume instead.");
     cJSON *vparams = cJSON_AddObjectToObject(adjust_volume, "parameters");
     cJSON_AddStringToObject(vparams, "type", "object");
     cJSON *vprops = cJSON_AddObjectToObject(vparams, "properties");
@@ -699,6 +742,25 @@ static esp_err_t send_settings(void)
     cJSON *vrequired = cJSON_AddArrayToObject(vparams, "required");
     cJSON_AddItemToArray(vrequired, cJSON_CreateString("delta"));
     cJSON_AddItemToArray(functions, adjust_volume);
+
+    cJSON *set_volume = cJSON_CreateObject();
+    cJSON_AddStringToObject(set_volume, "name", "set_volume");
+    cJSON_AddStringToObject(set_volume, "description",
+                            "Set how loud you are TO A SPECIFIC LEVEL, for 'set your "
+                            "volume to 50'. The scale runs 20 to 100: 20 is barely "
+                            "audible, 100 is maximum. 20 is as quiet as you go and there "
+                            "is no mute, so a request below it lands on 20. For 'louder' "
+                            "or 'quieter' with no number, use adjust_volume instead.");
+    cJSON *sparams = cJSON_AddObjectToObject(set_volume, "parameters");
+    cJSON_AddStringToObject(sparams, "type", "object");
+    cJSON *sprops = cJSON_AddObjectToObject(sparams, "properties");
+    cJSON *level_prop = cJSON_AddObjectToObject(sprops, "level");
+    cJSON_AddStringToObject(level_prop, "type", "integer");
+    cJSON_AddNumberToObject(level_prop, "minimum", 20);
+    cJSON_AddNumberToObject(level_prop, "maximum", 100);
+    cJSON *srequired = cJSON_AddArrayToObject(sparams, "required");
+    cJSON_AddItemToArray(srequired, cJSON_CreateString("level"));
+    cJSON_AddItemToArray(functions, set_volume);
 
     /*
      * Not Flux-gated either: the display is local and works on either speech

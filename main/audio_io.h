@@ -178,11 +178,14 @@ void audio_io_reset(void);
  * goes over I2S, and this codec supplies a hardware volume so esp_codec_dev
  * never touches the PCM buffer on this path.
  *
- * adjust is a single call rather than get-then-set so the clamp and the write
- * stay together; that is where a lock would go if a second caller ever appears.
+ * Both setters are single calls rather than get-then-set so the clamp and the
+ * write stay together -- adjust is a thin caller of set, so there is exactly one
+ * apply, and that is where a lock would go if a second caller ever appears. A
+ * touch or UI control should call audio_io_set_volume().
  */
 int audio_io_get_volume(void);
-int audio_io_adjust_volume(int delta);   /* returns the resulting level */
+int audio_io_set_volume(int level);      /* absolute; returns the resulting level */
+int audio_io_adjust_volume(int delta);   /* relative; returns the resulting level */
 
 /* True while agent audio is playing or has only just stopped. */
 bool audio_io_playback_active(void);

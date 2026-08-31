@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `set_volume`: "set your volume to 50" now lands on 50. The existing
+  `adjust_volume` stays for relative changes ("a bit louder"); both go through
+  the new `audio_io_set_volume()`. A request below the floor of 20 clamps to 20
+  and the agent says so, since there is no mute.
+
 ## [0.2.0] - 2026-08-30
 
 ### Added

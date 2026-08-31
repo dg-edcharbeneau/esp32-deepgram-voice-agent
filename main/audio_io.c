@@ -950,9 +950,9 @@ int audio_io_get_volume(void)
     return s_volume;
 }
 
-int audio_io_adjust_volume(int delta)
+int audio_io_set_volume(int requested)
 {
-    int level = volume_clamp(s_volume + delta);
+    int level = volume_clamp(requested);
     if (level == s_volume) {
         return s_volume;   /* already at the stop; no register write, no flash */
     }
@@ -968,6 +968,11 @@ int audio_io_adjust_volume(int delta)
     volume_save(level);
     ESP_LOGI(TAG, "volume %d", level);
     return level;
+}
+
+int audio_io_adjust_volume(int delta)
+{
+    return audio_io_set_volume(s_volume + delta);
 }
 
 esp_err_t audio_io_init(int sample_rate)

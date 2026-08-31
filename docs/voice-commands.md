@@ -5,9 +5,21 @@ face, orb colour, voice -- and what each one costs.
 
 ## Changing the volume by asking
 
-"Turn it down a bit" works. `adjust_volume` takes a signed delta, so it moves in
-both directions, and the level persists across reboots under the same `dgagent`
-NVS namespace as the voice.
+There are two tools, because "turn it down a bit" and "set your volume to 50" are
+different requests and one signed delta cannot serve both:
+
+- `adjust_volume` takes a signed `delta` — relative, both directions.
+- `set_volume` takes an absolute `level`.
+
+Both funnel through `audio_io_set_volume()`, so the clamp, the register write and
+the NVS save happen in exactly one place. The level persists across reboots under
+the same `dgagent` NVS namespace as the voice.
+
+The scale runs **20 to 100**, and 20 is the floor rather than 0 on purpose:
+`esp_codec_dev` maps volume 0 to -96 dB, which is silence, and an agent that has
+muted itself cannot be asked to unmute. There is no mute. Asking for less than 20
+lands on 20, and the function response tells the agent to say so out loud rather
+than silently ignoring the number it was given.
 
 It is a much simpler feature than the voice change, for one reason: **Deepgram
 knows nothing about the volume.** It is a single ES8311 register write, absent
@@ -85,7 +97,7 @@ recording:
   `CONFIG_BSP_I2C_CLK_SPEED_HZ` applies only to the touch panel.
 
 If a touch or UI volume control is ever added, funnel both callers through
-`audio_io_adjust_volume()` and put a mutex there — outside `esp_codec_dev`, so it
+`audio_io_set_volume()` and put a mutex there — outside `esp_codec_dev`, so it
 cannot invert against the WebSocket client's own recursive lock.
 
 ## Changing its name by asking
