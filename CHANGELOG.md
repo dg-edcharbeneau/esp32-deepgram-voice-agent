@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-08-30
+## [0.4.0] - 2026-08-31
 
 ### Added
 
@@ -31,9 +31,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drawing leaves its last dots and its last bolt on screen for good.
 
   Verified on hardware: the PMU answers at 0x34, the gauge and voltage
-  registers read 60% / 3.96 V, and the spoken answer came back correct. The
-  charge/discharge bits are read from REG01 bits 6:5 and have so far only been
-  observed with USB attached.
+  registers read 60% / 3.96 V, the charge/discharge bits in REG01 6:5 flip with
+  the cable, the dots show and hide correctly, and the spoken answer came back
+  right.
+
+## [0.3.0] - 2026-08-30
+
+### Added
 
 - `set_volume`: "set your volume to 50" now lands on 50. The existing
   `adjust_volume` stays for relative changes ("a bit louder"); both go through
