@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Charging stopped being reported while the charger was still working.** The
+  bolt was keyed to the AXP2101's current-*direction* field, which falls back to
+  standby once the charge tapers into constant-voltage -- so a cell topping off
+  read as a charger that had given up. `charging` now comes from the chip's
+  charge **state machine** (trickle, pre-charge, CC, CV are all charging),
+  gated on VBUS so it can never be true on battery.
+- The direction field is three bits at `[7:5]`, not two at `[6:5]`. The old mask
+  ignored bit 7 and agreed with the reference driver only because bit 7 reads 0
+  on this board.
+
+### Added
+
+- "Done charging, still plugged in" as its own answer from `get_battery`.
+  Previously that state fell into "not charging", which is also true on battery
+  and reads as a fault.
+- The charge target voltage (`REG64[2:0]`, one of 4.0/4.1/4.2/4.35/4.4 V) is
+  logged once at startup, and `chgst=` (the raw charge state, 0-5) joins the TLM
+  line. Between them they answer why a cell stops part-full: the state it
+  stopped in says whether it reached the configured target or something else
+  intervened. Still read-only -- raising the target is a write to the chip that
+  also feeds the panel rails.
+
 ## [0.4.0] - 2026-08-31
 
 ### Added

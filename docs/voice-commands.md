@@ -117,13 +117,24 @@ Four answers, and the differences are deliberate:
 | state | what it says |
 |---|---|
 | charging | "at 62 percent and charging" |
+| done, still plugged in | "at 62 percent and done charging, still plugged in" |
 | discharging | "at 62 percent, not plugged in" |
 | low (<= `CONFIG_BATTERY_LOW_PCT`) | the percentage, plus a suggestion to plug in |
 | no reading | says it cannot read the battery, and is told not to guess |
 
-"Charging" means current is going *into* the cell, which is not the same as
-being plugged in: a full battery on USB reads as not charging, and saying
-otherwise would be wrong every time someone left it on the charger overnight.
+"Charging" comes from the AXP2101's charge **state machine** -- trickle,
+pre-charge, constant-current, constant-voltage are all still charging -- and not
+from its current-direction field. The direction field falls back to standby as
+the charge tapers into constant-voltage, so anything keyed to it stops saying
+"charging" while the charger is still working. It is also gated on VBUS, so it
+can never claim charging on a device running off the cell.
+
+"Done" is its own answer rather than falling into "not charging", which would
+also be true on battery and reads as a fault. Note that the charger stops at a
+**configured target voltage** (`REG64[2:0]`, one of 4.0/4.1/4.2/4.35/4.4 V,
+logged once at startup), and a target below the cell's rating means "done"
+arrives well short of 100% on the gauge -- so the percentage is worth saying
+alongside it rather than being rounded up to "full".
 
 The dots on screen use the same reading, and the same hysteresed `low` flag, so
 what the device says and what it shows cannot disagree. See
