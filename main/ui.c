@@ -259,7 +259,14 @@ static inline lv_area_t battery_bolt_box(void)
  * which is what keeps the arcs from reading as one thick band at arm's length.
  */
 #define SIGNAL_ARC_W    3
-static const uint16_t SIGNAL_ARC_R[3] = { 10, 16, 22 };
+static const uint16_t SIGNAL_ARC_R[] = { 10, 16, 22 };
+
+#define SIGNAL_ARCS (sizeof(SIGNAL_ARC_R) / sizeof(SIGNAL_ARC_R[0]))
+
+/* The dot is a bar too, so the glyph carries one more level than it has arcs.
+ * Derived rather than written as 4 so the arc table stays the single place a
+ * fourth arc would have to be added. */
+#define SIGNAL_BARS ((int)SIGNAL_ARCS + 1)
 
 /*
  * A 90-degree fan centred on straight up. LVGL angles put 0 at 3 o'clock and
@@ -281,17 +288,24 @@ static const uint16_t SIGNAL_ARC_R[3] = { 10, 16, 22 };
  * dot holds the bottom. Per-shape boxes here would be four overlapping
  * rectangles adding up to more than the one they sit in.
  *
- * ~37x30, about 1,100 pixels, which is a little less than the charge row's five
- * boxes cost together.
+ * The outermost arc bounds the glyph: a full `outer` above the apex, where the
+ * arc passes through 270 degrees, and outer*cos(45) either side of it, where its
+ * two ends sit. The dot bounds it below.
  *
- * The widest points are the outermost arc's two ENDS, at 225 and 315 degrees:
- * 22*cos(45) = 15.6 either side of the apex. The top is the same arc at 270,
- * a full 22 above it.
+ * Both extents are DERIVED from the radius rather than written down. The
+ * half-width was briefly a hardcoded 16 with the cosine in a comment, which
+ * silently decoupled the box from the table above it -- changing SIGNAL_ARC_R
+ * would then leave ink outside the box, and ink outside the box is permanent on
+ * a canvas that keeps its pixels. 181/256 is cos(45) to four decimals, in
+ * integers, and the compiler folds the whole thing to a constant.
+ *
+ * ~37x30, about 1,100 pixels, a little less than the charge row's five boxes
+ * cost together, and measured as free on the frame budget.
  */
 static inline lv_area_t signal_box(void)
 {
-    const int32_t outer = SIGNAL_ARC_R[2];
-    const int32_t half_w = 16;   /* ceil(22 * cos 45) */
+    const int32_t outer = SIGNAL_ARC_R[SIGNAL_ARCS - 1];
+    const int32_t half_w = (outer * 181 + 255) / 256;   /* ceil(outer * cos 45) */
     return (lv_area_t){
         .x1 = SIGNAL_APEX_X - half_w - ARC_SLOP,
         .y1 = SIGNAL_APEX_Y - outer - ARC_SLOP,
@@ -1508,7 +1522,7 @@ static void draw_signal(void)
      * value here would index past the end of the arc table. */
     int lit = s_sig_bars;
     if (lit < 0) lit = 0;
-    if (lit > 4) lit = 4;
+    if (lit > SIGNAL_BARS) lit = SIGNAL_BARS;
 
     const lv_color_t on = arc_tint(s_tint_rgb, 1, 1);
     const lv_color_t off = arc_tint(s_tint_rgb, ARC_SPENT_NUM, ARC_SPENT_DEN);
@@ -1553,9 +1567,9 @@ static void draw_signal(void)
      * as three cut bands, and square ends on a 3 px stroke look chipped. */
     arc.rounded = 1;
 
-    for (int i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < SIGNAL_ARCS; i++) {
         arc.radius = SIGNAL_ARC_R[i];
-        arc.color = (lit >= i + 2) ? on : off;
+        arc.color = (lit >= (int)i + 2) ? on : off;
         lv_draw_arc(&layer, &arc);
     }
 
