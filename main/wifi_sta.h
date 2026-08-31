@@ -11,6 +11,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -62,3 +63,52 @@ esp_err_t wifi_sta_stop(void);
  */
 void wifi_sta_set_power_save(bool enabled);
 
+
+/*
+ * Link quality of the AP the station is associated with.
+ *
+ * WHY THIS IS NOT A SAMPLER MODULE, unlike battery.h
+ *
+ * The battery lives behind an I2C transaction on a bus three other peripherals
+ * share, so it earns a task of its own and a cached copy. RSSI does not: the
+ * Wi-Fi driver already averages the beacons it receives and
+ * esp_wifi_sta_get_ap_info() hands over the number it is holding, with no radio
+ * activity and no bus. It is cheap enough to call from any reader on any
+ * cadence, so there is nothing here but an accessor.
+ *
+ * The one thing that does need state is the bucket hysteresis -- see bars.
+ */
+typedef struct {
+    /* False whenever there is no association to report: before the first
+     * connect, after a disconnect, and for the whole time the provisioning AP
+     * owns the radio. Everything below is meaningless while this is false. */
+    bool    valid;
+    /* Beacon RSSI in dBm, straight from the driver. Diagnostic: it is the only
+     * field that tells a log reader whether a bar count is believable. */
+    int8_t  rssi;
+    /*
+     * 0-4, hysteresed. THE ONLY FIELD A DISPLAY SHOULD READ.
+     *
+     * Beacon RSSI walks several dB between beacons, so bucketing the raw value
+     * puts a boundary reading on the wrong side of the line every second or two
+     * -- which on screen is a bar blinking in and out for as long as the device
+     * sits at that distance. The promotion threshold is offset from the
+     * demotion one to stop that; the direction of the asymmetry is explained at
+     * the thresholds in wifi_sta.c.
+     */
+    uint8_t bars;
+    /* bars <= 1. Hysteresed with them, and the one reading a caller is expected
+     * to act on rather than merely display. */
+    bool    weak;
+    /* Primary channel. Diagnostic: "it only drops in the evening" is answered by
+     * which channel the AP moved to, and nothing else. */
+    uint8_t channel;
+} wifi_signal_t;
+
+/*
+ * Reads the current link quality. Safe from any task; returns false and leaves
+ * *out zeroed when the feature is compiled out or the station is not associated.
+ *
+ * Cheap: no scan, no bus transaction, no blocking. See the note above.
+ */
+bool wifi_sta_get_signal(wifi_signal_t *out);

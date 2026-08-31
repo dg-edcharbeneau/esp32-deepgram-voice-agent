@@ -833,6 +833,18 @@ void app_main(void)
         ui_set_battery(bat.percent, bat.charging, bat.low, bat_ok);
 
         /*
+         * WI-FI SIGNAL, read here for the same reason and at the same cadence.
+         *
+         * Unlike the battery this is not a cached copy of a slow sample -- the
+         * Wi-Fi driver holds the number and hands it over in microseconds, so
+         * reading it on this pass is the whole mechanism. See wifi_sta.h for why
+         * it needs no sampler of its own.
+         */
+        wifi_signal_t sig;
+        const bool sig_ok = wifi_sta_get_signal(&sig);
+        ui_set_signal(sig.bars, sig.weak, sig_ok);
+
+        /*
          * CRITICAL: hold the panel asleep, session or no session. It is the
          * largest single draw on the board and dimming it is the only lever this
          * firmware has over how long the rest of the charge lasts. The session is
@@ -1051,7 +1063,8 @@ void app_main(void)
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
                  " txdrop=%" PRIu32 " vadsup=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
-                 " ialloc=%u bat=%d mv=%d chg=%d chgst=%d",
+                 " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
+                 " rssi=%d bars=%d ch=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1076,6 +1089,13 @@ void app_main(void)
                   * read. Which state a charge stopped in is the only thing that
                   * distinguishes "hit the configured target voltage" from
                   * "something else stopped it". */
-                 bat.chg_state);
+                 bat.chg_state,
+                 /* -1 for all three, on the same convention as bat= above: no
+                  * association and a genuinely awful link have to be
+                  * distinguishable by anything parsing this line, and 0 dBm
+                  * would read as the best signal ever measured. */
+                 sig_ok ? sig.rssi : -1,
+                 sig_ok ? (int)sig.bars : -1,
+                 sig_ok ? (int)sig.channel : -1);
     }
 }

@@ -162,6 +162,65 @@ touches I2C, because a blocking transfer on the frame timer lands straight in
 the frame budget. `CONFIG_BATTERY_SHOW_DOTS` turns them off, separately from
 `CONFIG_UI_SHOW_INDICATORS` -- that one is a bench aid, this is not.
 
+### The signal icon
+
+The familiar wifi glyph -- a dot with three arcs fanning out above it -- at
+**10 to 11 o'clock**, on the same radius 200 the charge dots use, so the two
+indicators balance across the panel. **Four elements for four bars**, and they
+line up exactly: the dot alone is one bar, each arc past it is one more. That is
+the progression every phone and laptop draws, so a device showing
+dot-plus-one-arc is showing what its owner already reads as poor reception. Unlit
+parts dim to a quarter of the same hue rather than disappearing, the same rule
+the charge dots follow.
+
+The first version of this was the charge row mirrored -- four dots on the
+opposite curve. Structurally that was nearly free, and it told the owner nothing:
+two identical rows on the same glass, with only which side of the panel you were
+looking at to distinguish "how full" from "how connected". **The wifi glyph needs
+no legend at all**, which is the whole argument for it.
+
+It is drawn **upright**, not rotated to the tangent like the dots it sits
+opposite. A wifi glyph tipped 45 degrees stops being the familiar shape and
+starts being a decoration; the arcs have to fan straight up to read. The apex
+sits a little below the radius-200 mark so the glyph's mass, rather than its
+lowest point, lands there.
+
+Three arcs at outer radii 10/16/22 and a 3 px stroke -- `lv_draw_arc()` puts the
+outer edge at `radius` and grows inward, the same convention the touch ring
+records. Six px of pitch at three px of stroke leaves three px of gap, which is
+what keeps them from reading as one thick band at arm's length. The fan spans
+**90 degrees** (LVGL angles: 225 to 315, since 0 is 3 o'clock and up is 270)
+rather than the 120 some icon sets use, because a wider fan at this size closes
+the gap between the innermost arc's ends and the dot until the two touch.
+
+**One box for the whole glyph**, which is the opposite call from the charge row's
+five and for the opposite reason: four dots strung along an arc have a bounding
+box ten times their ink, while this glyph fills its own box -- the arcs span it
+horizontally, the dot holds the bottom. Per-shape boxes here would be four
+overlapping rectangles adding up to more than the one they sit in. About 37x30,
+~1,100 px, a little less than the charge row's five boxes cost together. Measured
+on hardware it is free: frame draw time sits at 15.0 ms with the glyph up against
+14.9 ms without, which is inside the noise.
+
+What the two overlays *do* share is `arc_tint()` and the dim ratio -- the "one
+colour, one dim step" rule -- and the wipe-then-draw discipline the charge dots
+learned the hard way. Read the paragraphs above about clearing what you drew;
+they apply here identically.
+
+The bar count arrives **already bucketed** from `wifi_sta_get_signal()`, which is
+also where the dBm thresholds and their hysteresis live -- beacon RSSI walks
+several dB between beacons, so a display that bucketed the raw value would blink
+an arc in and out for as long as the device sat at that distance. Promotion needs
+3 dB of margin; demotion is immediate. `draw_signal()` only clamps and draws.
+
+On screen while the session is **stopped**, the display is **asleep**, or the
+signal is **weak** -- `weak` being that same hysteresed flag, which is what keeps
+the icon up mid-conversation, the one time it is worth interrupting the face for.
+Nothing is drawn while there is no association: during provisioning the panel is
+showing a QR code, and a signal icon beside it would be describing a link that
+does not exist yet. `CONFIG_WIFI_SIGNAL_SHOW_BARS` turns the icon off and leaves
+the TLM line and the voice tool intact.
+
 ### Telemetry
 
 One machine-parseable line per second, plus `EVT` lines on every transition:
@@ -170,9 +229,14 @@ One machine-parseable line per second, plus `EVT` lines on every transition:
 TLM up=123.4 face=orb beh=SPEAKING src=agent sess=ready frames=22 fps=22.8
     draw=17.4/20.1 amp=0.41/0.56 low=0.32/0.49 mid=0.55/0.71 high=0.48/0.62
     ... int=65851 intmax=49152 ifree=65851 iblocks=5 ialloc=521
-    bat=62 mv=3841 chg=0 chgst=5
+    bat=62 mv=3841 chg=0 chgst=5 rssi=-58 bars=3 ch=6
 EVT beh IDLE->SPEAKING after=4.20s
 ```
+
+`bat=`, `rssi=`, `bars=` and `ch=` are **-1 when there is no reading** -- no
+association, or no sample yet. Zero would be a lie in both cases: 0% and 0 dBm
+are the extremes of their scales, and 0 dBm in particular would read as the best
+signal ever measured.
 
 It is emitted from the **main task**, not the UI: console writes block, and
 logging from the frame timer would corrupt the timings it reports. `avg/max`
