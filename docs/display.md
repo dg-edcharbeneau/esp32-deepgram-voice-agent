@@ -170,7 +170,7 @@ One machine-parseable line per second, plus `EVT` lines on every transition:
 TLM up=123.4 face=orb beh=SPEAKING src=agent sess=ready frames=22 fps=22.8
     draw=17.4/20.1 amp=0.41/0.56 low=0.32/0.49 mid=0.55/0.71 high=0.48/0.62
     ... int=65851 intmax=49152 ifree=65851 iblocks=5 ialloc=521
-    bat=62 mv=3841 chg=0
+    bat=62 mv=3841 chg=0 chgst=5
 EVT beh IDLE->SPEAKING after=4.20s
 ```
 

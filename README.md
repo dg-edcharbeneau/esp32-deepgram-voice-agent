@@ -14,7 +14,8 @@ the session itself.
 </p>
 
 Talk to it and it answers. Ask it to change its voice, its name, its colour, or
-its face, and it does — the agent has tools wired to the device's own hardware.
+its face — or how much battery it has left — and it does: the agent has tools
+wired to the device's own hardware.
 
 ## The hardware
 
@@ -93,6 +94,9 @@ Two interchangeable **faces**, switched by asking out loud: an **orb** of 456
 depth-sorted dots whose behaviour tracks the session state, and a **radial
 spectrum analyser** of 48 FFT bars. Both are drawn under a fixed RAM budget that
 the docs explain rather than assume — **[docs/display.md](docs/display.md)**.
+
+Charge shows as four dots following the display's outer curve, read from the
+board's AXP2101 fuel gauge and coloured to match the orb.
 
 ## Documentation
 
