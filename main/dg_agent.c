@@ -19,6 +19,7 @@
 #include "agent_prompt.h"
 #include "api_key.h"
 #include "audio_io.h"
+#include "battery.h"
 #include "dg_agent.h"
 #include "faces.h"
 #include "orb_colors.h"
@@ -490,6 +491,43 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+#if CONFIG_BATTERY
+        if (strcmp(name->valuestring, "get_battery") == 0) {
+            battery_status_t bat;
+            bool ok = battery_get(&bat);
+            ESP_LOGI(TAG, "EVT battery -> ok=%d pct=%d mv=%d chg=%d",
+                     (int)ok, bat.percent, bat.millivolts, (int)bat.charging);
+
+            /*
+             * Four answers, and the distinction between them is the point.
+             * "Charging" is current going in, which is not the same as plugged
+             * in -- a full battery on USB is not charging, and saying it is
+             * would be wrong every time someone left it on the charger
+             * overnight. The low case adds the suggestion because that is the
+             * one reading the user is expected to act on.
+             */
+            if (!ok) {
+                snprintf(content, sizeof(content),
+                         "I cannot read my battery. Say so plainly and do not guess a "
+                         "number.");
+            } else if (bat.charging) {
+                snprintf(content, sizeof(content),
+                         "Battery is at %d percent and charging. Say so briefly.",
+                         bat.percent);
+            } else if (bat.low) {
+                snprintf(content, sizeof(content),
+                         "Battery is at %d percent and not charging. Say so and suggest "
+                         "plugging me in.", bat.percent);
+            } else {
+                snprintf(content, sizeof(content),
+                         "Battery is at %d percent, not plugged in. Say so briefly.",
+                         bat.percent);
+            }
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+#endif
+
         if (strcmp(name->valuestring, "set_face") == 0) {
             int index = -1;
             const char *wanted = NULL;
@@ -761,6 +799,31 @@ static esp_err_t send_settings(void)
     cJSON *srequired = cJSON_AddArrayToObject(sparams, "required");
     cJSON_AddItemToArray(srequired, cJSON_CreateString("level"));
     cJSON_AddItemToArray(functions, set_volume);
+
+#if CONFIG_BATTERY
+    /*
+     * Reading, not doing -- the only tool here that changes nothing. Gated on
+     * CONFIG_BATTERY because a build with no battery module would have nothing
+     * to answer with, and a tool that always fails is worse than an absent one:
+     * the model would keep offering it.
+     *
+     * "how much charge is left" is the phrasing this exists for, and the
+     * description says so, because the model has no other way to know that this
+     * device has a battery at all.
+     */
+    cJSON *get_battery = cJSON_CreateObject();
+    cJSON_AddStringToObject(get_battery, "name", "get_battery");
+    cJSON_AddStringToObject(get_battery, "description",
+                            "Read your OWN remaining battery charge. Use it whenever "
+                            "they ask how much charge or battery is left, how long you "
+                            "will last, or whether you are plugged in or charging. You "
+                            "run on a rechargeable battery and this is the only way you "
+                            "can know its level -- never guess or estimate one.");
+    cJSON *bparams = cJSON_AddObjectToObject(get_battery, "parameters");
+    cJSON_AddStringToObject(bparams, "type", "object");
+    cJSON_AddObjectToObject(bparams, "properties");
+    cJSON_AddItemToArray(functions, get_battery);
+#endif
 
     /*
      * Not Flux-gated either: the display is local and works on either speech

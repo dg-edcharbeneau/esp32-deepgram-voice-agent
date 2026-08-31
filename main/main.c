@@ -40,6 +40,7 @@
 
 #include "agent_name.h"
 #include "audio_io.h"
+#include "battery.h"
 #include "boot_button.h"
 #include "heap_probe.h"
 #include "dg_agent.h"
@@ -669,6 +670,15 @@ void app_main(void)
      * arrives. */
     ESP_ERROR_CHECK(audio_io_init(DG_AUDIO_SAMPLE_RATE));
 
+    /*
+     * After audio, because that is what brings the I2C bus up -- though
+     * battery_start() calls bsp_i2c_init() itself rather than relying on the
+     * order, the same way the BSP's own entry points do. Compiles to nothing
+     * unless CONFIG_BATTERY is on, and a board whose PMU does not answer simply
+     * logs and carries on.
+     */
+    battery_start();
+
     ESP_ERROR_CHECK(wifi_stack_init());
 
     /*
@@ -807,6 +817,42 @@ void app_main(void)
         }
 
         /*
+         * BATTERY. Read here rather than anywhere else for the reason every other
+         * subsystem is read here: this task is the one allowed to be slow, and
+         * battery.c samples on its own schedule, so this is a copy of the last
+         * value and not a bus transaction.
+         *
+         * The warning is the dots themselves -- battery.c's hysteresed `low` flag
+         * keeps them on screen whatever else is happening. The status label is
+         * deliberately NOT used: it reports the session, on_state_change() rewrites
+         * it constantly, and a battery message parked there would either be
+         * overwritten within the second or be a lie about the session.
+         */
+        battery_status_t bat;
+        const bool bat_ok = battery_get(&bat);
+        ui_set_battery(bat.percent, bat.charging, bat.low, bat_ok);
+
+        /*
+         * CRITICAL: hold the panel asleep, session or no session. It is the
+         * largest single draw on the board and dimming it is the only lever this
+         * firmware has over how long the rest of the charge lasts. The session is
+         * left alone on purpose -- a device that hangs up mid-sentence to save
+         * power is worse than one that goes dark and keeps talking.
+         */
+#if CONFIG_BATTERY
+        const bool bat_critical = (CONFIG_BATTERY_CRITICAL_PCT > 0) && bat_ok &&
+                                  !bat.charging &&
+                                  bat.percent <= CONFIG_BATTERY_CRITICAL_PCT;
+#else
+        const bool bat_critical = false;
+#endif
+        static bool prev_critical;
+        if (bat_critical != prev_critical) {
+            prev_critical = bat_critical;
+            ESP_LOGW(TAG, "EVT battery critical=%d pct=%d", (int)bat_critical, bat.percent);
+        }
+
+        /*
          * SLEEP, and the radio follows the panel rather than the other way round.
          *
          * ui_set_sleep() is only a request: the frame timer applies it on the LVGL
@@ -833,7 +879,11 @@ void app_main(void)
         }
         prev_asleep = panel_asleep;
 
-        if (session_ctl_is_running()) {
+        if (bat_critical) {
+            /* Ahead of the session check, which is the only branch that would
+             * otherwise wake the panel back up on the next pass. */
+            ui_set_sleep(true);
+        } else if (session_ctl_is_running()) {
             stopped_since_ms = 0;
             ui_set_sleep(false);
         } else if (stopped_since_ms == 0) {
@@ -1001,7 +1051,7 @@ void app_main(void)
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
                  " txdrop=%" PRIu32 " vadsup=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
-                 " ialloc=%u",
+                 " ialloc=%u bat=%d mv=%d chg=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1017,6 +1067,10 @@ void app_main(void)
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                  (unsigned)ih.total_free_bytes, (unsigned)ih.free_blocks,
-                 (unsigned)ih.allocated_blocks);
+                 (unsigned)ih.allocated_blocks,
+                 /* -1, not 0: "no reading" and "flat" have to be told apart by
+                  * anything parsing this line. */
+                 bat_ok ? bat.percent : -1, bat_ok ? bat.millivolts : -1,
+                 (int)bat.charging);
     }
 }

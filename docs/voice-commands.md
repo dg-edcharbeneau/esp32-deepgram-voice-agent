@@ -100,6 +100,35 @@ If a touch or UI volume control is ever added, funnel both callers through
 `audio_io_set_volume()` and put a mutex there — outside `esp_codec_dev`, so it
 cannot invert against the WebSocket client's own recursive lock.
 
+## Asking how much charge is left
+
+`get_battery` is the only tool here that changes nothing -- it reads. "How much
+charge is left?", "are you plugged in?", "how long will you last?" all land on
+it, and it answers with a percentage the agent says out loud.
+
+The number comes from the AXP2101's own fuel gauge, sampled every 5 s by
+`main/battery.c`, not from a voltage the firmware guesses a curve for. The tool
+description tells the model it runs on a battery and that this is the only way
+it can know the level, because otherwise it has no way to know either fact and
+will happily invent a number.
+
+Four answers, and the differences are deliberate:
+
+| state | what it says |
+|---|---|
+| charging | "at 62 percent and charging" |
+| discharging | "at 62 percent, not plugged in" |
+| low (<= `CONFIG_BATTERY_LOW_PCT`) | the percentage, plus a suggestion to plug in |
+| no reading | says it cannot read the battery, and is told not to guess |
+
+"Charging" means current is going *into* the cell, which is not the same as
+being plugged in: a full battery on USB reads as not charging, and saying
+otherwise would be wrong every time someone left it on the charger overnight.
+
+The dots on screen use the same reading, and the same hysteresed `low` flag, so
+what the device says and what it shows cannot disagree. See
+[the display](display.md) for where they are drawn.
+
 ## Changing its name by asking
 
 The agent is called **Grammer** out of the box. "Call yourself Blake" changes

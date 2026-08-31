@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-31
+
+### Added
+
+- **Battery.** The board's AXP2101 power-management IC has a fuel gauge, and
+  nothing was reading it. A low-priority sampler (`main/battery.c`) now reads
+  charge, cell voltage and charge direction off it every 5 s and three things
+  use the result:
+  - Four dots following the display's outer curve from 1 to 2 o'clock, a quarter
+    of the charge each, in the orb's own colour -- spent ones at a quarter
+    brightness of the same hue -- with a bolt while charging. On screen while stopped or asleep, and
+    whenever the charge is low or the cell is charging -- not over a live
+    conversation at full charge.
+  - `bat=`, `mv=` and `chg=` on the TLM line, `bat=-1` when there is no reading.
+  - `get_battery`, so "how much charge is left?" is answered out loud.
+
+  Below `CONFIG_BATTERY_CRITICAL_PCT` (8%) the panel is held asleep -- it is the
+  largest draw on the board -- while the session is left alone. The driver only
+  ever *reads* the AXP2101: that chip also owns the display and codec rails, so
+  a driver that configures regulators is a way to brown the panel out.
+  `CONFIG_BATTERY` (default on) compiles the whole thing out.
+
+  The overlay clears its own boxes every frame and once more when it stops being
+  shown -- the canvas keeps its pixels, so an indicator that hides by simply not
+  drawing leaves its last dots and its last bolt on screen for good.
+
+  Verified on hardware: the PMU answers at 0x34, the gauge and voltage
+  registers read 60% / 3.96 V, the charge/discharge bits in REG01 6:5 flip with
+  the cable, the dots show and hide correctly, and the spoken answer came back
+  right.
+
 ## [0.3.0] - 2026-08-30
 
 ### Added

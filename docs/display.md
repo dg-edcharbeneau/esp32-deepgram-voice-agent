@@ -104,6 +104,64 @@ it still land internal and have to be combined into one larger block to reach
 PSRAM. If largest-block sags towards 40 kB, cut `DRAW_ROWS` in
 [main/ui.c](../main/ui.c) before tuning anything else.
 
+### The battery dots
+
+Four dots following the display's outer curve from **1 to 2 o'clock**, each
+worth a quarter of the charge, filling clockwise so the row reads the way a
+clock face does. Spent dots go dim rather than disappearing: a row that keeps
+its length reads as "three of four" at a glance, where a shrinking row of two
+dots is indistinguishable from a screen that has decided to draw two dots. A
+bolt continues the same arc past the last dot while current is going into the
+cell.
+
+**They take the orb's colour**, all of them, so `set_color` moves the row along
+with everything else -- an indicator in its own fixed palette reads as a foreign
+object on the glass. Spent dots are the same hue at a quarter brightness rather
+than a neutral grey: it keeps the row reading as one object, and the held/spent
+contrast survives on every colour in the catalog, which a fixed grey does not.
+The bolt is at full brightness like a held dot, because it is a state rather
+than a quantity.
+
+They follow the curve because this panel is **round**: the corner an icon like
+this normally lives in does not exist here, it is bezel -- and a straight row
+across a round screen reads as something that fell off a rectangular one. The
+positions are precomputed constants at radius 200 (33 px in from the edge) and
+30/40/50/60 degrees clockwise from 12, with the bolt at 70; four sines per frame
+to arrive at four constants would be a cost with nothing to show for it. Change
+the radius or the angles and change them together -- nothing checks at runtime
+that they still lie on a circle.
+
+`draw_battery()` in [main/ui.c](../main/ui.c) draws them, **after the face** and
+for the same reason `draw_indicators()` does: the orb clears only the boxes its
+own dots occupied last frame, so an overlay drawn first comes out moth-eaten.
+
+It also **clears what it drew**, which the first version did not, and the bench
+found within a minute: the canvas keeps its pixels, so hiding the indicator by
+not drawing left the last dots and the last bolt up permanently -- the bolt
+outlived the cable, and the dots were only erased where an orb dot happened to
+be painted over them. So the overlay blacks its whole box every frame before
+drawing into them, and blacks them once more on the frame it stops being shown.
+The **bolt's** box is cleared whether or not a bolt is in it: a region that
+appears only while charging cannot erase the bolt it left behind.
+
+Five small boxes, not one bounding box, and that matters on an arc -- the row's
+bounding box is ~90x120, about 10,800 pixels, as much as the orb's entire
+per-frame clear. Per-shape boxes cost ~1,300, and it is the same thing
+`orb_raster.c` does for the same reason.
+
+They are on screen while the session is **stopped** or the display is **asleep**,
+and whenever the charge is **low** or the cell is **charging** -- the first two
+being the states where someone is looking at the device rather than talking to
+it, the last two being the ones they need to know about regardless. Not over a
+live conversation at full charge: the face is the point then, and a permanent
+gauge is clutter that also costs an invalidated box every frame. Nothing is
+drawn before the first sample, so boot never flashes an empty battery.
+
+The reading itself comes from `main/battery.c` on its own task; the UI never
+touches I2C, because a blocking transfer on the frame timer lands straight in
+the frame budget. `CONFIG_BATTERY_SHOW_DOTS` turns them off, separately from
+`CONFIG_UI_SHOW_INDICATORS` -- that one is a bench aid, this is not.
+
 ### Telemetry
 
 One machine-parseable line per second, plus `EVT` lines on every transition:
@@ -112,6 +170,7 @@ One machine-parseable line per second, plus `EVT` lines on every transition:
 TLM up=123.4 face=orb beh=SPEAKING src=agent sess=ready frames=22 fps=22.8
     draw=17.4/20.1 amp=0.41/0.56 low=0.32/0.49 mid=0.55/0.71 high=0.48/0.62
     ... int=65851 intmax=49152 ifree=65851 iblocks=5 ialloc=521
+    bat=62 mv=3841 chg=0
 EVT beh IDLE->SPEAKING after=4.20s
 ```
 
