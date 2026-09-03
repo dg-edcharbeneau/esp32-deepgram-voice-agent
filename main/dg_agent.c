@@ -344,11 +344,12 @@ static SemaphoreHandle_t s_history_lock;
 static volatile bool s_history_frozen;
 
 /*
- * The flush's staging buffer, sized for the largest record the constants above
- * can produce. Held for the life of the device; see dg_agent_flush_history().
+ * The largest record the constants above can produce. A bound, not a buffer:
+ * the flush allocates and frees its staging space per write, because holding
+ * 3.3 kB of internal RAM permanently is what this device can least afford. See
+ * dg_agent_flush_history().
  */
 #define HISTORY_RECORD_MAX (sizeof(uint16_t) + sizeof(s_idx) + HISTORY_BYTES)
-static uint8_t *s_record;
 
 /*
  * At build time, because the runtime failure is a bad one to debug: a record
@@ -963,13 +964,11 @@ void dg_agent_flush_history(void)
      * HISTORY_BYTES or HISTORY_MAX_TURNS -- silently, and with the store's own
      * limit still satisfied. A buffer check belongs to the buffer.
      */
-    if (s_record == NULL || total > HISTORY_RECORD_MAX) {
-        /* The size case cannot happen with the constants above -- 2 + 240 + 3072
-         * is exactly HISTORY_RECORD_MAX -- but it would otherwise be a silent
-         * corruption rather than a conversation that stops persisting. */
-        ESP_LOGW(TAG, "history not saved: %s",
-                 (s_record == NULL) ? "no record buffer"
-                                    : "record larger than the buffer");
+    if (total > HISTORY_RECORD_MAX) {
+        /* Cannot happen with the constants above -- 2 + 240 + 3072 is exactly
+         * HISTORY_RECORD_MAX -- but it would otherwise be a silent corruption
+         * rather than a conversation that stops persisting. */
+        ESP_LOGW(TAG, "history not saved: record larger than the buffer");
         xSemaphoreGive(s_history_lock);
         /* Through the same counted retry as a failed write, rather than just
          * re-flagging: a bare flag re-arms nothing, and this branch would
@@ -980,28 +979,52 @@ void dg_agent_flush_history(void)
     }
 
     /*
-     * Assembled straight into s_record, which is allocated once at init. Three
-     * reasons it is not a malloc here, and each one on its own is sufficient:
-     * a local array would be ~3 kB of frame on session_ctl's worker; an
-     * allocation would happen while holding s_history_lock, so the WebSocket
-     * task would block on the heap rather than on the memcpy this design
-     * promises; and a flush that can fail to allocate is a flush that can stop
-     * persisting under memory pressure, which is when it matters most.
+     * TRANSIENT, AND INTERNAL IF IT CAN BE. This buffer used to be allocated
+     * once at init and held for the life of the device, which cost 3.3 kB of
+     * INTERNAL RAM permanently. Measured on the board, that is not affordable:
+     * the largest free internal block dips to about 7.7 kB during a live
+     * session, and when it does, esp-aes cannot get a DMA buffer and the TLS
+     * read or write under it fails -- which closes the Deepgram socket. Holding
+     * three kilobytes of the scarcest resource on the device, to spend a few
+     * milliseconds per exchange, was the wrong side of that trade.
      *
-     * INTERNAL RAM, not PSRAM, and that is the point of it. esp_flash_write()
-     * takes its direct_write path only for a source it can DMA from; handed a
-     * PSRAM buffer it copies in 32-byte pieces, disabling and re-enabling the
-     * cache on BOTH CORES for each one -- about a hundred stalls where the
-     * deferral bought one.
+     * Internal is still PREFERRED, because esp_flash_write() only takes its
+     * direct path for a source it can reach with the cache off. Handed anything
+     * else it copies through a 32-byte stack buffer -- see the `temp_buf[8]`
+     * loop in esp_flash_api.c -- so a 3.3 kB record from PSRAM is about a
+     * hundred cache-disable cycles across both cores instead of one write.
+     *
+     * So: internal when it is there, PSRAM when it is not, and a counted retry
+     * when neither is. Falling back beats failing -- a slow write still saves
+     * the conversation, and this runs on session_ctl's worker where a stall
+     * costs nothing but its own latency.
      */
-    memcpy(s_record, &count, sizeof(count));
-    memcpy(s_record + sizeof(count), s_idx, idx_bytes);
-    memcpy(s_record + sizeof(count) + idx_bytes, s_arena, s_history_bytes);
+    uint8_t *rec = heap_caps_malloc(total, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const bool slow = (rec == NULL);
+    if (slow) {
+        rec = heap_caps_malloc(total, MALLOC_CAP_SPIRAM);
+    }
+    if (rec == NULL) {
+        xSemaphoreGive(s_history_lock);
+        history_note_save_failure(ESP_ERR_NO_MEM);
+        return;
+    }
+
+    memcpy(rec, &count, sizeof(count));
+    memcpy(rec + sizeof(count), s_idx, idx_bytes);
+    memcpy(rec + sizeof(count) + idx_bytes, s_arena, s_history_bytes);
     xSemaphoreGive(s_history_lock);
+
+    if (slow) {
+        /* Worth a line: it means internal RAM was too tight for 3 kB, which is
+         * the same condition that drops sessions. */
+        ESP_LOGW(TAG, "history record staged in PSRAM -- internal RAM tight");
+    }
 
     /* Outside the lock: the erase blocks for tens of milliseconds and the
      * WebSocket task must never wait that long to record a turn. */
-    const esp_err_t err = history_store_save(s_record, total);
+    const esp_err_t err = history_store_save(rec, total);
+    free(rec);
 
     if (err != ESP_OK) {
         /*
@@ -2544,18 +2567,8 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
     s_arena = (s_history_lock != NULL)
                   ? heap_caps_malloc(HISTORY_BYTES, MALLOC_CAP_SPIRAM)
                   : NULL;
-    /* Internal and DMA-capable, so esp_flash_write() can take its direct path
-     * rather than copying the record 32 bytes at a time with the cache off. */
-    s_record = heap_caps_malloc(HISTORY_RECORD_MAX,
-                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (s_arena == NULL || s_record == NULL) {
-        /* All or nothing: every guard in this file tests s_arena, so leaving one
-         * of the two allocated would make that guard mean the wrong thing. */
-        free(s_arena);
-        free(s_record);
-        s_arena = NULL;
-        s_record = NULL;
-        ESP_LOGW(TAG, "no memory for history -- conversations will not persist");
+    if (s_arena == NULL) {
+        ESP_LOGW(TAG, "no PSRAM for history -- conversations will not persist");
     } else {
         const esp_timer_create_args_t targs = {
             .callback = history_flush_timer_cb,
