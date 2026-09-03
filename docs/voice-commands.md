@@ -229,6 +229,36 @@ heading in the assembled prompt — and the 31-character cap is doing two jobs: 
 name is spoken aloud, and this is a string a stranger says out loud that ends up
 in the system prompt.
 
+## Starting over by asking
+
+"Let's start a new conversation" works, and it is the only function here that
+destroys something. `new_conversation` takes no arguments and forgets everything
+the device is holding, in RAM and on flash.
+
+Mechanically it is a fourth pattern, because it is the only one that has to
+defend against being called. The description tells the model to ask first — but a
+description is a request, so **the confirmation is enforced in code**: the first
+call arms and does nothing, and only a second call counts — inside sixty seconds,
+and after **exactly one** user turn.
+
+That buys three things: the device asked before it wiped, somebody spoke after
+being asked, and it was recent. It does **not** verify that the answer was yes —
+"no" is a user turn like any other and nothing on the device can read it. What
+the scheme removes is the failure where nobody was asked at all. "Exactly one"
+rather than "at least one" additionally means an unanswered question from earlier
+in the minute cannot be cashed in later; the cost is that a confirmation split
+over two utterances does not count and the device asks again, which is the
+direction to be wrong in.
+
+Like `set_voice` it reloads the session, because the turns are gone from the
+device but Deepgram still holds them server-side. Unlike `set_voice` the reload
+carries a backstop timer, because this is the one deferral that cannot afford
+`AgentAudioDone` not arriving — see [persistence.md](persistence.md).
+
+The screen has the same gesture for a device whose session is down: hold, and
+hold again. [session-control.md](session-control.md#holding-on-a-stopped-device)
+covers why the confirmation there is a second hold rather than a tap.
+
 ## Changing the face by asking
 
 "Show me the bars instead" works, and so does "go back to the orb". `set_face`
@@ -295,9 +325,11 @@ is compile-time, and it is built on three pieces:
 - **A session reload.** A new `Settings` message is the only thing that actually
   changes the voice (see below), so the device saves the choice, lets the agent
   finish saying what it is doing, then reopens the socket.
-- **History replay.** `agent.context.messages` carries the last few turns into
-  the new session as `{"type":"History","role":...,"content":...}` entries, so
-  the conversation continues across the reload instead of starting over.
+- **History replay.** `agent.context.messages` carries the recent turns into the
+  new session as `{"type":"History","role":...,"content":...}` entries, so the
+  conversation continues across the reload instead of starting over. Those turns
+  now come off flash as readily as out of RAM — see
+  [persistence.md](persistence.md).
 - **NVS.** Namespace `dgagent`, key `tts_voice`. This is the first application
   use of NVS in the project; `nvs_flash_init()` was already there for Wi-Fi
   calibration.
@@ -335,16 +367,24 @@ Deferring to `AgentAudioDone` is what stops the socket disappearing mid-sentence
 
 ### The history buffer
 
-The last **6 turns**, each truncated to **160 characters**
-([dg_agent.c](../main/dg_agent.c)). Small on purpose: every entry is re-sent on
-every connect, `Settings` is already ~1.8 kB with the voice catalog in it, and
-this project has spent real effort keeping the uplink healthy. Measured: 1763 B
-without history, 2144 B with five turns.
+A **3 kB packed arena** in PSRAM holding whole turns — 25-40 of them in practice,
+truncated only past 512 characters each ([dg_agent.c](../main/dg_agent.c)). It is
+persisted to flash, so it survives a reboot as well as a reconnect; see
+[persistence.md](persistence.md) for the store, the write cadence and the
+arithmetic behind the sizes.
 
-It is cleared only when the user **deliberately** ends a conversation (a screen
-tap). A long-press restart, a reload, and an automatic reconnect all keep it —
-which incidentally fixes the most visible symptom of a dropped socket, where the
-agent used to re-greet and forget everything.
+What gets replayed into `Settings` is far smaller than what is held: at most
+`HISTORY_REPLAY_MAX_TURNS` (6) and `HISTORY_REPLAY_BYTES` (1280), chosen
+newest-first so the oldest context is what gets dropped. Those caps are a hard
+limit set by measurement — a larger replay pushed `Settings` to 20 kB and made
+the session flap, because the message is built and sent at the moment internal
+heap is most fragmented. See [persistence.md](persistence.md).
+
+**Nothing clears it implicitly.** A tap-to-stop, a long-press restart, a reload,
+the idle timeout and an automatic reconnect all keep the conversation — which is
+what fixes the most visible symptom of a dropped socket, where the agent used to
+re-greet and forget everything. Forgetting is a deliberate, confirmed act: the
+`new_conversation` function below, or hold-again on a stopped device.
 
 ### Threading
 

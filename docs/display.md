@@ -11,6 +11,12 @@ between them by asking out loud — see [Changing things by asking](voice-comman
 Both are driven by the session rather than by their own I2S read, because the
 codec is already owned by `audio_io`.
 
+One word sits in the middle of whichever face is up, saying what the session is
+doing — `listening`, `resuming`, `stopped, saved`. It moves to the bezel and
+curves along it while a finger is on the button, because the middle of the screen
+is also the touch target; see
+[the status word](session-control.md#the-status-word-gets-out-from-under-the-thumb).
+
 ### The orb (default)
 
 A dotted shell of 456 dots, a C port of the voice orb from
@@ -104,11 +110,24 @@ it still land internal and have to be combined into one larger block to reach
 PSRAM. If largest-block sags towards 40 kB, cut `DRAW_ROWS` in
 [main/ui.c](../main/ui.c) before tuning anything else.
 
+### Why both indicators are on the sides
+
+They used to sit across the top — the charge row at 1 to 2 o'clock, the wifi
+glyph at 10 to 11 — and that is exactly where the status caption's ends land when
+it swings out to the rim. The top charge dot sat on the tail of
+`forget? hold again` and notched it out on every frame.
+
+Drawing the caption last hid it, but hiding a collision is not the same as not
+having one: every one of these overlays blacks its own ground before drawing, so
+whichever went second simply erased part of the other. **The top of the panel
+belongs to the caption; the indicators have the sides.** Both still follow the
+curve, on the same radius 200 as before.
+
 ### The battery dots
 
-Four dots following the display's outer curve from **1 to 2 o'clock**, each
-worth a quarter of the charge, filling clockwise so the row reads the way a
-clock face does. Spent dots go dim rather than disappearing: a row that keeps
+Four dots following the display's outer curve **down the right side**,
+straddling 3 o'clock, each worth a quarter of the charge and filling clockwise
+so the row reads downward the way a clock face does. Spent dots go dim rather than disappearing: a row that keeps
 its length reads as "three of four" at a glance, where a shrinking row of two
 dots is indistinguishable from a screen that has decided to draw two dots. A
 bolt continues the same arc past the last dot while current is going into the
@@ -165,8 +184,8 @@ the frame budget. `CONFIG_BATTERY_SHOW_DOTS` turns them off, separately from
 ### The signal icon
 
 The familiar wifi glyph -- a dot with three arcs fanning out above it -- at
-**10 to 11 o'clock**, on the same radius 200 the charge dots use, so the two
-indicators balance across the panel. **Four elements for four bars**, and they
+**9 o'clock**, on the same radius 200 the charge dots use, so the two indicators
+balance across the panel. **Four elements for four bars**, and they
 line up exactly: the dot alone is one bar, each arc past it is one more. That is
 the progression every phone and laptop draws, so a device showing
 dot-plus-one-arc is showing what its owner already reads as poor reception. Unlit

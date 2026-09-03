@@ -1,6 +1,9 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # Kept byte-identical to spec_analyzer_radial so both firmwares share one flash
-# layout -- swapping between them needs no erase. `storage` is unused here.
+# layout -- swapping between them needs no erase. `storage` holds the saved
+# conversation (main/history_store.c) in raw slots at its head, no filesystem;
+# spec_analyzer_radial does not touch it, and `flash` does not write data
+# partitions, so a swap in either direction leaves it alone.
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
 factory,  app,  factory, ,        8M,

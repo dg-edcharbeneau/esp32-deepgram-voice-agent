@@ -4,6 +4,101 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-01
+
+### Added
+
+- **Conversations survive a reboot.** The device already survived a dropped
+  socket -- the last turns were replayed into every new `Settings` message --
+  but that ring lived in `.bss`, so a brownout, a crash or an unplug came back
+  to a device that greeted you as a stranger. The turns now live in a packed
+  byte arena in PSRAM and are written to flash.
+
+  The store (`main/history_store.c`) is a ring of eight single-sector records in
+  the `storage` partition, which was declared in `partitions.csv` and mounted by
+  nobody. The header is written **last**, so a record is either complete or
+  invisible and a power loss mid-write leaves the previous one whole. Not NVS:
+  that partition is 630 entries shared with the Wi-Fi calibration blob, and its
+  compaction rewrites neighbours -- per-turn history writes would have spent the
+  erase budget holding the credentials.
+
+  Writes are deferred twice. A turn sets a flag and a 1.5 s debounce coalesces an
+  exchange into one write; `session_ctl`'s worker does the blocking erase,
+  because neither the WebSocket event task nor `esp_timer` can afford tens of
+  milliseconds of flash with the cache off. `host/store.sh` compiles the real
+  module against a fake NOR flash that clears bits rather than copying and can
+  cut a write short -- both power-loss windows are covered.
+
+- **The status word gets out from under your thumb.** The label sat in the middle
+  of the screen, which is also the 70 px touch target, so reaching for the
+  control hid the words saying what the control would do. While a finger is down
+  it moves to twelve o'clock and bends along the bezel, a glyph at a time
+  (`main/arc_text.c`), lingering a second after release and fading out -- a tap
+  lasts a tenth of a second, and text that snapped back on release would flick
+  away before anyone read it.
+
+- **`new_conversation`**, and hold-again on a stopped device. The two ways to
+  forget deliberately. The function's confirmation is enforced in code rather
+  than promised in a description: the first call only arms, and the second
+  counts only inside sixty seconds and after exactly one user turn.
+
+### Changed
+
+- **A tap no longer ends the conversation.** It used to clear the history, on the
+  reading that stopping on purpose means being finished -- but a tap is how you
+  stop the device streaming, and people reach for it for reasons that have
+  nothing to do with being done talking. Every stop now behaves as the idle
+  timeout always did. The centre reads `stopped, saved` when there is something
+  to come back to, and `resuming` rather than `connecting` when there is.
+
+- **Both indicators moved to the sides**: charge down the right straddling 3
+  o'clock, the wifi glyph at 9. They sat at 1-2 and 10-11 o'clock, which is
+  exactly where the status caption's ends land, and the top charge dot blacked
+  its own box through the tail of `forget? hold again` every frame.
+
+### Fixed
+
+- **Sessions dropping at random.** Measured, not guessed: a Mac probing the same
+  AP saw 0 failures in 316 samples while the device dropped repeatedly, so it was
+  never the network. Every drop was `esp-aes: Failed to allocate memory` on a TLS
+  read or write.
+
+  The cause took the right instrument to see. `MALLOC_CAP_DMA` is a strict subset
+  of `MALLOC_CAP_INTERNAL`, and every figure this firmware logged was the
+  internal one -- so `intmax=7680` read as "a 1,600 B request should fit" when
+  the DMA-capable largest block was actually **832 B**. The failing allocation is
+  `heap_caps_aligned_alloc(align, <=1600, MALLOC_CAP_DMA)` from
+  `esp_aes_dma_core.c`, twice per TLS record, taken because
+  `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC` puts the record buffers in PSRAM where DMA
+  cannot reach them.
+
+  `DRAW_ROWS` 32 -> 16 fixes it: 14,912 B of internal RAM plus the same again in
+  SPI DMA transfer buffer, taking the DMA largest block from 14,848 to 31,744 --
+  about 20x the request that was failing. Zero allocation failures across 394
+  active-session samples, against 10 in 61 before. The cost is twice as many
+  flush transactions per frame.
+
+- **A session no longer dies when a send cannot take the client lock.**
+  `CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y` gives sends their own mutex instead
+  of the one the receive loop holds. The timeout still occurs; it is no longer
+  fatal.
+
+### Instrumentation
+
+- `dma=` and `dmamax=` on the TLM line, and both pools in `main/heap_probe.c`'s
+  failure hook and 50 ms sampler. The probe stays compiled out by default. It
+  already existed and was switched off; turning it on is what made an invisible
+  fault visible in one capture.
+
+### Known
+
+- The lock timeout above still happens, roughly twice per 400 active samples.
+- Verification is ~400 active-session samples, not the ~3,000 needed to
+  distinguish "rare" from "gone". Read the fixes as *no longer reproducible in
+  normal use*.
+- The orb colour is not persisted -- unlike the voice and agent name, it resets
+  to `CONFIG_UI_DEFAULT_ORB_COLOR` on every restart.
+
 ## [0.6.0] - 2026-08-31
 
 ### Added

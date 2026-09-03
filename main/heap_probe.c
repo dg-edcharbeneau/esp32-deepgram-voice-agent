@@ -22,6 +22,9 @@ static const char *TAG = "heap_probe";
 
 static volatile uint32_t s_min_free = UINT32_MAX;
 static volatile uint32_t s_min_largest = UINT32_MAX;
+/* The one that decides whether esp-aes can bounce a TLS record. See the note in
+ * sampler_task() for why this is the tracked figure and internal free is not. */
+static volatile uint32_t s_min_dma_largest = UINT32_MAX;
 
 /*
  * Runs in whatever context ran out of memory -- possibly an ISR, possibly with a
@@ -30,16 +33,32 @@ static volatile uint32_t s_min_largest = UINT32_MAX;
  *
  * `function_name` is the allocator entry point, not the caller, so it says
  * "malloc" more often than anything useful. The SIZE and the CAPS are the
- * informative part: a 16 kB MALLOC_CAP_INTERNAL|DMA request names mbedTLS's
- * record buffer about as clearly as a backtrace would.
+ * informative part.
+ *
+ * BOTH POOLS, and that is the whole point of this build. MALLOC_CAP_DMA is a
+ * STRICT SUBSET of MALLOC_CAP_INTERNAL -- not every internal region can be
+ * reached by the DMA engine -- so a device reporting 7 kB of internal largest
+ * block can have far less than that available to a DMA request. Every number in
+ * this project's telemetry so far has been the INTERNAL one, and the allocation
+ * that actually fails here is
+ *
+ *     heap_caps_aligned_alloc(align, <=1600, MALLOC_CAP_DMA)
+ *
+ * from esp_aes_dma_core.c, twice per TLS record. Reporting only the internal
+ * figure is how "largest=7680 yet a 1600 B request failed" looked like a
+ * contradiction rather than a measurement of the wrong pool.
  */
 static void IRAM_ATTR on_alloc_failed(size_t size, uint32_t caps, const char *function_name)
 {
-    ESP_DRAM_LOGE(TAG, "ALLOC FAILED: %u bytes caps=0x%08x from %s | free=%u largest=%u",
+    ESP_DRAM_LOGE(TAG,
+                  "ALLOC FAILED: %u bytes caps=0x%08x from %s | "
+                  "int free=%u largest=%u | dma free=%u largest=%u",
                   (unsigned)size, (unsigned)caps,
                   function_name ? function_name : "?",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
 }
 
 /*
@@ -51,28 +70,50 @@ static void IRAM_ATTR on_alloc_failed(size_t size, uint32_t caps, const char *fu
 static void sampler_task(void *arg)
 {
     (void)arg;
-    uint32_t reported_free = UINT32_MAX;
+    uint32_t reported = UINT32_MAX;
 
     for (;;) {
-        uint32_t free_now = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        uint32_t largest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        multi_heap_info_t info;
+        heap_caps_get_info(&info, MALLOC_CAP_INTERNAL);
 
-        if (free_now < s_min_free) {
-            s_min_free = free_now;
-            s_min_largest = largest;
+        const uint32_t int_free = (uint32_t)info.total_free_bytes;
+        const uint32_t int_largest = (uint32_t)info.largest_free_block;
+        const uint32_t blocks = (uint32_t)info.free_blocks;
+        const uint32_t dma_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_DMA);
+        const uint32_t dma_largest =
+            (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+
+        if (dma_largest < s_min_dma_largest) {
+            s_min_dma_largest = dma_largest;
+        }
+        if (int_free < s_min_free) {
+            s_min_free = int_free;
+            s_min_largest = int_largest;
         }
 
-        /* Report on the way DOWN only. A new floor is the interesting event; the
-         * recovery afterwards is not, and logging both doubles the noise. */
-        if (free_now + REPORT_STEP < reported_free) {
-            reported_free = free_now;
-            ESP_LOGW(TAG, "floor %.2f s: free=%u largest=%u",
+        /*
+         * TRACKED ON THE DMA LARGEST BLOCK, not on internal free bytes. The
+         * question this build exists to answer is whether a <=1600 B
+         * MALLOC_CAP_DMA request can be satisfied, and free-bytes-anywhere does
+         * not answer it: the arena can hold 50 kB in pieces too small or too
+         * far from the DMA engine to serve one.
+         *
+         * free_blocks comes along because it separates the two causes. A floor
+         * arriving with the block count RISING is fragmentation -- the same
+         * bytes cut into more pieces. Flat, with one more allocation
+         * outstanding, it is a single large claim.
+         */
+        if (dma_largest + REPORT_STEP < reported) {
+            reported = dma_largest;
+            ESP_LOGW(TAG, "floor %.2f s: dma largest=%u free=%u | "
+                          "int largest=%u free=%u blocks=%u",
                      (double)esp_timer_get_time() / 1000000.0,
-                     (unsigned)free_now, (unsigned)largest);
-        } else if (free_now > reported_free + (REPORT_STEP * 4)) {
+                     (unsigned)dma_largest, (unsigned)dma_free,
+                     (unsigned)int_largest, (unsigned)int_free, (unsigned)blocks);
+        } else if (dma_largest > reported + (REPORT_STEP * 4)) {
             /* Rearm well above the last floor, so a single noisy sample cannot
              * start a chatter of report/rearm/report. */
-            reported_free = free_now;
+            reported = dma_largest;
         }
 
         vTaskDelay(pdMS_TO_TICKS(SAMPLE_MS));
@@ -93,10 +134,19 @@ void heap_probe_start(void)
         return;
     }
 
-    ESP_LOGI(TAG, "armed: failure hook + %d ms sampler (free=%u largest=%u)",
+    /*
+     * The baseline both pools start from. Worth having on its own line: the gap
+     * between the internal figure and the DMA one, right here at boot before
+     * anything has fragmented, is the number that says how much of "free
+     * internal RAM" was ever available to a DMA request in the first place.
+     */
+    ESP_LOGI(TAG, "armed: failure hook + %d ms sampler | "
+                  "int free=%u largest=%u | dma free=%u largest=%u",
              SAMPLE_MS,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
 }
 
 #else /* !CONFIG_HEAP_PROBE */

@@ -109,6 +109,7 @@ board's AXP2101 fuel gauge and coloured to match the orb.
 | [docs/display.md](docs/display.md) | the two faces, their RAM budget, and the display test |
 | [docs/audio-path.md](docs/audio-path.md) | mic to Deepgram to speaker: tasks, ring buffer, echo gate, BSP init-order trap |
 | [docs/session-control.md](docs/session-control.md) | button, touch, the control task, and the idle timeout |
+| [docs/persistence.md](docs/persistence.md) | how a conversation outlives a reboot, and what it takes to forget one |
 | [docs/voice-commands.md](docs/voice-commands.md) | what the agent can change about itself, and what each change costs |
 | [docs/flux.md](docs/flux.md) | the Flux speech stack on this board |
 | [docs/protocol-notes.md](docs/protocol-notes.md) | Agent API and WebSocket lessons worth keeping |

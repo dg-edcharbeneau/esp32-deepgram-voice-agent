@@ -5,6 +5,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -23,7 +24,9 @@
 #include "wifi_sta.h"
 #include "dg_agent.h"
 #include "faces.h"
+#include "history_store.h"
 #include "orb_colors.h"
+#include "session_ctl.h"
 #include "ui.h"
 #include "voices.h"
 
@@ -186,68 +189,862 @@ static int s_json_len;
 static bool s_json_dropping;
 
 /*
- * The last few turns, replayed into the next session's Settings so that
- * reopening the socket resumes the conversation rather than restarting it.
- *
- * Deliberately small. Every entry is re-sent on every connect, Settings is
- * already ~1.8 kB with the voice catalogue in it, and this device has spent
- * real effort keeping the uplink healthy -- so this is the last few exchanges
- * for continuity, not a transcript.
+ * When new_conversation was last called without clearing. 0 when nothing is
+ * armed. See the handler for why forgetting takes two calls.
  */
-#define HISTORY_TURNS   6
-#define HISTORY_CONTENT 160
-
-typedef struct {
-    char role[10];                  /* "user" / "assistant" */
-    char content[HISTORY_CONTENT];
-} history_turn_t;
-
-static history_turn_t s_history[HISTORY_TURNS];
-static int s_history_count;         /* saturates at HISTORY_TURNS */
-static int s_history_next;          /* ring cursor */
+/* volatile, like s_reload_pending: written on the WebSocket event task, cleared
+ * on session_ctl's worker in dg_agent_stop(), read on both. */
+static volatile uint32_t s_clear_armed_ms;
+#define CLEAR_CONFIRM_WINDOW_MS 60000
+/*
+ * User turns seen when it was armed. The window says the confirmation is recent;
+ * this says it is the USER'S.
+ *
+ * A time window alone is not a confirmation. Nothing stops the model calling the
+ * function twice in one breath, and two calls inside sixty seconds would then
+ * wipe the conversation without anyone having been asked -- for the one
+ * operation here that cannot be undone. Requiring a user turn in between makes
+ * the check the thing it claims to be: somebody spoke after the question.
+ */
+static uint32_t s_user_turns;
+static volatile uint32_t s_clear_armed_turns;
 
 /* Set when a setting change needs a new session; acted on once the agent has
  * finished saying so, then cleared. */
-static bool s_reload_pending;
+/* volatile: written on the WebSocket event task, the esp_timer task and
+ * session_ctl's worker, and read on all three. */
+static volatile bool s_reload_pending;
 /* Same deferral as s_reload_pending, for the same reason: let the agent finish
  * the sentence before the socket it is speaking over goes away. */
-static bool s_test_pending;
+static volatile bool s_test_pending;
 
-void dg_agent_clear_history(void)
+/*
+ * The conversation so far, replayed into the next session's Settings so that
+ * reopening the socket resumes it rather than restarting it -- and persisted by
+ * history_store.c so that a reboot does the same.
+ *
+ * A PACKED ARENA, NOT AN ARRAY OF TURNS. The old shape was six slots of 160
+ * bytes, and it was wrong in both directions at once: it truncated exactly the
+ * long assistant turns that carry the context, while six twelve-byte "yes
+ * please" turns spent 960 bytes saying nothing. Sizing the store in BYTES and
+ * evicting whole oldest turns until the new one fits gets 25-40 real turns out
+ * of 3 kB instead of 6, in less memory than a 40 x 512 array would need.
+ *
+ * Each turn is stored NUL-terminated, one byte per turn that buys the whole of
+ * history_to_json(): the content can be handed to cJSON in place, with no copy
+ * onto a stack this file works hard to keep small.
+ *
+ * WHAT IS STORED IS NOT WHAT IS SENT, and the gap between the two is wide on
+ * purpose. The arena is the device's memory; HISTORY_REPLAY_BYTES below is all
+ * that goes into a Settings message, and it is a fraction of this. Keeping them
+ * separate is what lets the device remember deeply without asking the internal
+ * heap for something it cannot spare at the one moment it is most stretched --
+ * see the note on that constant for the capture that settled the number.
+ */
+#define HISTORY_BYTES     3072  /* arena bytes, terminators included */
+/*
+ * How much of the arena goes on the wire. A HARD LIMIT, not a backstop -- an
+ * earlier version of this comment called it a backstop and set it high enough
+ * not to bind, and that was the bug.
+ *
+ * MEASURED ON THE DEVICE, 2026-09-01. At 16 turns / 6144 bytes the Settings
+ * message came out at 20,265 bytes and the session began flapping: two of five
+ * connects died with
+ *
+ *     E esp-aes: Failed to allocate memory
+ *     E esp-tls-mbedtls: write error :-0x0001
+ *     E dg_agent: failed to send Settings
+ *
+ * followed by a five-second reconnect, a fresh 20 kB attempt, and the same coin
+ * toss again. The TLM line across that capture has `intmax` -- the largest free
+ * INTERNAL block -- swinging between 27,648 and 6,144 bytes, and the writes fail
+ * on the dips. Sending Settings is the worst moment to ask for internal memory:
+ * the TLS handshake has just finished, and building the message churns ten small
+ * cJSON allocations per replayed turn through the same heap.
+ *
+ * So the limit is not about the lwIP send buffer (23040, which 20 kB technically
+ * fits) and not about WebSocket framing. It is about how much internal heap this
+ * device can be asked for at the one moment it has least to give.
+ *
+ * The numbers below restore the envelope the firmware ran in for months before
+ * the arena existed: six turns of at most 160 characters, about 1.2 kB of
+ * history on a ~14 kB base. Depth on FLASH is deliberately not limited to this
+ * -- the device remembers 25-40 turns and replays the most recent handful.
+ *
+ * Raising either of these means re-running that capture. `send_json` logs the
+ * byte count and `main.c`'s TLM line logs `intmax`; the failure is not
+ * reproducible on demand, so a short run that happens to work proves nothing.
+ */
+#define HISTORY_REPLAY_BYTES 1280
+#define HISTORY_REPLAY_MAX_TURNS 6
+/*
+ * Per-turn JSON overhead: the braces, three keys and their quoting come to 48 B
+ * before escaping. Rounded up, because cJSON escapes quotes and newlines in the
+ * content and this estimate is only worth making if it is the pessimistic one.
+ */
+#define HISTORY_TURN_JSON_OVERHEAD 64
+#define HISTORY_MAX_TURNS 40    /* index slots; a cap on count, not on content */
+#define HISTORY_TURN_MAX  512   /* per-turn truncation, generous by design */
+
+enum {
+    HISTORY_ROLE_USER = 0,
+    HISTORY_ROLE_ASSISTANT = 1,
+};
+
+typedef struct {
+    uint16_t off;               /* into the arena, at the first content byte */
+    uint16_t len;               /* content bytes, excluding the terminator */
+    uint8_t role;               /* HISTORY_ROLE_* */
+} history_idx_t;
+
+/*
+ * PSRAM, allocated once in dg_agent_init(). history_to_json() runs on the
+ * WebSocket task, where internal RAM is scarcest and where the largest free
+ * block is the number this project already watches on every toggle. Nothing
+ * here is touched from an ISR.
+ */
+static char *s_arena;
+static history_idx_t s_idx[HISTORY_MAX_TURNS];
+static int s_history_count;         /* turns held, oldest at index 0 */
+static size_t s_history_bytes;      /* arena bytes in use, terminators included */
+
+/*
+ * TWO TASKS TOUCH THE ARENA. history_add() runs on the WebSocket event task as
+ * turns arrive; dg_agent_flush_history() reads the whole thing on session_ctl's
+ * worker. Without this, a turn landing mid-copy writes a record whose index and
+ * arena disagree -- and because the record is validated on load, the cost is not
+ * one garbled turn but the entire history being discarded at the next boot. The
+ * one thing this feature exists to prevent.
+ *
+ * SAFE TO HOLD, unlike almost any other lock in this file. It is ordered inside
+ * nothing: neither holder calls into esp_websocket_client while holding it, so
+ * it cannot participate in the transmit-mutex inversion docs/session-control.md
+ * describes. And the flush copies under the lock but writes to flash outside it,
+ * so the WebSocket task waits on a memcpy, never on a sector erase.
+ */
+static SemaphoreHandle_t s_history_lock;
+
+/*
+ * Set by a clear, cleared when the next session goes live.
+ *
+ * WITHOUT IT, FORGETTING DOES NOT TAKE. The clear happens inside the function
+ * handler, and the agent then SPEAKS its confirmation -- which comes back as a
+ * ConversationText and goes straight into the history that was just emptied.
+ * The reload a moment later replays that turn, suppresses the greeting, tells
+ * the model it is resuming, and writes the whole thing to flash. The user asked
+ * to be forgotten and got a device that remembers being asked.
+ *
+ * Released at SettingsApplied rather than at the reload, because that is the
+ * point at which the new session -- the one with no context in it -- is actually
+ * the session whose turns are being recorded.
+ */
+/* volatile: set from whichever task asked to forget, read on the WebSocket
+ * task. A bool store is indivisible here; what this rules out is the compiler
+ * caching the read across the message loop. */
+static volatile bool s_history_frozen;
+
+/*
+ * The largest record the constants above can produce. A bound, not a buffer:
+ * the flush allocates and frees its staging space per write, because holding
+ * 3.3 kB of internal RAM permanently is what this device can least afford. See
+ * dg_agent_flush_history().
+ */
+#define HISTORY_RECORD_MAX (sizeof(uint16_t) + sizeof(s_idx) + HISTORY_BYTES)
+
+/*
+ * At build time, because the runtime failure is a bad one to debug: a record
+ * larger than a slot passes this file's own size check, comes back from the
+ * store as ESP_ERR_INVALID_SIZE, and after three attempts latches persistence
+ * off. The device then simply stops remembering, with one warning nobody was
+ * watching for. Raising HISTORY_BYTES or HISTORY_MAX_TURNS should fail here
+ * instead, loudly, with the number to change in the message.
+ */
+_Static_assert(HISTORY_RECORD_MAX <= HISTORY_STORE_MAX_PAYLOAD,
+               "history record outgrew a flash slot -- lower HISTORY_BYTES or "
+               "HISTORY_MAX_TURNS, or widen the store");
+
+/*
+ * Consecutive failed saves, and the latch that stops trying. A missing partition
+ * or a dead sector is not a transient, and retrying it forever costs a worker
+ * wakeup every debounce for nothing.
+ */
+#define HISTORY_SAVE_ATTEMPTS 3
+static int s_save_failures;
+static bool s_save_disabled;
+
+static const char *history_role_name(uint8_t role)
 {
-    s_history_count = 0;
-    s_history_next = 0;
+    return (role == HISTORY_ROLE_ASSISTANT) ? "assistant" : "user";
 }
 
-static void history_add(const char *role, const char *content)
+/* Anything that is not "assistant" is the user; the server sends only the two. */
+static uint8_t history_role_id(const char *role)
 {
-    history_turn_t *t = &s_history[s_history_next];
-    strlcpy(t->role, role, sizeof(t->role));
-    strlcpy(t->content, content, sizeof(t->content));
-    s_history_next = (s_history_next + 1) % HISTORY_TURNS;
-    if (s_history_count < HISTORY_TURNS) {
-        s_history_count++;
+    return (strcmp(role, "assistant") == 0) ? HISTORY_ROLE_ASSISTANT
+                                            : HISTORY_ROLE_USER;
+}
+
+bool dg_agent_has_history(void)
+{
+    return s_history_count > 0;
+}
+
+/*
+ * PERSISTENCE IS DEFERRED, AND DEFERRED TWICE.
+ *
+ * history_add() runs on the WebSocket client's own event task, inside the
+ * ConversationText branch of handle_json(). A sector erase is tens of
+ * milliseconds with the flash cache disabled on both cores; spending that here
+ * stalls audio delivery and the KeepAlive at the exact moment the agent is
+ * about to speak. So the turn only sets a flag and arms a timer.
+ *
+ * The timer callback does not write either -- esp_timer's task runs at priority
+ * 22, above lwIP, and blocking flash there is no better than blocking here. It
+ * asks session_ctl's worker, which exists for slow blocking work off the audio
+ * core, and that is where the write actually happens.
+ *
+ * The debounce is restarted by every turn, so a user turn and the reply it
+ * provokes coalesce into ONE write rather than two. The cost is the exposure
+ * window: up to HISTORY_FLUSH_DEBOUNCE_MS of conversation lost to a brownout
+ * nobody announced. Against the alternative -- writing only at a clean stop,
+ * which survives none of the crashes this feature exists for -- that is the
+ * right end of the trade.
+ */
+#define HISTORY_FLUSH_DEBOUNCE_MS 1500
+/* How far the debounce may push the deadline out in total. See the cap in
+ * history_mark_dirty() for why a restarting debounce needs one. */
+#define HISTORY_FLUSH_MAX_DEFER_MS 5000
+
+static esp_timer_handle_t s_flush_timer;
+/* When the current unwritten stretch began, for the deferral cap. */
+static uint32_t s_dirty_since_ms;
+/* volatile, like every other flag here that crosses a task boundary: set on the
+ * WebSocket event task, cleared and read on session_ctl's worker. */
+static volatile bool s_history_dirty;
+
+/*
+ * Backstop for the reload a confirmed forget schedules.
+ *
+ * The deferral to AgentAudioDone is right when it works -- it lets the agent
+ * finish saying "it is forgotten" before the socket goes -- but main.c's own
+ * notes record that Deepgram sent AgentAudioDone ZERO times across a 12-minute
+ * run. Every other user of that deferral degrades to "the setting applies a bit
+ * later". This one does not: without the reload the model still holds every turn
+ * server-side after saying it forgot them, and s_history_frozen -- released only
+ * at SettingsApplied -- stays set for the rest of the session, so nothing said
+ * afterwards is recorded or persisted. Silently.
+ *
+ * So the forget path arms this as well, and whichever fires first wins.
+ */
+static esp_timer_handle_t s_reload_backstop;
+/*
+ * ONE TIMER EACH, not one shared between them. Sharing looked economical and was
+ * wrong twice over: arming for a voice change reset the deadline of a display
+ * test already waiting, pushing it out by another eight seconds for every
+ * setting the user touched -- and since AgentAudioDone is the path that mostly
+ * does not happen, the backstop IS the schedule, not a safety net. The other
+ * half was one firing consuming both flags, which reloaded the session and then
+ * tore that fresh session down for the test a moment later.
+ */
+static esp_timer_handle_t s_test_backstop;
+#define RELOAD_BACKSTOP_MS 8000
+
+/*
+ * Ask for a session reload once the agent has finished the sentence it is
+ * speaking, and guarantee that it happens.
+ *
+ * EVERY deferred reload goes through here, which is the point of the function
+ * existing. The flag alone is only half of it: AgentAudioDone is what consumes
+ * it, and main.c records Deepgram sending that ZERO times across a 12-minute
+ * run. A voice change that relied on the flag alone was persisted to NVS and
+ * then never applied for the rest of the session -- the same silent stall the
+ * forget path could not afford, arriving at a different function.
+ */
+static void schedule_reload(void)
+{
+    s_reload_pending = true;
+    if (s_reload_backstop != NULL) {
+        esp_timer_stop(s_reload_backstop);
+        esp_timer_start_once(s_reload_backstop, RELOAD_BACKSTOP_MS * 1000);
     }
 }
 
-/* Oldest first, which is the order the server expects. */
-static void history_to_json(cJSON *agent)
+/*
+ * Same deferral, same hazard, same answer, and its OWN timer -- see the note on
+ * s_test_backstop for what sharing one cost. The display test waits on
+ * AgentAudioDone exactly as a reload does, so it inherits the same problem: the
+ * message that consumes it mostly does not arrive, leaving the test either never
+ * running or running unprompted much later.
+ */
+static void schedule_test(void)
+{
+    s_test_pending = true;
+    if (s_test_backstop != NULL) {
+        esp_timer_stop(s_test_backstop);
+        esp_timer_start_once(s_test_backstop, RELOAD_BACKSTOP_MS * 1000);
+    }
+}
+
+/*
+ * Test-and-clear a deferred flag, indivisibly.
+ *
+ * Two tasks race for each of these: the WebSocket event task when
+ * AgentAudioDone arrives, and the esp_timer task when the backstop expires. Both
+ * read the flag before either clears it, so a plain test-then-clear lets both
+ * win -- and two winners is two reloads, a teardown and a TLS handshake done
+ * twice back to back. The window is microseconds and neither path is hot, which
+ * is exactly the kind of race that survives a decade and then reproduces once.
+ */
+static bool take_flag(volatile bool *flag)
+{
+    static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
+    bool had;
+    portENTER_CRITICAL(&lock);
+    had = *flag;
+    *flag = false;
+    portEXIT_CRITICAL(&lock);
+    return had;
+}
+
+/*
+ * NO s_ready TEST HERE, unlike the reload's, and the asymmetry is the point. A
+ * display test is a display test: it needs the panel, not a socket, and the user
+ * asked for it out loud. Gating it on a live session would strand it exactly
+ * when the session is the thing misbehaving -- and s_ready goes false on a
+ * socket drop as well as on a stop, so that is not a rare corner.
+ */
+static void test_backstop_cb(void *arg)
+{
+    (void)arg;
+    if (take_flag(&s_test_pending)) {
+        ESP_LOGW(TAG, "AgentAudioDone never came -- starting the display test anyway");
+        if (s_cb.on_display_test_required) {
+            s_cb.on_display_test_required(s_cb.ctx);
+        }
+    }
+}
+
+static void reload_backstop_cb(void *arg)
+{
+    (void)arg;
+
+    /*
+     * s_ready as well as the flag here, because this fires on the esp_timer task
+     * and can land on a session that has just been torn down. dg_agent_stop()
+     * clears s_ready first and stops this timer second, but esp_timer_stop()
+     * does not wait for a callback already running -- and a reload arriving
+     * after a deliberate stop would open a fresh session seconds after the user
+     * ended theirs.
+     */
+    if (s_ready && take_flag(&s_reload_pending)) {
+        ESP_LOGW(TAG, "AgentAudioDone never came -- reloading anyway");
+        /*
+         * The _soon() variant, not the immediate one. This fires on the
+         * esp_timer task against an 8 s deadline, so it can land in the window
+         * between a user's tap being accepted and the worker starting the stop
+         * -- and session_ctl_request_reload() would overwrite that pending
+         * toggle, finishing the stop and then reopening the session the user
+         * just ended. s_ready alone does not close that window; a flag that
+         * cannot displace a request does.
+         */
+        session_ctl_request_reload_soon();
+    }
+}
+
+static void history_flush_timer_cb(void *arg)
+{
+    (void)arg;
+    session_ctl_request_history_flush();
+}
+
+static void history_mark_dirty(void);
+
+/*
+ * A save did not happen. Retry a few times, then stop trying and say so once.
+ *
+ * The retry has to re-arm the timer, not just re-raise the flag: the debounce
+ * has already fired, DISCONNECTED is suppressed on a deliberate stop, and if the
+ * failure was the stop's own flush there is no later turn and no later stop
+ * coming. A bare flag would leave the conversation unwritten behind a warning
+ * nobody reads as fatal.
+ *
+ * And it has to be able to give up. history_store.h documents a missing
+ * partition as something to run without rather than refuse over, and an
+ * unbounded re-arm turns exactly that case into a timer waking the worker every
+ * debounce for the life of the device, for a write that cannot ever succeed.
+ */
+static void history_note_save_failure(esp_err_t err)
+{
+    s_save_failures++;
+    if (s_save_failures < HISTORY_SAVE_ATTEMPTS) {
+        history_mark_dirty();
+        ESP_LOGW(TAG, "history not saved (%s), retrying (%d of %d)",
+                 esp_err_to_name(err), s_save_failures, HISTORY_SAVE_ATTEMPTS);
+        return;
+    }
+    s_save_disabled = true;
+    ESP_LOGE(TAG, "history not saved (%s) after %d attempts -- conversations "
+                  "will no longer persist",
+             esp_err_to_name(err), s_save_failures);
+}
+
+static void history_mark_dirty(void)
+{
+    /*
+     * The latch means what it says. Without this, giving up only stopped the
+     * RETRY re-arm: ordinary turns kept arming the timer and waking
+     * session_ctl's worker every debounce for the life of a device whose
+     * `storage` partition is missing -- exactly the behaviour the latch exists
+     * to end.
+     */
+    if (s_save_disabled) {
+        return;
+    }
+
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!s_history_dirty) {
+        s_history_dirty = true;
+        s_dirty_since_ms = now;
+    }
+    if (s_flush_timer == NULL) {
+        return;
+    }
+
+    /*
+     * A CAP ON THE DEFERRAL, because the debounce restarts on every turn. A
+     * brisk back-and-forth of turns closer together than the debounce would
+     * push the deadline out ahead of itself indefinitely and keep the whole
+     * conversation out of flash -- the "~1.5 s of exposure" this design
+     * advertises would quietly become the length of the conversation.
+     *
+     * The cap is on the DEADLINE, not merely on whether the debounce restarts.
+     * Simply declining to restart still leaves the existing timer to run out,
+     * which puts the true bound a whole debounce past the cap; arming the
+     * remainder instead makes the number here the number that happens.
+     */
+    const uint32_t elapsed = now - s_dirty_since_ms;
+    uint32_t delay = HISTORY_FLUSH_DEBOUNCE_MS;
+    if (elapsed + delay > HISTORY_FLUSH_MAX_DEFER_MS) {
+        if (elapsed >= HISTORY_FLUSH_MAX_DEFER_MS) {
+            return;     /* already past it; whatever is armed is soon enough */
+        }
+        delay = HISTORY_FLUSH_MAX_DEFER_MS - elapsed;
+    }
+
+    /* Restart, not start: esp_timer_start_once() fails outright on an already
+     * armed timer, and the restart is what buys the coalescing above. */
+    esp_timer_stop(s_flush_timer);
+    esp_timer_start_once(s_flush_timer, (uint64_t)delay * 1000);
+}
+
+/*
+ * Drop the oldest turn and slide the rest down. O(n) over at most 3 kB, a few
+ * times per turn at worst, on a task that is about to do TLS anyway -- the
+ * alternative is a wrap-around cursor that makes every other function here
+ * reason about two ranges instead of one.
+ */
+static void history_evict_oldest(void)
 {
     if (s_history_count == 0) {
         return;
     }
+    const size_t drop = (size_t)s_idx[0].len + 1;
+    memmove(s_arena, s_arena + drop, s_history_bytes - drop);
+    s_history_bytes -= drop;
+    s_history_count--;
+    for (int i = 0; i < s_history_count; i++) {
+        s_idx[i] = s_idx[i + 1];
+        s_idx[i].off = (uint16_t)(s_idx[i].off - drop);
+    }
+}
+
+static void history_add(const char *role, const char *content)
+{
+    if (s_arena == NULL) {
+        return;
+    }
+
+    size_t len = strlen(content);
+    if (len > HISTORY_TURN_MAX) {
+        len = HISTORY_TURN_MAX;
+    }
+    /*
+     * A turn that cannot fit even an empty arena would evict everything and
+     * still not fit, so the loop below would spin on an empty ring. Clamp first;
+     * losing the tail of one enormous turn beats not returning.
+     */
+    if (len + 1 > HISTORY_BYTES) {
+        len = HISTORY_BYTES - 1;
+    }
+
+    /*
+     * Back off to a character boundary. A WebSocket TEXT frame must be valid
+     * UTF-8, so half a multi-byte sequence in the replayed context is a 1007
+     * close -- and now that these bytes are on flash it would be one on every
+     * reconnect and every reboot, not a transient. A continuation byte is
+     * 10xxxxxx; walking back to the first byte that is not one lands on the lead
+     * byte of the sequence being cut, which is exactly where to stop.
+     */
+    while (len > 0 && ((unsigned char)content[len] & 0xC0) == 0x80) {
+        len--;
+    }
+
+    xSemaphoreTake(s_history_lock, portMAX_DELAY);
+
+    /*
+     * Inside the lock, because dg_agent_clear_history() sets it inside the lock.
+     * Tested outside, a clear landing in between would let this turn -- the
+     * agent's own "it is forgotten" -- into the arena that was just emptied, and
+     * on to flash, which is the whole failure the freeze exists to stop.
+     * Unreachable at today's call sites; that is not a reason to write it the
+     * fragile way.
+     */
+    if (s_history_frozen) {
+        xSemaphoreGive(s_history_lock);
+        return;
+    }
+
+    while (s_history_count >= HISTORY_MAX_TURNS ||
+           s_history_bytes + len + 1 > HISTORY_BYTES) {
+        history_evict_oldest();
+    }
+
+    memcpy(s_arena + s_history_bytes, content, len);
+    s_arena[s_history_bytes + len] = '\0';
+    s_idx[s_history_count] = (history_idx_t){
+        .off = (uint16_t)s_history_bytes,
+        .len = (uint16_t)len,
+        .role = history_role_id(role),
+    };
+    s_history_bytes += len + 1;
+    s_history_count++;
+
+    xSemaphoreGive(s_history_lock);
+
+    history_mark_dirty();
+}
+
+/*
+ * Oldest first, which is the order the server expects -- but chosen newest
+ * first, because when the budget runs out it is the OLDEST turns that should go.
+ * So the start index is found by walking back from the end, and the emit runs
+ * forward from there.
+ */
+static void history_to_json(cJSON *agent)
+{
+    if (s_history_lock == NULL) {
+        return;
+    }
+    /*
+     * Under the lock, all of it. This runs on the WebSocket task and
+     * dg_agent_clear_history() can empty the arena from the LVGL task; a clear
+     * landing between the count read and the emit takes `first` negative and
+     * hands cJSON an arbitrary pointer. The gesture that does that is gated on
+     * the session being down, so this cannot happen today -- but "cannot happen
+     * because of a check in another file" is a poor guard for a wild pointer,
+     * and the other holder only ever does a memcpy or a zeroing.
+     */
+    xSemaphoreTake(s_history_lock, portMAX_DELAY);
+    if (s_history_count == 0) {
+        xSemaphoreGive(s_history_lock);
+        return;
+    }
+
+    int first = s_history_count;
+    size_t budget = HISTORY_REPLAY_BYTES;
+    while (first > 0 && (s_history_count - first) < HISTORY_REPLAY_MAX_TURNS) {
+        const size_t cost = (size_t)s_idx[first - 1].len + HISTORY_TURN_JSON_OVERHEAD;
+        if (cost > budget) {
+            break;
+        }
+        budget -= cost;
+        first--;
+    }
+    /* A single turn longer than the whole budget would otherwise replay nothing
+     * at all, which reads to the model as a new conversation. One is better. */
+    if (first == s_history_count) {
+        first = s_history_count - 1;
+    }
+
+    if (first > 0) {
+        ESP_LOGI(TAG, "replaying %d of %d turns (send budget)",
+                 s_history_count - first, s_history_count);
+    }
+
     cJSON *messages = cJSON_AddArrayToObject(
         cJSON_AddObjectToObject(agent, "context"), "messages");
 
-    int start = (s_history_count == HISTORY_TURNS) ? s_history_next : 0;
-    for (int i = 0; i < s_history_count; i++) {
-        const history_turn_t *t = &s_history[(start + i) % HISTORY_TURNS];
+    for (int i = first; i < s_history_count; i++) {
+        const history_idx_t *t = &s_idx[i];
         cJSON *m = cJSON_CreateObject();
         cJSON_AddStringToObject(m, "type", "History");
-        cJSON_AddStringToObject(m, "role", t->role);
-        cJSON_AddStringToObject(m, "content", t->content);
+        cJSON_AddStringToObject(m, "role", history_role_name(t->role));
+        /* In place: cJSON copies, and the arena keeps each turn terminated
+         * exactly so this needs no buffer of its own. */
+        cJSON_AddStringToObject(m, "content", s_arena + t->off);
         cJSON_AddItemToArray(messages, m);
     }
+
+    xSemaphoreGive(s_history_lock);
+}
+
+/*
+ * Read back what dg_agent_flush_history() wrote. The mirror of it, and the two
+ * must be changed together -- which is why the layout version lives in
+ * history_store.c's magic, so a mismatch throws the record away rather than
+ * misreading it.
+ *
+ * Every field is validated against this build's limits before it is trusted.
+ * The record comes off flash, and flash outlives the firmware that wrote it.
+ */
+static void history_load(void)
+{
+    uint8_t *rec = heap_caps_malloc(HISTORY_STORE_MAX_PAYLOAD, MALLOC_CAP_SPIRAM);
+    if (rec == NULL) {
+        return;
+    }
+
+    size_t len = 0;
+    if (history_store_load(rec, HISTORY_STORE_MAX_PAYLOAD, &len) != ESP_OK ||
+        len < sizeof(uint16_t)) {
+        free(rec);
+        return;
+    }
+
+    uint16_t count;
+    memcpy(&count, rec, sizeof(count));
+    if (count > HISTORY_MAX_TURNS) {
+        ESP_LOGW(TAG, "saved history holds %u turns, this build caps at %d -- discarding",
+                 count, HISTORY_MAX_TURNS);
+        free(rec);
+        return;
+    }
+
+    const size_t idx_bytes = (size_t)count * sizeof(history_idx_t);
+    if (len < sizeof(count) + idx_bytes) {
+        free(rec);
+        return;
+    }
+    memcpy(s_idx, rec + sizeof(count), idx_bytes);
+
+    const size_t arena_bytes = len - sizeof(count) - idx_bytes;
+    if (arena_bytes > HISTORY_BYTES) {
+        ESP_LOGW(TAG, "saved history is %zu B, arena is %d -- discarding",
+                 arena_bytes, HISTORY_BYTES);
+        free(rec);
+        return;
+    }
+    memcpy(s_arena, rec + sizeof(count) + idx_bytes, arena_bytes);
+    free(rec);
+
+    /*
+     * The index must TILE the arena exactly -- turns butted end to end from
+     * offset 0, each one terminated, together accounting for every byte. Merely
+     * checking that each turn lies inside the arena is not enough: a record
+     * claiming zero turns over a non-empty arena would pass that and install
+     * count == 0 with bytes > 0, and history_add()'s eviction loop would then
+     * spin forever with the mutex held, having nothing left to evict and still
+     * no room. The exact failure its own clamp exists to prevent.
+     *
+     * Worth being strict about. This comes off flash, and flash outlives the
+     * firmware that wrote it.
+     */
+    size_t walk = 0;
+    for (int i = 0; i < count; i++) {
+        if (s_idx[i].off != walk || walk + s_idx[i].len >= arena_bytes ||
+            s_arena[walk + s_idx[i].len] != '\0') {
+            ESP_LOGW(TAG, "saved history failed its bounds check -- discarding");
+            return;
+        }
+        walk += (size_t)s_idx[i].len + 1;
+    }
+    if (walk != arena_bytes) {
+        ESP_LOGW(TAG, "saved history does not tile its arena -- discarding");
+        return;
+    }
+
+    s_history_count = count;
+    s_history_bytes = arena_bytes;
+    ESP_LOGI(TAG, "resumed %d turns, %zu bytes", s_history_count, s_history_bytes);
+}
+
+/*
+ * Forget the conversation, on flash as well as in RAM.
+ *
+ * Nothing calls this implicitly any more. Stopping a session -- by tap, by BOOT
+ * or by the idle timeout -- keeps the conversation, because the device being
+ * quiet is not the same as the conversation being over. Clearing is a thing the
+ * user asks for and confirms; see the new_conversation function and the
+ * hold-again gesture in main.c.
+ *
+ * The store ends up recording an empty history rather than erasing its slots,
+ * so "this was deliberately forgotten" and "this device has never talked to
+ * anyone" stay distinguishable in a serial capture.
+ *
+ * DOES NOT TOUCH FLASH, and that is not an oversight. Its two callers are the
+ * new_conversation handler, on the WebSocket event task, and the hold-again
+ * gesture, on the LVGL task with the LVGL lock held -- and a sector erase is
+ * tens of milliseconds neither of them can spend. So this clears RAM and marks
+ * the result dirty; session_ctl's worker writes the empty record through the
+ * same path every ordinary turn uses. The exposure is the same 1.5 s debounce,
+ * and a power loss inside it costs a clear that has to be asked for again --
+ * the harmless direction to fail in.
+ */
+void dg_agent_clear_history(void)
+{
+    /* Whatever armed the voice path, this answered it. Leaving it armed would
+     * make a later, unrelated new_conversation call skip its confirmation. */
+    s_clear_armed_ms = 0;
+
+    /* Same guard as history_add() and the flush: init can fail, and the device
+     * runs without continuity rather than panicking on a null handle. */
+    if (s_history_lock == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_history_lock, portMAX_DELAY);
+    s_history_count = 0;
+    s_history_bytes = 0;
+    s_history_frozen = true;
+    xSemaphoreGive(s_history_lock);
+
+    /*
+     * Lift the give-up latch for this write. Persistence latching off is a
+     * reasonable answer to "the device cannot save any more"; it is the wrong
+     * answer to "the user asked to be forgotten", because the previous record is
+     * still on flash and history_load() would resurrect the whole conversation
+     * at the next boot -- silently undoing the one operation here that is meant
+     * to be irreversible. A forget gets a fresh set of attempts.
+     */
+    s_save_disabled = false;
+    s_save_failures = 0;
+
+    history_mark_dirty();
+    /*
+     * And ask for the write NOW rather than waiting out the debounce. The
+     * gesture path reaches this on a STOPPED device, so there is no do_stop()
+     * flush coming along behind it -- the debounce is the only thing that would
+     * ever write the empty record. Power off in that second and a half, having
+     * just read "forgotten", and the whole conversation comes back at the next
+     * boot. Non-blocking and safe from any task, which is the point of it.
+     */
+    session_ctl_request_history_flush();
+}
+
+/*
+ * Write the conversation out if anything has changed since the last write.
+ *
+ * BLOCKS on the flash erase, and is called only from session_ctl's worker --
+ * see the note on history_mark_dirty() for why that matters and why no other
+ * task may call it.
+ */
+void dg_agent_flush_history(void)
+{
+    if (!s_history_dirty || s_arena == NULL || s_save_disabled) {
+        return;
+    }
+    s_history_dirty = false;
+
+    xSemaphoreTake(s_history_lock, portMAX_DELAY);
+
+    /*
+     * The index goes ahead of the arena so a reader knows how to cut the bytes
+     * up: count first, then the used index entries, then exactly the bytes in
+     * use -- an empty tail is not worth the erase time.
+     */
+    const uint16_t count = (uint16_t)s_history_count;
+    const size_t idx_bytes = (size_t)s_history_count * sizeof(history_idx_t);
+    const size_t total = sizeof(count) + idx_bytes + s_history_bytes;
+
+    /*
+     * Against HISTORY_RECORD_MAX, the size of the DESTINATION, not against the
+     * store's slot limit. The two differ by 762 bytes today and the memcpys
+     * below are bounded by the smaller one, so checking the larger leaves room
+     * to overflow an internal-RAM heap block the day someone raises
+     * HISTORY_BYTES or HISTORY_MAX_TURNS -- silently, and with the store's own
+     * limit still satisfied. A buffer check belongs to the buffer.
+     */
+    if (total > HISTORY_RECORD_MAX) {
+        /* Cannot happen with the constants above -- 2 + 240 + 3072 is exactly
+         * HISTORY_RECORD_MAX -- but it would otherwise be a silent corruption
+         * rather than a conversation that stops persisting. */
+        ESP_LOGW(TAG, "history not saved: record larger than the buffer");
+        xSemaphoreGive(s_history_lock);
+        /* Through the same counted retry as a failed write, rather than just
+         * re-flagging: a bare flag re-arms nothing, and this branch would
+         * otherwise both never retry and never give up. Unreachable at today's
+         * constants, and it should still fail the way its sibling does. */
+        history_note_save_failure(ESP_ERR_INVALID_SIZE);
+        return;
+    }
+
+    /*
+     * TRANSIENT, AND INTERNAL IF IT CAN BE. This buffer used to be allocated
+     * once at init and held for the life of the device, which cost 3.3 kB of
+     * INTERNAL RAM permanently. Measured on the board, that is not affordable:
+     * the largest free internal block dips to about 7.7 kB during a live
+     * session, and when it does, esp-aes cannot get a DMA buffer and the TLS
+     * read or write under it fails -- which closes the Deepgram socket. Holding
+     * three kilobytes of the scarcest resource on the device, to spend a few
+     * milliseconds per exchange, was the wrong side of that trade.
+     *
+     * Internal is still PREFERRED, because esp_flash_write() only takes its
+     * direct path for a source it can reach with the cache off. Handed anything
+     * else it copies through a 32-byte stack buffer -- see the `temp_buf[8]`
+     * loop in esp_flash_api.c -- so a 3.3 kB record from PSRAM is about a
+     * hundred cache-disable cycles across both cores instead of one write.
+     *
+     * So: internal when it is there, PSRAM when it is not, and a counted retry
+     * when neither is. Falling back beats failing -- a slow write still saves
+     * the conversation, and this runs on session_ctl's worker where a stall
+     * costs nothing but its own latency.
+     */
+    uint8_t *rec = heap_caps_malloc(total, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const bool slow = (rec == NULL);
+    if (slow) {
+        rec = heap_caps_malloc(total, MALLOC_CAP_SPIRAM);
+    }
+    if (rec == NULL) {
+        xSemaphoreGive(s_history_lock);
+        history_note_save_failure(ESP_ERR_NO_MEM);
+        return;
+    }
+
+    memcpy(rec, &count, sizeof(count));
+    memcpy(rec + sizeof(count), s_idx, idx_bytes);
+    memcpy(rec + sizeof(count) + idx_bytes, s_arena, s_history_bytes);
+    xSemaphoreGive(s_history_lock);
+
+    if (slow) {
+        /* Worth a line: it means internal RAM was too tight for 3 kB, which is
+         * the same condition that drops sessions. */
+        ESP_LOGW(TAG, "history record staged in PSRAM -- internal RAM tight");
+    }
+
+    /* Outside the lock: the erase blocks for tens of milliseconds and the
+     * WebSocket task must never wait that long to record a turn. */
+    const esp_err_t err = history_store_save(rec, total);
+    free(rec);
+
+    if (err != ESP_OK) {
+        /*
+         * Re-arm, do not merely re-flag. Setting the flag alone leaves nothing
+         * to act on it: the debounce has already fired, DISCONNECTED is
+         * suppressed on a deliberate stop, and if this WAS the stop's flush
+         * there is no later turn and no later stop coming. The conversation
+         * would go unwritten with a warning nobody reads as fatal.
+         *
+         * BUT A RETRY MUST BE ABLE TO GIVE UP. history_store.h documents a
+         * missing partition as something to run without rather than refuse over,
+         * and an unbounded re-arm turns exactly that case into a timer waking
+         * the worker every 1.5 s for the life of the device -- burning the flush
+         * path on a write that cannot ever succeed. So a few attempts, then
+         * persistence latches off and says so once.
+         */
+        history_note_save_failure(err);
+        return;
+    }
+    s_save_failures = 0;
 }
 
 static void set_state(dg_agent_state_t state)
@@ -366,7 +1163,7 @@ static void handle_function_call(const cJSON *root)
         if (strcmp(name->valuestring, "reset_voice") == 0) {
             const voice_t *v = voices_default();
             voices_reset();
-            s_reload_pending = true;
+            schedule_reload();
             snprintf(content, sizeof(content),
                      "Switching back to %s. Tell the user you are changing voice now.",
                      v->name);
@@ -417,6 +1214,99 @@ static void handle_function_call(const cJSON *root)
                      "You are called %s again. Answer to it from here on.",
                      agent_name_get());
             send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
+        if (strcmp(name->valuestring, "new_conversation") == 0) {
+            /*
+             * TWO CALLS, AND THE SECOND ONE IS THE CONFIRMATION.
+             *
+             * The description tells the model to ask first, but a description is
+             * a request and this is the one function here that destroys
+             * something. So the confirmation is enforced in code: the first call
+             * arms and does nothing, and only a second call within the window
+             * actually forgets. A model that skips straight to calling it still
+             * cannot lose the conversation, because the first call is not the
+             * one that clears.
+             *
+             * The window matters in the other direction too. Without it, an arm
+             * from ten minutes ago would turn an unrelated later request into an
+             * immediate wipe.
+             */
+            const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+            const bool armed = s_clear_armed_ms != 0 &&
+                               (now - s_clear_armed_ms) < CLEAR_CONFIRM_WINDOW_MS &&
+                               /*
+                                * EXACTLY ONE user turn since arming.
+                                *
+                                * BE CLEAR ABOUT WHAT THIS DOES AND DOES NOT BUY,
+                                * because an earlier version of this comment
+                                * claimed more than the code delivers. What is
+                                * guaranteed: the device asked before it wiped
+                                * (the first call only ever returns "ask them"),
+                                * somebody spoke after being asked, and it was
+                                * recent. What is NOT guaranteed is that the
+                                * answer was yes -- "no" is a user turn like any
+                                * other, and nothing here can read it. A model
+                                * that calls this again after being told no
+                                * wipes, and no client-side counter can prevent
+                                * that; it is the same class as a model calling
+                                * any other function wrongly.
+                                *
+                                * The "exactly one" rather than "at least one" is
+                                * worth what it costs anyway: it retires the arm
+                                * once the conversation has moved past the answer,
+                                * so an unanswered question from earlier in the
+                                * minute cannot be cashed in later. It also means
+                                * a confirmation split over two utterances
+                                * ("Yes." "Go ahead.") does not count and the
+                                * device asks again -- the direction to be wrong
+                                * in, since asking twice is recoverable and
+                                * wiping is not.
+                                *
+                                * Counting the USER's turns rather than the
+                                * agent's is deliberate: how many
+                                * ConversationText events the agent emits per
+                                * reply is Deepgram's business and could change,
+                                * and a rule built on it would fail closed --
+                                * forget would become unreachable and the device
+                                * would ask forever.
+                                *
+                                * There is no no-arena special case here because
+                                * none is needed: the counter is maintained in
+                                * the ConversationText handler rather than in
+                                * history_add(), so it keeps advancing when there
+                                * is no arena and while the history is frozen.
+                                * See the note there.
+                                */
+                               s_user_turns == s_clear_armed_turns + 1;
+
+            if (!armed) {
+                s_clear_armed_ms = now;
+                s_clear_armed_turns = s_user_turns;
+                ESP_LOGI(TAG, "EVT newconv armed");
+                send_function_response(id->valuestring, name->valuestring,
+                    "Not done yet. Ask them to confirm they want you to forget the "
+                    "whole conversation, wait for them to answer, and call "
+                    "new_conversation again only if that one answer was yes. If "
+                    "they say anything else, do not call it again.");
+                continue;
+            }
+
+            s_clear_armed_ms = 0;
+            dg_agent_clear_history();
+            /*
+             * The turns are gone from here, but this session still holds them
+             * server-side -- so the fresh start has to be a fresh SESSION. The
+             * reload is deferred to AgentAudioDone like every other one, so the
+             * socket does not vanish mid-sentence; the next Settings then
+             * carries no context and the greeting branch fires.
+             */
+            schedule_reload();
+            ESP_LOGI(TAG, "EVT newconv -> cleared");
+            send_function_response(id->valuestring, name->valuestring,
+                "Done -- it is forgotten. Say so briefly, in a few words, and stop "
+                "there; you are about to start over.");
             continue;
         }
 
@@ -672,7 +1562,7 @@ static void handle_function_call(const cJSON *root)
              * either side of this in the log are what tell them apart.
              */
             ESP_LOGI(TAG, "EVT displaytest requested");
-            s_test_pending = true;
+            schedule_test();
             snprintf(content, sizeof(content),
                      "Starting the display test. Tell the user to tap the screen "
                      "to step through each state, briefly.");
@@ -707,7 +1597,7 @@ static void handle_function_call(const cJSON *root)
         /* Persisted now rather than on an acknowledgement, because the new
          * session reads it while building its Settings. */
         voices_set(v);
-        s_reload_pending = true;
+        schedule_reload();
         snprintf(content, sizeof(content),
                  "Switching to %s. Tell the user you are changing voice now.", v->name);
         send_function_response(id->valuestring, name->valuestring, content);
@@ -1070,6 +1960,20 @@ static esp_err_t send_settings(void)
     cJSON_AddObjectToObject(reset_nparams, "properties");
     cJSON_AddItemToArray(functions, reset_name);
 
+    cJSON *new_conv = cJSON_CreateObject();
+    cJSON_AddStringToObject(new_conv, "name", "new_conversation");
+    cJSON_AddStringToObject(new_conv, "description",
+        "Forget everything you and the user have talked about and start over from "
+        "nothing. This is destructive and cannot be undone. Only use it when the "
+        "user has asked to start fresh, wipe the conversation, or have you forget "
+        "what was said -- never on your own initiative, and never just because a "
+        "topic changed. Call it once to ask them to confirm, and only call it a "
+        "second time after they have actually said yes.");
+    cJSON *new_cparams = cJSON_AddObjectToObject(new_conv, "parameters");
+    cJSON_AddStringToObject(new_cparams, "type", "object");
+    cJSON_AddObjectToObject(new_cparams, "properties");
+    cJSON_AddItemToArray(functions, new_conv);
+
     cJSON *set_test = cJSON_CreateObject();
     cJSON_AddStringToObject(set_test, "name", "start_display_test");
     cJSON_AddStringToObject(set_test, "description",
@@ -1194,6 +2098,10 @@ static void handle_json(const char *json, int len)
         /* Numbered: the greeting is spoken once per session, so a greeting you
          * did not ask for always has a new number in front of it. */
         ESP_LOGI(TAG, "SettingsApplied -- session #%" PRIu32 " is live", ++sessions);
+        /* The session this records turns for is now the one that was told
+         * nothing. Anything said before here belonged to the conversation the
+         * user asked to forget. */
+        s_history_frozen = false;
         set_state(DG_AGENT_READY);
 
     } else if (strcmp(t, "ConversationText") == 0) {
@@ -1201,6 +2109,18 @@ static void handle_json(const char *json, int len)
         const cJSON *content = cJSON_GetObjectItemCaseSensitive(root, "content");
         if (cJSON_IsString(role) && cJSON_IsString(content)) {
             ESP_LOGI(TAG, "%s: %s", role->valuestring, content->valuestring);
+            /*
+             * Counted HERE and not inside history_add(), which returns early
+             * when there is no arena and while the history is frozen. This
+             * counter is what tells a new_conversation confirmation apart from
+             * the model calling the function twice by itself, and a counter that
+             * stops advancing in either of those states would make the
+             * confirmation unanswerable -- the device would ask forever. It is a
+             * fact about the conversation, not about the arena.
+             */
+            if (strcmp(role->valuestring, "user") == 0) {
+                s_user_turns++;
+            }
             history_add(role->valuestring, content->valuestring);
             if (s_cb.on_conversation_text) {
                 s_cb.on_conversation_text(role->valuestring, content->valuestring, s_cb.ctx);
@@ -1228,20 +2148,32 @@ static void handle_json(const char *json, int len)
         if (s_cb.on_agent_audio_done) {
             s_cb.on_agent_audio_done(s_cb.ctx);
         }
-        if (s_reload_pending) {
-            /* Deferred to here so the agent gets to say what it is doing before
-             * the socket goes away -- that sentence is spoken in the old voice,
-             * and everything after the reconnect is in the new one. */
-            s_reload_pending = false;
+        /*
+         * Deferred to here so the agent gets to say what it is doing before the
+         * socket goes away -- that sentence is spoken in the old voice, and
+         * everything after the reconnect is in the new one.
+         *
+         * take_flag() rather than a test and a clear: esp_timer runs at priority
+         * 22, above this task, so the backstop can read the flag between the two
+         * and reload as well. Stopping the timer first is not enough on its own
+         * -- esp_timer_stop() does not wait for a callback already running.
+         */
+        if (take_flag(&s_reload_pending)) {
+            if (s_reload_backstop != NULL) {
+                esp_timer_stop(s_reload_backstop);
+            }
             ESP_LOGI(TAG, "reopening session to apply new settings");
             if (s_cb.on_reload_required) {
                 s_cb.on_reload_required(s_cb.ctx);
             }
         }
-        if (s_test_pending) {
-            /* Same deferral: the confirmation is spoken over this session, and
-             * the display test closes it. */
-            s_test_pending = false;
+        /* Same deferral, and the same test-and-clear, for the reason the reload
+         * branch above gives: the confirmation is spoken over this session, and
+         * the display test closes it. */
+        if (take_flag(&s_test_pending)) {
+            if (s_test_backstop != NULL) {
+                esp_timer_stop(s_test_backstop);
+            }
             ESP_LOGI(TAG, "handing the screen to the display test");
             if (s_cb.on_display_test_required) {
                 s_cb.on_display_test_required(s_cb.ctx);
@@ -1396,6 +2328,41 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
         ESP_LOGW(TAG, "socket closed (status %d)", ev->close_status_code);
         s_json_len = 0;
         s_json_dropping = false;
+        /*
+         * The deferrals die with the socket, exactly as they do in
+         * dg_agent_stop() -- and this is the path that does NOT go through it.
+         * An auto-reconnect rebuilds the session from scratch, which is what any
+         * pending reload wanted; leaving one armed means the backstop fires
+         * against a session that already fixed itself, and request_now() skips
+         * both the busy flag and the cooldown on its way to tearing it down.
+         *
+         * take_flag(), not a plain store: s_ready is still true at this point --
+         * the set_state() at the end of this block is what clears it -- so the
+         * backstop may be reading the flag on the esp_timer task right now, and
+         * a plain clear lets it win and drive a teardown on top of the client's
+         * own auto-reconnect.
+         */
+        (void)take_flag(&s_reload_pending);
+        /* The reload's timer only. The display test has its own, and it
+         * deliberately survives a socket drop -- see the note below. */
+        if (s_reload_backstop != NULL) {
+            esp_timer_stop(s_reload_backstop);
+        }
+        /*
+         * The clear-arm too, for the reason dg_agent_stop() gives: an unanswered
+         * "are you sure?" that outlives its session lets a single
+         * new_conversation call in the NEXT one wipe with no question asked in
+         * it. This path does not go through dg_agent_stop(), so it has to say so
+         * itself.
+         */
+        s_clear_armed_ms = 0;
+        s_clear_armed_turns = 0;
+        /*
+         * s_test_pending deliberately SURVIVES. The argument above -- that a
+         * reconnect rebuilds the session, which is all a pending reload wanted
+         * -- does not extend to the display test: a reconnect never runs one, so
+         * clearing it here would silently drop something the user asked for.
+         */
         set_state(DG_AGENT_DISCONNECTED);
         break;
 
@@ -1568,6 +2535,50 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
     }
 
     /*
+     * The conversation arena and its debounce timer, then whatever the last run
+     * left on flash. Here rather than at the first session, because this is the
+     * one place that runs before anything can open a socket -- and a resumed
+     * conversation has to be in memory before the first Settings is built, or
+     * the device greets someone it was mid-sentence with.
+     *
+     * A failure to allocate is not fatal: history_add() checks s_arena and the
+     * device runs without continuity, which is exactly how it behaved before
+     * any of this existed.
+     */
+    /*
+     * Outside the history block below, because the forget path arms it whether
+     * or not the arena exists -- and a memory-starved boot is exactly when the
+     * missing backstop would leave the model holding a conversation it said it
+     * had forgotten, with recording silently off for the rest of the session.
+     */
+    const esp_timer_create_args_t rargs = {
+        .callback = reload_backstop_cb,
+        .name = "reload_bkstp",
+    };
+    esp_timer_create(&rargs, &s_reload_backstop);
+    /* Its own timer, for the reasons on s_test_backstop. */
+    const esp_timer_create_args_t tbargs = {
+        .callback = test_backstop_cb,
+        .name = "test_bkstp",
+    };
+    esp_timer_create(&tbargs, &s_test_backstop);
+
+    s_history_lock = xSemaphoreCreateMutex();
+    s_arena = (s_history_lock != NULL)
+                  ? heap_caps_malloc(HISTORY_BYTES, MALLOC_CAP_SPIRAM)
+                  : NULL;
+    if (s_arena == NULL) {
+        ESP_LOGW(TAG, "no PSRAM for history -- conversations will not persist");
+    } else {
+        const esp_timer_create_args_t targs = {
+            .callback = history_flush_timer_cb,
+            .name = "hist_flush",
+        };
+        esp_timer_create(&targs, &s_flush_timer);
+        history_load();
+    }
+
+    /*
      * THE AUTH HEADER IS BUILT AT RUNTIME, because the key is no longer a
      * compile-time constant -- it comes from NVS, written by the setup portal,
      * with CONFIG_DEEPGRAM_API_KEY as a first-boot seed. See api_key.h.
@@ -1720,6 +2731,38 @@ esp_err_t dg_agent_stop(void)
     }
 
     s_ready = false;
+    /*
+     * NOTHING ABOUT THE OLD SESSION MAY OUTLIVE IT. Every one of these is state
+     * that only means anything inside the conversation it was created in, and
+     * each one carried into the next session is its own bug:
+     *
+     *   - a deferred reload fires one turn into the NEXT session and closes a
+     *     socket nobody asked to close. The stop already achieves whatever the
+     *     reload was for, since the next Settings is built fresh either way.
+     *   - the reload's backstop does the same thing, later and with less
+     *     warning, and can consume a reload that belongs to something else --
+     *     a voice change, say, cut off mid-sentence.
+     *   - an unanswered "are you sure?" would let a single new_conversation call
+     *     in a FRESH session wipe the history with no question asked in it. The
+     *     whole point of two calls is that somebody was asked.
+     *
+     * The display test is the exception, and the note below says why.
+     *
+     * CLEARED AFTER THE CLIENT STOPS, not here. Everything between this point
+     * and esp_websocket_client_stop() is time in which the event task is still
+     * dispatching, so a FunctionCallRequest arriving in that window -- up to
+     * AUDIO_SEND_TIMEOUT plus a margin -- would re-arm what had just been
+     * cleared, and a surviving "are you sure?" is the one that matters: a single
+     * new_conversation call in the next session would then wipe with no question
+     * asked in it.
+     */
+    /*
+     * s_test_pending is NOT cleared, here or on the socket-drop path. The
+     * argument for dropping a reload -- that the next session is built fresh, so
+     * the reload has already happened -- says nothing about a display test,
+     * which no reconnect performs. Discarding it would silently throw away
+     * something the user asked for out loud.
+     */
 
     /*
      * QUIESCE THE UPLINK BEFORE TOUCHING THE CLIENT. This is the whole reason
@@ -1800,6 +2843,20 @@ esp_err_t dg_agent_stop(void)
      * than hanging, which is what this line already achieves for free.
      */
     (void)esp_websocket_client_stop(s_client);
+
+    /*
+     * Only now. See the note at the top of this function: until the client is
+     * stopped its event task is still dispatching, and a message landing in that
+     * window can re-arm any of these.
+     */
+    s_reload_pending = false;
+    /* The reload's timer only. The display test has its own and deliberately
+     * outlives a stop -- see the note below. */
+    if (s_reload_backstop != NULL) {
+        esp_timer_stop(s_reload_backstop);
+    }
+    s_clear_armed_ms = 0;
+    s_clear_armed_turns = 0;
 
     ESP_LOGI(TAG, "session stopped");
     return ESP_OK;

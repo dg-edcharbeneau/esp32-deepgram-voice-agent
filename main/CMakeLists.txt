@@ -22,6 +22,8 @@ idf_component_register(
         agent_prompt.c
         agent_name.c
         api_key.c
+        history_store.c
+        arc_text.c
     INCLUDE_DIRS .
     # Flash rodata, no RAM until something reads it. Editing any of these
     # rebuilds, so a page or prompt change is a normal edit-and-flash.
@@ -54,6 +56,7 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
+        esp_partition
         esp_http_server
         lwip
         mbedtls
