@@ -210,11 +210,20 @@ live on, and far below Wi-Fi (23), lwIP (18) and esp_timer (22).
 once. Destroying and rebuilding the client per session would be the obvious
 alternative, and it is a trap: it leaves `s_client` dangling against the
 priority-7 capture task, and the natural fix — a transmit mutex — **deadlocks**.
-This build has no separate WS transmit lock, so sends take the same recursive
-mutex the WebSocket task holds across its loop. A lock ordered outside it gives
-you the control task holding ours and waiting on the client's, while the client
-task holds its own and waits on ours via `send_settings()`. It hangs permanently
-and silently, since neither party spins and only the idle tasks are watchdogged.
+A transmit lock of **our own** deadlocks: it would be ordered outside the
+client's, so the control task holds ours and waits on the client's while the
+client task holds its own and waits on ours through `send_settings()`. It hangs
+permanently and silently, since neither party spins and only the idle tasks are
+watchdogged.
+
+The client's **own** transmit lock is a different thing, and it is now on —
+`CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y`. Without it, sends take the same
+recursive mutex the WebSocket task holds across its whole receive loop, so a
+receive blocked in a TLS read stalls an audio frame until its 2 s deadline
+expires and the session dies with `Could not lock ws-client within 2000
+timeout`. Being inside the client's own lock ordering is what makes it safe
+where ours would not be. See `sdkconfig.defaults` for the measurement that found
+it.
 
 Restarting in place costs ~8–10 kB kept allocated while stopped and removes the
 entire dangling-pointer surface. The client re-initialises its transport list on
