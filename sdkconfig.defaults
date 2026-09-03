@@ -89,6 +89,13 @@ CONFIG_LWIP_TCP_SND_BUF_DEFAULT=23040
 # The lock timeouts that motivated it were self-inflicted anyway -- they came
 # from a 200 ms AUDIO_SEND_TIMEOUT, which is also the lock deadline. See the
 # comment on AUDIO_SEND_TIMEOUT in main/dg_agent.c.
+#
+# TURNED ON AGAIN IN v0.7.0 AND REVERTED, 2026-09-01. Same reasoning as the
+# first time, same flag, and this warning was three lines from the edit that
+# undid it. The code path was even re-read and the portMAX_DELAY wait noted --
+# and waved through as "ordered correctly" from first principles, without
+# checking whether it had been tried. It had. If "Could not lock ws-client"
+# turns up again, the lead is AUDIO_SEND_TIMEOUT above, not this flag.
 
 # --- LVGL / display --------------------------------------------------------
 # CLIB malloc is not about the 434 kB canvas (those pixels are heap_caps_malloc'd
@@ -153,28 +160,3 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 # Note volume_load() prefers the NVS-saved level over this default, so a device
 # already set to something else stays there until NVS is erased.
 CONFIG_AUDIO_OUT_VOLUME=70
-
-# --- WebSocket client ------------------------------------------------------
-# SENDS GET THEIR OWN LOCK, and without this they do not.
-#
-# The client task holds client->lock across its whole receive loop. With one
-# lock, an audio frame from dg_uplink has to take that same mutex, so a receive
-# side blocked in a TLS read makes the send wait -- and it waits with a 2 s
-# deadline, after which:
-#
-#   E websocket_client: Could not lock ws-client within 2000 timeout
-#   E transport_ws: Error transport_poll_write(0)
-#   W dg_agent: socket closed (status 0)
-#
-# Measured 2026-09-01: zero occurrences across four captures while a memory
-# fault was killing sessions first, then 2-6 per capture in every build after
-# that fault was fixed. It was never new -- sessions simply had not been
-# surviving long enough to reach it.
-#
-# NOT THE SAME THING as the transmit mutex docs/session-control.md warns about.
-# That warning is about adding OUR OWN lock outside the client's, which
-# deadlocks: the control task holds ours and waits on the client's while the
-# client task holds its own and waits on ours through send_settings(). This is
-# the client's own internal tx_lock, ordered inside its own locking, which is
-# the sanctioned way to get the same decoupling.
-CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y

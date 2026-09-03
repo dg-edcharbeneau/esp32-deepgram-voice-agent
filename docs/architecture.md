@@ -37,6 +37,10 @@ flowchart TB
         aname["agent_name.c<br/><i>what it is called + NVS</i>"]
     end
 
+    subgraph mem["Memory"]
+        hstore["history_store.c<br/><i>the conversation on flash:<br/>A/B slot ring in `storage`</i>"]
+    end
+
     subgraph cat["Catalogs (LVGL-free, so the WebSocket side can read them)"]
         voices["voices.c<br/><i>Flux TTS voices + NVS</i>"]
         faces["faces.c<br/><i>face names for the schema</i>"]
@@ -57,11 +61,12 @@ flowchart TB
         orbface["face_orb.c<br/><i>behaviour blend</i>"]
         geo["orb_geometry.c<br/><i>pure math, host-testable</i>"]
         raster["orb_raster.c<br/><i>dots to pixels</i>"]
+        arc["arc_text.c<br/><i>the status word, bent along the bezel</i>"]
     end
 
     main --> session & aio & ui & boot & sta & creds & prov & voices & bat
     session --> agent
-    agent --> voices & faces & colors & ui & aio & prompt & aname & bat
+    agent --> voices & faces & colors & ui & aio & prompt & aname & bat & hstore
     prompt --> voices & faces & colors & aname
     agent -. "on_reload_required" .-> session
     boot -. "toggle / erase+reboot" .-> session
@@ -69,7 +74,8 @@ flowchart TB
     ui -. "tap / hold" .-> main
     aio -- "taps" --> ui
     ui --> spectrum & orbface
-    ui --> colors
+    ui --> colors & arc
+    session -. "history flush<br/>(the only task allowed to block on flash)" .-> agent
     orbface --> geo & raster
     prov --> creds & ui
     sta --> creds
@@ -165,17 +171,34 @@ stateDiagram-v2
     Connecting --> Failed: transport / handshake error
     Failed --> Connecting: hold / BOOT click
 
+    Ready --> Forgotten: new_conversation (confirmed)
+    Stopped --> Forgotten: hold again
+    Forgotten --> Connecting: fresh Settings, greeting fires
+
     note right of Reloading
         UpdateSpeak returns SpeakUpdated
         and then does nothing, so the only
         mechanism that works is a new
         Settings message -- new session.
-        The last few turns are replayed
-        into it, so the conversation
-        survives.
+        The recent turns are replayed into
+        it, so the conversation survives.
+    end note
+
+    note right of Forgotten
+        The ONLY two paths that clear the
+        conversation, and both are confirmed.
+        Nothing else does -- a tap, a hold,
+        the idle timeout and a reconnect all
+        keep it. See persistence.md.
     end note
 
     note right of Stopped
+        The conversation is KEPT here, and on
+        flash -- so this survives a reboot as
+        well as a dropped socket. The centre
+        reads "stopped, saved", and the next
+        start reads "resuming".
+
         Idle timeout watches Deepgram's own
         end-of-turn and start-of-speech, plus
         playback -- never the local VAD, so a
@@ -190,6 +213,14 @@ stateDiagram-v2
 Inputs that drive this are deliberately interchangeable: a screen tap, a BOOT
 button click, the idle timer, and the agent's own function calls all land on the
 same non-blocking `session_ctl_request_*()` surface.
+
+**No transition here forgets the conversation** except the two marked
+`Forgotten`. That is a change: a deliberate tap-to-stop used to clear it, on the
+reading that stopping on purpose means being finished. A tap is how you stop the
+device streaming, and people reach for it for reasons that have nothing to do
+with being done talking, so the gesture that was easiest to hit was also the only
+one that destroyed something. [persistence.md](persistence.md) has the store, the
+write cadence and the confirmation rules.
 
 ### The tap interrupt
 
@@ -323,6 +354,7 @@ one, Deepgram would call a web service instead of asking the device:
 | `reset_name` | Back to `CONFIG_AGENT_NAME`, same handoff | always |
 | `set_voice` | Saves to NVS, then reopens the session | Flux stack |
 | `reset_voice` | Back to `CONFIG_DEEPGRAM_FLUX_VOICE`, then reopens | Flux stack |
+| `new_conversation` | Forgets everything, in RAM and on flash, then reopens. The only destructive one, so the confirmation is enforced in code rather than asked for in the description: the first call only arms | always |
 
 ## The system prompt
 
@@ -522,7 +554,7 @@ flowchart TB
         timer["frame timer"] --> resolve["resolve behaviour<br/><i>audio path outranks<br/>what the session reported</i>"]
         resolve --> render["face->render(ctx)<br/><i>exactly once per frame</i>"]
         render --> canvas["RGB565 canvas in PSRAM"]
-        canvas --> flush["LVGL render buffer<br/><i>internal RAM, 32 rows</i>"]
+        canvas --> flush["LVGL render buffer<br/><i>internal RAM, 16 rows</i>"]
         flush --> panel(["466×466 AMOLED, QSPI"])
         touch(["touch panel"]) --> gest["tap / hold<br/><i>inner circle only</i>"]
     end
@@ -549,9 +581,18 @@ signal.
 Two measured constraints shape this. Drawing once per frame into a canvas is
 what took the panel from 3.7 fps to a usable rate — a custom `DRAW_MAIN` handler
 is re-invoked per render chunk and re-rasterises everything each time. And the
-render buffer must be in internal RAM, 32 rows deep: a PSRAM-sourced SPI
-transfer needs an internal bounce buffer of the same size, and a full frame
-would ask for 434 kB.
+render buffer must be in internal RAM: a PSRAM-sourced SPI transfer needs an
+internal bounce buffer of the same size, and a full frame would ask for 434 kB.
+
+**Sixteen rows deep, halved from 32.** At 32 it is 29,824 B of internal RAM and
+the same again in SPI DMA transfer buffer, and that is the scarcest resource on
+the board -- specifically DMA-capable internal memory, which is a strict subset
+of internal and diverges from it badly under load. Measured: the DMA largest
+free block fell to 832 B while plain internal still read 7,680, and the 1,600 B
+request esp-aes makes twice per TLS record then failed and dropped the Deepgram
+session. Halving this took the DMA largest block from 14,848 to 31,744. The cost
+is twice as many flush transactions per frame; see the note on `DRAW_ROWS` in
+`ui.c` and the measurement in [persistence.md](persistence.md).
 
 ## Tasks and cores
 
@@ -597,6 +638,15 @@ one you are usually looking at.
 prompt, so reviewing a wording change costs a second instead of a flash.
 `--resumed` dumps the variant a session reopened by a voice change sends; it is
 the only variant left now that both build gates are gone.
+
+`host/store.sh` is the same idea applied to a claim that hardware cannot check.
+`main/history_store.c` says a record is either complete or invisible -- the
+header goes down last, so a save interrupted by a brownout costs the new record
+and never the old one. Demonstrating that on the device would mean cutting power
+inside a specific few microseconds, repeatedly. So the real module is compiled
+against a fake NOR flash that clears bits rather than copying them and can cut a
+write short at any byte. Both power-loss windows are covered, plus the ring wrap
+and a blind save across a restart.
 
 ```mermaid
 flowchart LR
