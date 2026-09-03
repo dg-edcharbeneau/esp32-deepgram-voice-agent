@@ -41,7 +41,7 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 | `CONFIG_MIC_IN_GAIN` | 24 dB | raise if mic peaks stay near zero while you talk |
 | `CONFIG_AUDIO_OUT_VOLUME` | 70 | speaker too quiet, or clipping at the top of the range |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
-| `CONFIG_HEAP_PROBE` | off | chasing an allocation failure — names the size and caps that failed, which the `TLM` line cannot |
+| `CONFIG_HEAP_PROBE` | off | chasing an allocation failure — names the size **and caps** that failed, which the `TLM` line cannot. This is what found the fault behind the v0.7.0 session drops; turn it on before touching any memory knob |
 | `CONFIG_BATTERY_SAMPLE_MS` | 5000 | rarely: charge is slow, and every sample is traffic on the bus touch and the codec share |
 | `CONFIG_BATTERY_LOW_PCT` | 20 | when the warning should start. Clears five points higher, so it cannot chatter |
 | `CONFIG_BATTERY_CRITICAL_PCT` | 8 | when the panel should be held dark to stretch the rest of the charge. 0 disables it |
@@ -67,3 +67,44 @@ bringing it up on different hardware. See
 ---
 
 [Back to the README](../README.md)
+
+## The conversation store
+
+These are `#define`s in `main/dg_agent.c`, not Kconfig, because they are a memory
+budget rather than a preference. [persistence.md](persistence.md) has the
+reasoning; this is the short version of what moves if you change them.
+
+| Constant | Default | Change it when |
+| --- | --- | --- |
+| `HISTORY_BYTES` | 3072 | the device should remember more or fewer turns. PSRAM, so the cost is depth against nothing scarce. Bounded by `HISTORY_RECORD_MAX` fitting a 4 kB flash slot — a `_Static_assert` catches it |
+| `HISTORY_MAX_TURNS` | 40 | rarely. An index cap, not a content cap; the byte budget usually binds first |
+| `HISTORY_TURN_MAX` | 512 | a single turn is being truncated mid-sentence. Truncation backs off to a UTF-8 boundary, so this cannot split a character |
+| `HISTORY_REPLAY_BYTES` | 1280 | **measure first.** What goes on the wire, not what is stored |
+| `HISTORY_REPLAY_MAX_TURNS` | 6 | same. Each replayed turn costs ~10 small cJSON allocations in internal RAM, during the TLS handshake, which is the worst moment for it |
+| `HISTORY_FLUSH_DEBOUNCE_MS` | 1500 | how much conversation a brownout may cost. Lower means more flash wear |
+| `HISTORY_FLUSH_MAX_DEFER_MS` | 5000 | the hard ceiling on that exposure, because the debounce restarts on every turn |
+
+**The two replay numbers are a hard limit, not a backstop, and raising them is
+how v0.7.0's session drops were made worse before they were understood.** At 16
+turns / 6 kB the `Settings` message reached 20,265 bytes and the session began
+flapping — `esp-aes: Failed to allocate memory` on the TLS write, once the
+DMA-capable largest block dipped. `send_json` logs the byte count and the `TLM`
+line logs `dmamax`; both have to be read on a real device, because the failure is
+a coin toss against a fragmented heap and a short clean run proves nothing.
+
+## Internal RAM, and why `DRAW_ROWS` is not the first lever any more
+
+It used to be. `DRAW_ROWS` in `main/ui.c` was 32 and is now 16 — that halving is
+what fixed the v0.7.0 session drops, and it is spent.
+
+What binds is not internal RAM in general but **DMA-capable** internal RAM, which
+is a strict subset and diverges from it under load: measured, 832 B of DMA
+largest block while plain internal still read 7,680. Read `dmamax` on the `TLM`
+line, not `intmax`. Two things that look like the answer and are not:
+
+- **`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM`** — each buffer is ~1,600 B of exactly
+  the right pool, so cutting it from 16 to 8 does free 12.8 kB. It also starves
+  the MAC under a burst, and `sdkconfig.defaults` explains what that costs.
+- **Anything mbedTLS** — the record buffers are already in PSRAM
+  (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`), so their size has nothing to do with
+  it. That is *why* esp-aes needs a DMA bounce buffer at all.

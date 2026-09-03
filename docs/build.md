@@ -67,6 +67,8 @@ in.
 | [main/battery.c](../main/battery.c) | the AXP2101 fuel gauge: charge, cell voltage and charge state on a 5 s sampler. Read-only — that chip also owns the panel and codec rails |
 | [main/heap_probe.c](../main/heap_probe.c) | allocation-failure hook and a 50 ms floor sampler. Default off — it names the size and caps of a failed allocation, which the `TLM` line cannot |
 | [main/ui.c](../main/ui.c) | panel and touch bring-up, status label, QR overlay, frame timer, audio levels, face dispatch |
+| [main/arc_text.c](../main/arc_text.c) | the status word bent along the bezel, a rotated glyph at a time, while a finger is on the button |
+| [main/history_store.c](../main/history_store.c) | the conversation on flash: an A/B ring of single-sector records in `storage`, header written last |
 | [main/ui_face.h](../main/ui_face.h) | the face vtable and per-frame render context |
 | [main/face_orb.c](../main/face_orb.c) | orb face: behaviour selection and the 280 ms crossfade |
 | [main/orb_geometry.c](../main/orb_geometry.c) | the shell's maths. No LVGL, no ESP-IDF — compiles on the host so `host/run.sh` can diff it against upstream |
@@ -74,11 +76,12 @@ in.
 | [main/face_spectrum.c](../main/face_spectrum.c) | spectrum face: FFT, sample handoff, ring render. Initialises lazily |
 | [main/faces.c](../main/faces.c) | the face catalog, LVGL-free so `dg_agent` can build the `set_face` schema |
 | [main/orb_colors.c](../main/orb_colors.c) | the orb colour catalog, same split, for the `set_color` schema |
-| [host/](../host/) | off-device harnesses: geometry parity against the upstream TypeScript, and `prompt.sh` to print the assembled prompt |
+| [host/](../host/) | off-device harnesses: geometry parity against the upstream TypeScript, `prompt.sh` to print the assembled prompt, and `store.sh` to cut a flash write in half and prove the conversation survives it |
 | [main/session_ctl.c](../main/session_ctl.c) | stop/start worker: teardown order, gesture requests |
 | [main/Kconfig.projbuild](../main/Kconfig.projbuild) | name / greeting / audio / display, and the Wi-Fi and API key seeds |
 | [docs/wifi-setup.md](wifi-setup.md) | every way to get credentials onto the device, and why it will not connect |
 | [sdkconfig.defaults](../sdkconfig.defaults) | board hardware, TLS, Wi-Fi buffer sizing |
+| [partitions.csv](../partitions.csv) | kept byte-identical to a sibling firmware so the two swap without an erase. `storage` is no longer spare -- it holds the saved conversation |
 | [components/tcp_transport/](../components/tcp_transport/) | two local patches to IDF's WS transport: the handshake Host header, and dropping a congested audio frame instead of killing the session — see [protocol-notes.md](protocol-notes.md) |
 
 ---

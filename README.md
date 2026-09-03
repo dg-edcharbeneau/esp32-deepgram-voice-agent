@@ -118,12 +118,13 @@ board's AXP2101 fuel gauge and coloured to match the orb.
 
 ## Host harnesses
 
-Three things run on a laptop with no board attached, and two of them are gates in
+Four things run on a laptop with no board attached, and two of them are gates in
 CI:
 
 ```bash
 ./host/run.sh        # diffs the C orb geometry against the upstream TypeScript, 38,304 numbers a run
 ./host/prompt.sh     # prints the assembled system prompt, exactly as the device sends it
+./host/store.sh      # cuts a flash write in half and checks the saved conversation survives it
 ./host/portal.sh     # opens the captive-portal page in a browser
 ```
 

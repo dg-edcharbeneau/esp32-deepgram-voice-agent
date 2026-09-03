@@ -389,8 +389,25 @@ taking essentially nothing internal is what makes that irrelevant.
 ### How to re-run it
 
 `CONFIG_AEC_BENCH=y`, then `idf.py flash` and `idf.py storage-flash` once. The
-vectors live in the `storage` SPIFFS partition, which was already in
-`partitions.csv` and unused, so no layout change was needed. Only three of the
+vectors live in the `storage` SPIFFS partition.
+
+> **`storage` IS NO LONGER FREE.** Since v0.7.0 the saved conversation lives in
+> the first eight sectors of that partition -- raw records, no filesystem, see
+> [persistence.md](../persistence.md). The two cannot coexist, in either
+> direction: `idf.py storage-flash` writes a SPIFFS image across the whole
+> partition and destroys the conversation, and the store erases sectors 0-7 and
+> corrupts the SPIFFS image under the bench.
+>
+> Neither one crashes, which is the trap. The store validates a magic and a CRC,
+> so it reads the bench's bytes as "no saved history" and silently starts fresh;
+> SPIFFS checks its own magic and reformats. Both failures look like nothing
+> happening.
+>
+> So running the bench costs whatever conversation was saved, and the device
+> keeps no history while the bench image is on the partition. That is fine for a
+> bench run and would not be fine on a device someone is using. If the two ever
+> need to coexist, give the bench its own partition rather than moving the store
+> -- the store's offsets are what a saved record's validity depends on. Only three of the
 five vectors fit: 6.8 MB is 93% of the 7 MB partition and spiffsgen refuses it,
 where three files is 70%. `aec_test_sr.wav` is the one left out; swap it in for
 `aec_test_fd.wav` to check SR against its reference.
@@ -946,7 +963,10 @@ is exactly when the keepalive is redundant.
   now a pure backstop for a tap that is never followed by speech.
 - **`CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK`** -- do not enable it. Its send-error
   path takes `client->lock` with `portMAX_DELAY` and wedges the client permanently.
-  See the comment in `sdkconfig.defaults`.
+  See the comment in `sdkconfig.defaults`. Enabled again in v0.7.0 by someone who
+  re-read that code path, noticed the unbounded wait, and reasoned it away without
+  looking for this note. Reverted. The lead when the timeout reappears is
+  `AUDIO_SEND_TIMEOUT`, which doubles as the lock deadline.
 
 ### The stall was the network
 
