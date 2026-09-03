@@ -51,6 +51,7 @@
 #include "battery.h"
 #include "orb_colors.h"
 #include "ui.h"
+#include "arc_text.h"
 #include "ui_face.h"
 
 static const char *TAG = "ui";
@@ -144,7 +145,7 @@ static inline lv_color_t arc_tint(uint32_t rgb, int num, int den)
 
 #if CONFIG_BATTERY_SHOW_DOTS
 /*
- * CHARGE, AS FOUR DOTS ON THE OUTER CURVE, 1 TO 2 O'CLOCK.
+ * CHARGE, AS FOUR DOTS ON THE OUTER CURVE, DOWN THE RIGHT SIDE.
  *
  * Four because the reading is worth a quarter each and nobody reads a
  * percentage off a glance. Spent dots are dimmed rather than removed: a row
@@ -152,18 +153,28 @@ static inline lv_color_t arc_tint(uint32_t rgb, int num, int den)
  * of two dots is indistinguishable from a device that has decided to draw two
  * dots.
  *
- * ON THE CURVE, not along a radius. The first version put them on the 3 o'clock
+ * ON THE CURVE, not along a radius. An early version put them on the 3 o'clock
  * horizontal, which is a straight line across a round display and reads as
  * something that fell off a rectangular screen. Following the edge is what the
- * panel shape is for. They fill CLOCKWISE from 1 o'clock, so the row reads the
- * way the numbers on a clock face do.
+ * panel shape is for. They fill CLOCKWISE, so the row reads downward the way
+ * the numbers on a clock face do.
+ *
+ * DOWN THE SIDE RATHER THAN ACROSS THE TOP, which is the second placement this
+ * row has had. It used to run 1 to 2 o'clock, and that is where the status
+ * caption's right-hand end now lands when it swings out to the rim -- the top
+ * dot sat exactly on the tail of "forget? hold again" and notched it out every
+ * frame. Drawing the caption last hid that, but hiding a collision is not the
+ * same as not having one: the caption blacks its own ground, so whichever went
+ * second simply erased part of the other. The top of the panel belongs to the
+ * caption now, and the indicators have the sides.
  *
  * Positions are precomputed rather than trigonometry in the draw path: this
  * runs every frame, and four sines per frame to arrive at four constants is a
  * cost with nothing to show for it. Derived at radius 200 from centre --
  * 33 px in from the 233 px panel edge, which clears the curve with room for
- * the dot and its anti-aliasing -- at 30, 40, 50 and 60 degrees clockwise from
- * 12 o'clock, with the bolt continuing the same arc at 70:
+ * the dot and its anti-aliasing -- at 75, 85, 95 and 105 degrees clockwise from
+ * 12 o'clock, so the row straddles 3 o'clock, with the bolt continuing the same
+ * arc at 115:
  *
  *     x = CENTER_X + 200*sin(a),  y = CENTER_Y - 200*cos(a)
  *
@@ -174,15 +185,15 @@ static inline lv_color_t arc_tint(uint32_t rgb, int num, int den)
 #define BATTERY_DOT_R 5
 
 static const lv_point_t BATTERY_DOT_XY[BATTERY_DOTS] = {
-    {333, 60},   /* 30 deg -- 1 o'clock */
-    {362, 80},   /* 40 deg */
-    {386, 104},  /* 50 deg */
-    {406, 133},  /* 60 deg -- 2 o'clock */
+    {426, 181},  /* 75 deg */
+    {432, 216},  /* 85 deg */
+    {432, 250},  /* 95 deg -- 3 o'clock sits between these two */
+    {426, 285},  /* 105 deg */
 };
 
 /* The bolt continues the arc past the last dot. Half-width/half-height. */
-#define BATTERY_BOLT_X  421
-#define BATTERY_BOLT_Y  165
+#define BATTERY_BOLT_X  414
+#define BATTERY_BOLT_Y  318
 #define BATTERY_BOLT_HW 4
 #define BATTERY_BOLT_HH 8
 
@@ -236,18 +247,23 @@ static inline lv_area_t battery_bolt_box(void)
  * and laptop draws, so a device showing dot-plus-one-arc is showing what its
  * owner already reads as poor reception.
  *
- * PLACED at 315 degrees on the same radius 200 the charge row uses, so the two
- * indicators balance across the panel, but drawn UPRIGHT rather than rotated to
- * the tangent. A wifi glyph tipped 45 degrees stops being the familiar shape and
- * starts being a decoration; the arcs have to fan straight up to read.
+ * PLACED at 270 degrees on the same radius 200 the charge row uses, so the two
+ * indicators balance across the panel -- 9 o'clock against the charge row's 3 --
+ * but drawn UPRIGHT rather than rotated to the tangent. A wifi glyph tipped to
+ * the tangent stops being the familiar shape and starts being a decoration; the
+ * arcs have to fan straight up to read.
  *
- *     x = CENTER_X + 200*sin(315 deg) = 92,  y = CENTER_Y - 200*cos(315 deg) = 92
+ * DOWN THE SIDE, like the charge row and for the same reason. It used to sit at
+ * 315 degrees, which is where the status caption's left-hand end now lands when
+ * it swings out to the rim. The top of the panel belongs to the caption.
+ *
+ *     x = CENTER_X + 200*sin(270 deg) = 33,  y = CENTER_Y - 200*cos(270 deg) = 233
  *
  * The apex sits below that so the glyph's mass, not its lowest point, lands on
  * the mark.
  */
-#define SIGNAL_APEX_X   92
-#define SIGNAL_APEX_Y   103
+#define SIGNAL_APEX_X   33
+#define SIGNAL_APEX_Y   244
 
 /* The dot. Filled circle centred on the apex. */
 #define SIGNAL_DOT_R    3
@@ -813,6 +829,34 @@ static void (*s_gesture_handler)(ui_gesture_t gesture);
 static bool s_press_in_button;  /* gate: did this press start on the button? */
 static bool s_press_active;     /* visual: is a finger down on it right now? */
 
+/*
+ * THE STATUS WORD GETS OUT FROM UNDER THE THUMB.
+ *
+ * The label lives in the middle of the screen and the middle of the screen is
+ * the touch target, so reaching for the control hides the words that say what
+ * the control will do. "forget? hold again" is covered at exactly the moment it
+ * has to be read. While a finger is down the text moves to twelve o'clock and
+ * bends along the bezel instead; see arc_text.h.
+ *
+ * IT LINGERS AFTER THE FINGER LIFTS, and that is the whole point rather than a
+ * flourish. A tap lasts a tenth of a second: text that snapped back on release
+ * would flick to the rim and away again before anyone read it, which leaves the
+ * original complaint exactly where it was. So the arc holds for ARC_HOLD_MS
+ * after release and then fades over ARC_FADE_MS, and only when it is gone does
+ * the centre label come back -- a cut in either direction is what reads as a
+ * glitch.
+ *
+ * LVGL task only, like the press flags above.
+ */
+#define ARC_HOLD_MS 1000
+#define ARC_FADE_MS 250
+
+static uint32_t s_arc_until_ms;  /* when the fade finishes; 0 = not showing */
+static bool s_arc_drawn;         /* did the last frame put pixels on the rim? */
+static lv_area_t s_arc_box;      /* and where, so they can be taken back */
+static const char *s_arc_text;   /* literal, shared with update_status_label() */
+static const char *s_arc_shown;  /* what is actually on the rim right now */
+
 /* ---------------- feed side (audio tasks) ---------------- */
 
 /*
@@ -1218,11 +1262,101 @@ static void update_status_label(ui_behaviour_t beh)
      * One state, one answer, and the label cannot drift from the picture again.
      */
 
+    /* Published for the arc overlay, so the rim and the centre can never show
+     * different words: one decision, read twice. */
+    s_arc_text = want;
+
     static const char *shown;
     if (want != shown) {
         shown = want;
         lv_label_set_text(status_label, want);
     }
+}
+
+/*
+ * The status word on the rim, while a finger is on the button and for a beat
+ * afterwards.
+ *
+ * SUPPRESSED WHEREVER SOMETHING ELSE OWNS THE SCREEN -- the QR overlay and the
+ * display test both do, exactly as the battery and signal overlays are
+ * suppressed under them. The display test in particular walks the faces at
+ * speed, and a rim caption arguing with the step label would make the test
+ * harder to read rather than easier.
+ *
+ * The centre label is hidden for as long as this is up, rather than both being
+ * on screen at once: two copies of the same word is not a redundancy, it is a
+ * bug that looks deliberate.
+ */
+static void draw_arc_status(uint32_t now)
+{
+    /* Any press extends the deadline; releasing simply stops extending it. */
+    if (s_press_active) {
+        s_arc_until_ms = now + ARC_HOLD_MS + ARC_FADE_MS;
+    }
+
+    const bool suppressed = s_qr_payload != NULL || s_test_active;
+    /* Wrap-safe, the same idiom as every other deadline in this file. */
+    const bool want = !suppressed && s_arc_until_ms != 0 &&
+                      (now - s_arc_until_ms) >= (UINT32_MAX / 2) &&
+                      s_arc_text != NULL && *s_arc_text != '\0';
+
+    lv_layer_t layer;
+
+    if (!want) {
+        s_arc_until_ms = 0;
+        /* If this drew last frame the pixels are still there and only this
+         * function knows it. Wipe once, hand the centre back, then stay quiet. */
+        if (s_arc_drawn) {
+            s_arc_drawn = false;
+            lv_canvas_init_layer(canvas_obj, &layer);
+            arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
+            lv_canvas_finish_layer(canvas_obj, &layer);
+            lv_obj_invalidate_area(canvas_obj, &s_arc_box);
+            lv_obj_remove_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    /* Fade out over the last ARC_FADE_MS of the window. Full opacity until
+     * then, so the common case costs no arithmetic anyone can see. */
+    const uint32_t left = s_arc_until_ms - now;
+    lv_opa_t opa = LV_OPA_COVER;
+    if (left < ARC_FADE_MS) {
+        opa = (lv_opa_t)((left * LV_OPA_COVER) / ARC_FADE_MS);
+    }
+
+    /*
+     * The word can change while the arc is up -- a hold arms "forget? hold
+     * again" over whatever was there. Wipe the OLD string's boxes before laying
+     * out the new one, or the letters of the previous word survive wherever the
+     * new one is narrower.
+     */
+    if (s_arc_drawn && s_arc_shown != s_arc_text) {
+        lv_canvas_init_layer(canvas_obj, &layer);
+        arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
+        lv_canvas_finish_layer(canvas_obj, &layer);
+        lv_obj_invalidate_area(canvas_obj, &s_arc_box);
+    }
+    s_arc_shown = s_arc_text;
+
+    if (!arc_text_box(s_arc_shown, &lv_font_montserrat_24, &s_arc_box)) {
+        return;
+    }
+
+    if (!s_arc_drawn) {
+        s_arc_drawn = true;
+        lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_canvas_init_layer(canvas_obj, &layer);
+    /* Black the ground every frame, not only on a change: the faces repaint
+     * under the text continuously, and a glyph drawn over a moving picture
+     * keeps that picture wherever the glyph has thinned. Same reasoning the
+     * battery overlay records. */
+    arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
+    arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24, lv_color_white(), opa);
+    lv_canvas_finish_layer(canvas_obj, &layer);
+    lv_obj_invalidate_area(canvas_obj, &s_arc_box);
 }
 
 #if CONFIG_UI_SHOW_INDICATORS
@@ -2073,6 +2207,7 @@ static void frame_timer_cb(lv_timer_t *timer)
         s_face->render(&ctx);
     }
 
+
 #if CONFIG_UI_SHOW_INDICATORS
     /* Last, and inside the timing window on purpose: the ring is not free, and a
      * cost excluded from the measurement is a cost nobody finds. */
@@ -2089,6 +2224,26 @@ static void frame_timer_cb(lv_timer_t *timer)
      * not overlap the battery's, so the order between the two does not matter. */
     draw_signal();
 #endif
+
+    /*
+     * LAST OF THE OVERLAYS. After the face, like all of them, because the orb
+     * clears only the boxes its own dots occupied and anything drawn before it
+     * comes out moth-eaten.
+     *
+     * After the battery and signal as well, though that no longer decides
+     * anything: those two used to sit across the top, where the caption's ends
+     * land, and the top charge dot blacked its own box straight through the tail
+     * of "forget? hold again" every frame. They have since moved down the sides
+     * and the boxes no longer meet. The order stays because it is the safe one
+     * -- every overlay here blacks its own ground, so whichever draws second
+     * wins any overlap, and the caption is the thing being read.
+     *
+     * OUTSIDE BOTH GUARDS, deliberately. Written just below draw_signal() it
+     * ended up inside CONFIG_WIFI_SIGNAL_SHOW_BARS, which quietly deleted the
+     * whole caption -- the forget prompt included -- from any build without the
+     * signal bars. This overlay has nothing to do with either indicator.
+     */
+    draw_arc_status((uint32_t)(draw_start_us / 1000));
 
     tlm_accumulate_frame(draw_start_us);
 }

@@ -47,6 +47,61 @@ toggle, whatever the audio is doing. It is the escape hatch — the thing that s
 works on a device whose display or session is misbehaving — so what it does must
 not depend on the state of the audio path. The interrupt lives on the screen.
 
+### The status word gets out from under the thumb
+
+The label lives in the middle of the screen, and the middle of the screen is the
+70 px touch target. So reaching for the control hides the words that say what the
+control will do — and `forget? hold again` is covered at exactly the moment it
+has to be read. That is the complaint this answers.
+
+While a finger is on the button the word moves to twelve o'clock and bends along
+the bezel: eighteen characters at radius 176 span about 78°, so each glyph is
+rotated to stand on the arc. A straight line of text up there would not fit —
+the chord at that height is far shorter than the arc — and axis-aligned glyphs at
+±35° read as broken. LVGL 9.5 draws a rotated glyph natively
+(`lv_draw_letter`'s `rotation`, tenths of a degree), and the software renderer
+routes any non-zero rotation through a transformed blit, so this is a handful of
+calls per letter rather than a rasteriser. It lives in
+[main/arc_text.c](../main/arc_text.c); the centre label is hidden for as long as
+the arc is up, because two copies of the same word reads as a bug that looks
+deliberate.
+
+**It lingers for a second after the finger lifts**, then fades over 250 ms. That
+is the point rather than a flourish: a tap lasts a tenth of a second, so text
+that snapped back on release would flick to the rim and away again before anyone
+read it — which leaves the original problem exactly where it was. The fade is
+what stops the hand-back reading as a glitch.
+
+The ground under each glyph is blacked every frame, **per glyph rather than as
+one rectangle**. Something has to be blacked: both faces paint out past this
+radius — the spectrum's bars reach 218 — so the text would otherwise land on a
+moving picture that keeps its old pixels wherever the letters move off them. A
+rectangle across the top of a round display reads as a slab; a trail of small
+boxes follows the curve and looks like the ribbon the text is written on. It is
+the same wipe-and-invalidate-your-own-box discipline the battery and signal
+overlays document, and for the same reason: only the overlay knows it drew there.
+
+One trap in `lv_draw_letter()`, recorded because it cost three rounds of chasing
+the wrong thing. It sets the pivot to `(adv_w/2, ascent)` and hands your point
+on; `lv_draw_label.c` then builds the ink box and moves it by **minus** the
+pivot before the rotation transform adds the pivot back in its own frame. So the
+pivot — the one point that stays still under rotation — lands at `(point.x +
+ofs_x, point.y)`, and the back-off by half an advance and an ascent that looks
+obviously right is a double shift. It drew every glyph 23 px high and half an
+advance left, which surfaced as three separate-looking complaints: text too high,
+clipped at the rim, black wipe boxes beside the letters rather than under them,
+and litter left behind when the caption cleared. One bug.
+
+The black under the glyphs is the **ink's** rotated bounding box, not a square
+circumscribed around the line box. That first version was about 52 px on a side,
+and eighteen overlapping copies of it made a band far taller than the text
+sitting in it — a slab painted over the face rather than a caption. A glyph's ink
+is much smaller than its line box, so rotating the four corners of the ink
+rectangle gives a ribbon that follows the text instead of swallowing it.
+
+Suppressed under the QR overlay and the display test, both of which own the whole
+screen by design.
+
 ### Seeing the button
 
 `CONFIG_UI_SHOW_INDICATORS` (default off) draws the touch target as a thin ring at
@@ -87,10 +142,18 @@ release.
 
 Ending is a real teardown — the socket closes, the mic stops streaming, and
 queued speech is dropped, so the agent goes quiet within about 100 ms rather than
-playing out its buffer. Starting again opens a *new* Deepgram session, so the
-agent has no memory of the previous conversation and re-speaks its greeting.
-While stopped the bars sit flat, the idle breathing stops, and the centre reads
-`stopped`.
+playing out its buffer. Starting again opens a *new* Deepgram session, but **not
+a new conversation**: the turns so far are replayed into its Settings, the
+greeting is suppressed, and the agent picks up where it left off. While stopped
+the bars sit flat, the idle breathing stops, and the centre reads `stopped`, or
+`stopped, saved` when there is something to come back to.
+
+**A tap used to end the conversation and no longer does.** It cleared the history
+on the reading that stopping on purpose means being finished — but a tap is how
+you stop the device streaming, and people reach for it for reasons that have
+nothing to do with being done talking. Every stop now behaves the way the idle
+timeout always did. Forgetting is a separate, deliberate act, and it is confirmed
+twice over: see [persistence.md](persistence.md).
 
 The board's two physical buttons are **RESET**, wired to `EN`/`CHIP_PU` and
 therefore a hardware reset that firmware never sees, and **BOOT** on **GPIO 0**.
@@ -168,6 +231,32 @@ and must run *after* `dg_agent_stop()` has brought the WebSocket task to a halt.
 If a restarted session ever comes back as loud static, that is the first thing to
 check.
 
+### Holding on a stopped device
+
+`UI_HOLD` carries two meanings, split on whether a session is up, the same way
+the tap above is split on whether the agent is speaking — and safe for the same
+reason, that the two are never both plausible at once.
+
+| when you hold | what happens |
+| --- | --- |
+| a session is running | **restart** — the escape hatch for a session that is up but wedged |
+| stopped, with a conversation saved | **offer to forget it** — the centre reads `forget? hold again` for five seconds |
+| stopped, with nothing saved | restart, as before |
+
+A second hold inside that window clears the conversation from RAM and from
+flash and the centre reads `forgotten`; anything else lets the offer lapse, and
+the 1 Hz telemetry loop puts the label back.
+
+The confirmation is a second **hold** rather than a tap, and that is the whole
+reason it fits here. A tap on a stopped device already means *start*, so
+tap-to-confirm would put two live meanings on one press with no way to tell them
+apart — the exact overlap the tap's `if`/`else` exists to prevent. Holding again
+is unambiguous, and it is deliberate in a way a brush of the panel is not.
+Forgetting a conversation is the one thing on this device that cannot be undone.
+
+Stopped is also the one state where the gesture costs nothing: there is no
+session to recover, so a hold there already did nothing a tap could not do.
+
 ## Stopping when nobody is talking
 
 The device uplinks 16 kHz mono for as long as a session is open — roughly
@@ -181,12 +270,12 @@ The trade is reconnect latency on the next word — measured, 1.1–6.0 s of
 connecting plus 0.5 s of buffering — so a short timeout costs a wait before the
 device can hear you.
 
-Two details worth knowing. `session_ctl_request_stop()` is a distinct request
+One detail worth knowing: `session_ctl_request_stop()` is a distinct request
 rather than a toggle, because a toggle that raced the running flag could *start*
 a session and turn a cost-saving measure into an unattended one that bills until
-someone notices. And history is kept, unlike a deliberate tap-to-stop: the device
-stopped for want of conversation rather than because anyone ended it, so picking
-it up again resumes instead of re-greeting.
+someone notices. History used to be the other detail here — kept on this path,
+cleared on a deliberate tap-to-stop — but every stop keeps it now, so the two
+paths differ only in what can trigger them.
 
 Activity means an end-of-turn, Deepgram reporting the user started speaking, or
 the speaker being busy — deliberately not the local microphone level, which would

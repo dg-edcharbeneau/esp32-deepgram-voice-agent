@@ -1,7 +1,8 @@
 # Host harnesses
 
-Three things that run on a laptop instead of the board: a geometry parity check,
-a dump of the assembled system prompt, and a preview of the captive-portal page.
+Four things that run on a laptop instead of the board: a geometry parity check,
+a dump of the assembled system prompt, a preview of the captive-portal page, and
+a power-loss test for the conversation store.
 
 ## Geometry parity
 
@@ -90,6 +91,39 @@ One wrinkle worth knowing before you edit `prompt.sh`: `agent_prompt.c` is
 compiled from a copy in `build/`. A quoted include resolves against the
 including file's own directory before any `-I`, so left in `main/` it would pull
 in the real `faces.h` and with it cJSON.
+
+## The conversation store
+
+    ./store.sh              run the checks
+    HOST_LOG=1 ./store.sh   ... and show what the module logs while doing it
+
+`main/history_store.c` claims that a record is either complete or invisible: the
+header goes down last, so a save interrupted by a brownout costs the new record
+and never the old one. That is an argument about write ordering, and the device
+cannot be asked to demonstrate it — you would have to cut power inside a specific
+few microseconds, repeatedly.
+
+So the real module is compiled here against a fake NOR flash. The stub matters as
+much as the test: **erase sets bytes to 0xFF and a write only clears bits**, so a
+header written into a slot that was not erased first comes out as the AND of the
+two. A stub that just `memcpy`'d would let exactly that corruption pass. It can
+also be told to cut a write short after N bytes, which is what a power loss looks
+like from the flash's side, and it reports success when it does — because a
+brownout does not return an error, it does not return at all.
+
+Both windows are covered: cut mid-payload, and cut mid-header. Also the ring
+wrap (so the highest-sequence rule is picking between real candidates rather than
+the only one), a deliberate clear reading back differently from an unwritten
+partition, and a missing partition being reported rather than fatal.
+
+The missing-partition check runs **first**, deliberately: `history_store.c`
+caches the partition lookup once it succeeds, correctly, since a partition does
+not come and go on a real device. Run after any successful load, that check would
+be testing the cache.
+
+Not covered: the byte arena in `dg_agent.c`, which is not separable from the
+WebSocket client. Its eviction and its bounds check are exercised by the reboot
+test in [docs/persistence.md](../docs/persistence.md).
 
 ## Captive-portal preview
 

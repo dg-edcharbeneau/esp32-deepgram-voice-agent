@@ -189,11 +189,39 @@ esp_err_t dg_agent_send_audio(const void *pcm, size_t len);
 
 
 /*
- * Forget the conversation so far.
+ * Forget the conversation so far, in RAM and (once the worker next runs) on
+ * flash.
  *
- * dg_agent keeps the last few turns and replays them into the next session's
- * Settings, so reopening the socket -- to change a setting, or after the
- * network drops -- resumes the conversation instead of starting over. Call this
- * when the user deliberately ends a conversation, and only then.
+ * dg_agent keeps the turns and replays them into the next session's Settings, so
+ * reopening the socket -- to change a setting, after the network drops, or after
+ * a reboot -- resumes the conversation instead of starting over.
+ *
+ * STOPPING A SESSION IS NOT A REASON TO CALL THIS, and it used to be. A tap is
+ * how you stop the device streaming, and people reach for it for reasons that
+ * have nothing to do with being done talking -- so the gesture that was easiest
+ * to hit was also the only one that destroyed something. Every stop keeps the
+ * conversation now. The only callers are the two paths where the user asked to
+ * forget it AND confirmed: the new_conversation function, and hold-again on a
+ * stopped device.
+ *
+ * Does not block on flash, so it is safe from the LVGL and WebSocket tasks; see
+ * the definition for how the empty record actually gets written.
  */
 void dg_agent_clear_history(void);
+
+/*
+ * Whether there is a conversation to resume.
+ *
+ * Drives the one word on screen that tells the user their conversation
+ * outlived a reboot ("resuming" rather than "connecting"), and gates the
+ * hold-again gesture that offers to forget it.
+ */
+bool dg_agent_has_history(void);
+
+/*
+ * Write the conversation to flash if anything has changed since the last write.
+ *
+ * BLOCKS on a sector erase. Call it ONLY from session_ctl's worker task --
+ * session_ctl_request_history_flush() is how every other task asks for this.
+ */
+void dg_agent_flush_history(void);

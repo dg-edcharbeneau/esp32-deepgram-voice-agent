@@ -384,6 +384,16 @@ static void on_state(dg_agent_state_t state, void *ctx)
         s_turn_inbound = false;
         end_interrupt("stream gone");
         ui_set_behaviour(UI_BEHAVIOUR_CONNECTING);
+        /*
+         * The socket going away on its own is the leading indicator of the
+         * failures this persistence exists for -- a link that is about to stay
+         * down, a board about to be power-cycled to fix it. Get the conversation
+         * onto flash now rather than waiting out the debounce.
+         *
+         * Via the request, never inline: this runs on the WebSocket task, and
+         * the erase behind it would block that task for tens of milliseconds.
+         */
+        session_ctl_request_history_flush();
         break;
     }
 }
@@ -505,6 +515,37 @@ static void on_agent_audio_done(void *ctx)
     ESP_LOGI(TAG, "turn complete, %" PRIu32 " audio bytes received", s_audio_bytes);
 }
 
+/*
+ * The "forget this conversation?" window, armed by a hold on a stopped device
+ * and answered by a second one. 0 when nothing is offered.
+ *
+ * Lives here rather than in ui.c for the same reason every other gesture
+ * meaning does: ui.c reports presses and knows nothing about sessions.
+ */
+/* volatile, like every other cross-task deadline in this file: written on the
+ * LVGL task, read and cleared on this one. It gates the only irreversible
+ * action on the device, so it is the last one that should be cached in a
+ * register across the telemetry loop. */
+static volatile uint32_t s_forget_armed_ms;
+#define FORGET_CONFIRM_MS 5000
+
+/*
+ * When a transient status word ("forgotten") should be taken off the panel.
+ *
+ * SEPARATE from the offer above, because the two have different lifetimes and
+ * sharing one variable was a bug: any gesture clears the offer, so a third hold
+ * after a confirm cleared the very deadline that was going to put the label
+ * back, and "forgotten" stayed on a device that had moved on.
+ */
+static volatile uint32_t s_notice_until_ms;
+#define STATUS_NOTICE_MS 3000
+
+static bool in_forget_window(void)
+{
+    return s_forget_armed_ms != 0 &&
+           (now_ms() - s_forget_armed_ms) < FORGET_CONFIRM_MS;
+}
+
 /* Runs on the LVGL task with the LVGL lock held: signal only, never block. */
 static void on_gesture(ui_gesture_t gesture)
 {
@@ -515,6 +556,17 @@ static void on_gesture(ui_gesture_t gesture)
      * asked for a session.
      */
     s_bad_key_notice = false;
+
+    /*
+     * ANY gesture answers the offer, and only the hold that arrives while it
+     * stands can answer it with "yes". Reading it and clearing it here is what
+     * makes that true: without it the arm survives an intervening tap -- start
+     * the session, have the start fail, hold again to retry -- and that retry
+     * silently destroys the conversation with no offer anywhere on screen.
+     * For the one action on this device that cannot be undone.
+     */
+    const bool forget_offered = in_forget_window();
+    s_forget_armed_ms = 0;
 
     switch (gesture) {
     case UI_TAP:
@@ -556,8 +608,67 @@ static void on_gesture(ui_gesture_t gesture)
         }
         break;
     case UI_HOLD:
-        ESP_LOGI(TAG, "EVT hold");
-        session_ctl_request_restart();
+        /*
+         * ONE GESTURE, TWO MEANINGS, SPLIT ON WHETHER A SESSION IS UP -- the
+         * same construction the tap above uses, and safe for the same reason:
+         * the two are never both plausible.
+         *
+         * Running, a hold means what it always has: force a restart, for a
+         * session that is up but wedged. Stopped, there is no session to
+         * recover and a hold already did nothing a tap could not do -- so that
+         * is where the destructive gesture can live without taking anything
+         * away.
+         *
+         * WHY A SECOND HOLD CONFIRMS AND NOT A TAP. A tap on a stopped device
+         * already means "start", so tap-to-confirm would put two live meanings
+         * on one press with no way to tell them apart. Holding again is
+         * unambiguous, and it is deliberate in a way a brush of the panel is
+         * not. Forgetting a conversation is the one thing here that cannot be
+         * undone.
+         */
+        if (session_ctl_is_running() || session_ctl_is_busy()) {
+            /*
+             * The busy test is not redundant with the running one, and leaving
+             * it out was a live bug. do_stop() clears s_running and then keeps
+             * working -- the stopped repaint and a blocking flash write still
+             * follow it, and a restart of a wedged session goes straight on into
+             * do_start() and a TLS handshake. All of that is a window that looks
+             * "stopped" while the worker is mid-action, and it is exactly when
+             * someone is holding the button impatiently. Two more holds in it
+             * would arm and then confirm the one action here that cannot be
+             * undone.
+             *
+             * The boolean, not busy_for_ms(): that one is a duration and reads
+             * zero for the first millisecond of every action, which is a hole in
+             * a gate guarding something irreversible.
+             */
+            ESP_LOGI(TAG, "EVT hold");
+            session_ctl_request_restart();
+        } else if (!dg_agent_has_history()) {
+            /* Nothing to forget. Keep the old meaning rather than inventing a
+             * gesture that silently does nothing. */
+            ESP_LOGI(TAG, "EVT hold");
+            session_ctl_request_restart();
+        } else if (forget_offered) {
+            ESP_LOGI(TAG, "EVT hold -> forget confirmed");
+            dg_agent_clear_history();
+            ui_set_status("forgotten", false);
+            /* A notice, not an offer: nothing is being asked any more, and the
+             * telemetry loop takes it off the panel on its own deadline. */
+            s_notice_until_ms = now_ms() + STATUS_NOTICE_MS;
+        } else {
+            ESP_LOGI(TAG, "EVT hold -> offering to forget");
+            s_forget_armed_ms = now_ms();
+            /*
+             * A repaint deadline as well as an offer window, because the two can
+             * come apart: any gesture clears the arm, and a tap that session_ctl
+             * then REFUSES (cooldown) repaints nothing -- stranding a prompt for
+             * an irreversible action on the panel with nothing left to retire
+             * it. This deadline does not care why the offer ended.
+             */
+            s_notice_until_ms = now_ms() + FORGET_CONFIRM_MS + STATUS_NOTICE_MS;
+            ui_set_status("forget? hold again", false);
+        }
         break;
 
     case UI_TEST_DONE:
@@ -655,6 +766,23 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    /*
+     * Diagnostic, and the reason conversation history is NOT kept here. The nvs
+     * partition is 0x6000 -- six 4 kB pages, one always held back for
+     * compaction, 126 entries each -- so `total` reads 630 and that is the whole
+     * budget, shared with the Wi-Fi driver's calibration blob (nvs.net80211),
+     * the credentials, the API key and the agent settings. A kilobyte-scale blob
+     * rewritten per turn would force compaction, and compaction rewrites its
+     * neighbours: the erase budget it spends is the one holding the credentials.
+     * See main/history_store.c for where the history went instead.
+     */
+    nvs_stats_t nvs_stats;
+    if (nvs_get_stats(NULL, &nvs_stats) == ESP_OK) {
+        ESP_LOGI(TAG, "nvs: %zu/%zu entries used, %zu free, %zu namespaces",
+                 nvs_stats.used_entries, nvs_stats.total_entries,
+                 nvs_stats.free_entries, nvs_stats.namespace_count);
+    }
 
     /*
      * First, and before anything that can block: the escape hatch out of a bad
@@ -1023,6 +1151,64 @@ void app_main(void)
          * actually down keeps the two cases apart: "stopping" while it is
          * stopping, the reason once it has stopped.
          */
+        /*
+         * Retire an unanswered "forget?" offer. Nothing else repaints a stopped
+         * device, so without this the question sits on the panel until someone
+         * touches it -- and a question that never expires reads as a state the
+         * device is stuck in.
+         *
+         * Edge-triggered on the flag, not on the window, so this runs once and
+         * does not fight the label for the rest of the session.
+         */
+        /*
+         * Read once, then clear only if it has not moved. Testing
+         * s_forget_armed_ms and then calling in_forget_window() read it twice,
+         * and a gesture landing on the LVGL task in between made this branch
+         * fire against an offer that had already ended -- disarming a hold that
+         * had just armed, or overwriting the 3 s "forgotten" deadline so
+         * "stopped" painted over the confirmation on the same pass.
+         *
+         * Compare-and-clear rather than a lock: the LVGL task must not block
+         * here, this is a 1 Hz janitor rather than a correctness path, and a new
+         * arm within the same millisecond as the one being retired is the only
+         * remaining collision. Failing it just means the offer stands one more
+         * second.
+         */
+        const uint32_t armed = s_forget_armed_ms;
+        if (armed != 0 && (now_ms() - armed) >= FORGET_CONFIRM_MS) {
+            if (s_forget_armed_ms == armed) {
+                s_forget_armed_ms = 0;
+                s_notice_until_ms = now_ms();   /* repaint on this pass */
+                ESP_LOGI(TAG, "EVT forget offer expired");
+            }
+        }
+
+        /* Wrap-safe, the same idiom as the deadlines above. */
+        if (s_notice_until_ms != 0 &&
+            (now_ms() - s_notice_until_ms) < (UINT32_MAX / 2)) {
+            /*
+             * session_ctl owns what a stopped device says, including the case
+             * this used to get wrong: a start attempted during the window leaves
+             * "error" on screen, and painting "stopped" over it hides the one
+             * thing the user needs to see. It runs BEFORE the bad-key
+             * re-assert just below rather than after, so that a pass which owes
+             * both ends on "check api key" instead of painting "stopped" over
+             * it for a second.
+             *
+             * The deadline is cleared only once the repaint has ACTUALLY
+             * happened. Clearing it first drops the notice on the floor whenever
+             * the worker is mid-action -- and it can be, on a stopped device:
+             * enter_display_test() issues an unconditional REQ_STOP that raises
+             * s_busy and paints nothing. "forgotten" would then be stranded on
+             * the panel with nothing left to take it off.
+             */
+            if (!session_ctl_is_busy()) {
+                s_notice_until_ms = 0;
+                session_ctl_repaint_idle_status();
+            }
+        }
+
+
         if (s_bad_key_notice && !session_ctl_is_running()) {
             ui_set_status("check api key", false);
         }
