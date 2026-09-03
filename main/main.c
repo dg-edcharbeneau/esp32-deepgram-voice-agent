@@ -1248,7 +1248,8 @@ void app_main(void)
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
                  " txdrop=%" PRIu32 " vadsup=%" PRIu32
-                 " heap=%" PRIu32 " int=%u intmax=%u ifree=%u iblocks=%u"
+                 " heap=%" PRIu32 " int=%u intmax=%u dma=%u dmamax=%u"
+                 " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
                  " rssi=%d bars=%d ch=%d",
                  (double)esp_timer_get_time() / 1000000.0,
@@ -1265,6 +1266,23 @@ void app_main(void)
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 /*
+                  * THE POOL THAT ACTUALLY FAILS, and it is not the one to its
+                  * left. MALLOC_CAP_DMA is a strict subset of INTERNAL -- not
+                  * every internal region is reachable by the DMA engine -- so
+                  * intmax has been over-reporting the memory available to the
+                  * allocation that drops our sessions:
+                  *
+                  *   heap_caps_aligned_alloc(align, <=1600, MALLOC_CAP_DMA)
+                  *
+                  * twice per TLS record, from esp_aes_dma_core.c, taken because
+                  * CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC puts the record buffers in
+                  * PSRAM where the DMA engine cannot reach them. Reading
+                  * "intmax=7680, and yet a 1600 B request failed" as a
+                  * contradiction is what measuring the wrong pool looks like.
+                  */
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
                  (unsigned)ih.total_free_bytes, (unsigned)ih.free_blocks,
                  (unsigned)ih.allocated_blocks,
                  /* -1, not 0: "no reading" and "flat" have to be told apart by

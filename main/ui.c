@@ -331,10 +331,31 @@ static inline lv_area_t signal_box(void)
 }
 #endif
 
-/* Rows per LVGL render chunk, in internal RAM: 466 * rows * 2 bytes. Must stay
+/*
+ * Rows per LVGL render chunk, in internal RAM: 466 * rows * 2 bytes. Must stay
  * small enough that the SPI driver can allocate a DMA buffer of the same size,
- * and small enough that Wi-Fi can still find contiguous internal RAM later. */
-#define DRAW_ROWS 32
+ * and small enough that Wi-Fi can still find contiguous internal RAM later.
+ *
+ * HALVED FROM 32 ON EVIDENCE, 2026-09-01, and that last clause is why. At 32
+ * this is 29,824 B of internal RAM, and it costs the same again in SPI DMA
+ * transfer buffer through max_transfer_sz below -- about 60 kB of the scarcest
+ * resource on the board, spent on render granularity.
+ *
+ * Scarce in a specific way that took instrumenting to see. The pool that runs
+ * out is DMA-CAPABLE internal memory, which is a strict subset of internal and
+ * diverges from it badly under load: measured, the DMA largest free block fell
+ * to 832 B while plain internal still read 7,680. A 1,600 B request from
+ * esp-aes -- two per TLS record, because CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC puts
+ * the record buffers in PSRAM where DMA cannot reach them -- then fails, and the
+ * Deepgram session drops. Halving the static Wi-Fi RX buffers cleared the
+ * allocation failures but left the floor sitting at exactly 1,600 B, which is
+ * no margin at all. This is where the margin comes from.
+ *
+ * The cost is twice as many flush transactions per frame. Watch `draw=` and
+ * `fps=` on the TLM line; if either moves badly, this is the change to revert
+ * rather than the Wi-Fi buffers, because that one costs dropped audio instead.
+ */
+#define DRAW_ROWS 16
 
 #define FRAME_MS 33
 

@@ -42,6 +42,26 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # --- Wi-Fi -----------------------------------------------------------------
 # Agent audio arrives as a steady stream of ~4 kB binary frames; the extra RX
 # buffers keep the stack from dropping them under a burst.
+#
+# TRIED AT 8 AND REVERTED, 2026-09-01. Halving these did what it was supposed to
+# -- 12.8 kB back into the DMA-capable pool, and the esp-aes allocation failures
+# that were dropping Deepgram sessions went to zero. It also introduced a worse
+# failure:
+#
+#   E websocket_client: Could not lock ws-client within 2000 timeout
+#   E transport_ws: Error transport_poll_write(0)
+#   W dg_agent: socket closed (status 0)
+#
+# Zero occurrences of that in every capture before the change; six in the first
+# capture after it. Fewer RX buffers means the MAC defers frames under a burst,
+# TCP stalls, and a TLS write sits in the socket for the full 2 s SEND_TIMEOUT
+# holding the websocket client's mutex -- so every other sender times out trying
+# to take it and the session dies anyway. A memory fault traded for a stall.
+#
+# The warning above is therefore load-bearing, and the 12% rise in dropped audio
+# that came with the change was the leading edge of it rather than an acceptable
+# price. Take DMA-capable memory from DRAW_ROWS in main/ui.c instead; that one
+# costs render granularity, not packets.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=48
 CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
