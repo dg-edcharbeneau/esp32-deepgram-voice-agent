@@ -216,14 +216,18 @@ client task holds its own and waits on ours through `send_settings()`. It hangs
 permanently and silently, since neither party spins and only the idle tasks are
 watchdogged.
 
-The client's **own** transmit lock is a different thing, and it is now on —
-`CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y`. Without it, sends take the same
-recursive mutex the WebSocket task holds across its whole receive loop, so a
-receive blocked in a TLS read stalls an audio frame until its 2 s deadline
-expires and the session dies with `Could not lock ws-client within 2000
-timeout`. Being inside the client's own lock ordering is what makes it safe
-where ours would not be. See `sdkconfig.defaults` for the measurement that found
-it.
+The client's **own** transmit lock, `CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK`,
+looks like the answer and is not. It was tried, it wedged the client
+permanently, and `sdkconfig.defaults` carries the whole account: its send-error
+path releases `tx_lock` and then takes `client->lock` with `portMAX_DELAY`, an
+unbounded wait the single-lock path never has because it already holds that
+lock. It was then turned on a second time, in v0.7.0, by someone who re-read
+that code path and reasoned the hazard away without checking the warning three
+lines above the edit. Reverted again.
+
+If `Could not lock ws-client` appears, the lead is `AUDIO_SEND_TIMEOUT` in
+`main/dg_agent.c` -- it doubles as the lock deadline, so shortening it
+manufactures the very timeout it looks like evidence of.
 
 Restarting in place costs ~8–10 kB kept allocated while stopped and removes the
 entire dangling-pointer surface. The client re-initialises its transport list on

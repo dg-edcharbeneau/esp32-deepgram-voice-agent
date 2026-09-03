@@ -16,6 +16,23 @@ learn and are worth keeping written down.
 - **Text frames get reassembled.** `esp_websocket_client` delivers at most
   `buffer_size` bytes per event, so a long `ConversationText` arrives in
   slices. Parsing each slice alone silently loses every long message.
+- **The conversation is replayed, not remembered by the server.** Every new
+  socket is a new Agent session with no memory of the last one, so `Settings`
+  carries the recent turns in `agent.context.messages` as
+  `{"type":"History","role":"user"|"assistant","content":...}`, oldest first --
+  which is what makes a reconnect, a voice change and a reboot all invisible
+  rather than a fresh greeting. The greeting is suppressed whenever there is
+  history, and `agent_prompt_ctx_t.notes` tells the model it is resuming, or it
+  reads the replay as a conversation it is joining.
+- **What is replayed is much smaller than what is stored.** The device holds
+  25-40 turns; at most `HISTORY_REPLAY_MAX_TURNS` (6) go on the wire, newest
+  first so the oldest context is what gets dropped. The limit is not the frame
+  size -- `Settings` has always been ~19 kB and always fragmented across
+  `buffer_size`, and the endpoint has always been fine with that. It is that
+  each replayed turn costs about ten small cJSON allocations in internal RAM, at
+  the one moment internal RAM is most stretched. Raising it to 16 turns took
+  `Settings` to 20,265 bytes and made sessions flap on `esp-aes: Failed to
+  allocate memory`. See [persistence.md](persistence.md).
 
 ## Trap: a short send timeout silently kills the session
 

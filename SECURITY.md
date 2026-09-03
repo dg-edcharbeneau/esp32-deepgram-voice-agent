@@ -28,10 +28,25 @@ the key.
 **Wi-Fi credentials** are in NVS namespace `wifi`
 ([main/wifi_creds.c](main/wifi_creds.c)), also plaintext.
 
+**The conversation** is stored in plaintext in the `storage` flash partition
+([main/history_store.c](main/history_store.c)), and this is the one people do not
+expect. Since v0.7.0 the device keeps the recent turns so a reboot resumes rather
+than restarts -- which means **what was actually said, verbatim, on both sides,
+sits in flash until it is overwritten or deliberately forgotten.** Up to 40 turns
+of 512 characters. It is not a secret the device was given; it is a record of the
+room it was in.
+
+Two consequences worth stating plainly. It survives a power cycle and a reflash,
+because `idf.py flash` does not write data partitions -- so handing the board to
+someone else hands them the conversation. And erasing it is a deliberate act: the
+`new_conversation` function, hold-again on a stopped device, or `idf.py
+erase-flash`. Stopping the session does not, by design; see
+[docs/persistence.md](docs/persistence.md).
+
 Neither NVS encryption, flash encryption, nor secure boot is enabled in
 [sdkconfig.defaults](sdkconfig.defaults). On this board that means **anyone with
-physical access and a USB cable can read the API key and the Wi-Fi password out
-of flash.** That is an acceptable trade for a development sample and is not
+physical access and a USB cable can read the API key, the Wi-Fi password and the
+saved conversation out of flash.** That is an acceptable trade for a development sample and is not
 acceptable for a deployed device; a fork intended for one should enable NVS
 encryption at minimum, and flash encryption plus secure boot if the device
 leaves your desk.
@@ -86,3 +101,11 @@ live, captured audio is sent to Deepgram for transcription. Conversation
 transcripts also pass through the LLM. Anyone deploying this in a space where
 other people can be overheard needs to say so; see Deepgram's privacy
 documentation for what happens to audio server-side.
+
+**Some of it stays on the device.** Audio is never written to flash, but the
+transcript of the recent turns is -- see "Where the secrets live" above. The
+practical difference is that a device which has been unplugged and put in a
+drawer still holds the last conversation it had, and the person who had it has
+no way to tell from looking at it. If that matters for where this is deployed,
+the two erase paths are `new_conversation` by voice and hold-again on a stopped
+device.

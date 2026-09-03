@@ -101,13 +101,26 @@ Internal RAM is the binding constraint once the display is up, and the case that
 bites is a WebSocket reconnect — a TLS handshake wanting a burst of it with the
 render buffer already allocated. What matters is the **largest contiguous block**,
 not the total: total free has been observed above 44 kB while the largest block
-sat at 11 kB. Hence the telemetry reports `int`, `intmax`, `ifree` and `iblocks`;
-the LVGL render chunk is 32 rows rather than 64; LVGL uses the C library
+sat at 11 kB. Hence the telemetry reports `int`, `intmax`, `dma`, `dmamax`,
+`ifree` and `iblocks`; the LVGL render chunk is 16 rows; LVGL uses the C library
 allocator (its builtin one emits a 64 kB internal array); and every large orb
 array lives in PSRAM. Note the threshold trap there:
 `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` is 4096, so several allocations each below
 it still land internal and have to be combined into one larger block to reach
-PSRAM. If largest-block sags towards 40 kB, cut `DRAW_ROWS` in
+PSRAM.
+
+**`dma` and `dmamax` are the ones to read, and that took a fault to learn.**
+`MALLOC_CAP_DMA` is a strict subset of `MALLOC_CAP_INTERNAL` -- not every
+internal region is reachable by the DMA engine -- and the two diverge badly under
+load. Measured on this board: the DMA largest free block fell to 832 B while
+plain internal still reported 7,680, and a 1,600 B request from esp-aes then
+failed and dropped the Deepgram session. Every figure this firmware logged had
+been the internal one, so `intmax=7680` read as "a 1,600 B request should fit"
+when it never could. `DRAW_ROWS` is 16 rather than 32 for exactly this reason;
+see [persistence.md](persistence.md).
+
+If largest-block sags, `DRAW_ROWS` is no longer the first lever -- it has already
+been spent. Cut `DRAW_ROWS` in
 [main/ui.c](../main/ui.c) before tuning anything else.
 
 ### Why both indicators are on the sides
@@ -145,7 +158,8 @@ They follow the curve because this panel is **round**: the corner an icon like
 this normally lives in does not exist here, it is bezel -- and a straight row
 across a round screen reads as something that fell off a rectangular one. The
 positions are precomputed constants at radius 200 (33 px in from the edge) and
-30/40/50/60 degrees clockwise from 12, with the bolt at 70; four sines per frame
+75/85/95/105 degrees clockwise from 12 -- straddling 3 o'clock, down the right
+side -- with the bolt at 115; four sines per frame
 to arrive at four constants would be a cost with nothing to show for it. Change
 the radius or the angles and change them together -- nothing checks at runtime
 that they still lie on a circle.
@@ -247,7 +261,7 @@ One machine-parseable line per second, plus `EVT` lines on every transition:
 ```
 TLM up=123.4 face=orb beh=SPEAKING src=agent sess=ready frames=22 fps=22.8
     draw=17.4/20.1 amp=0.41/0.56 low=0.32/0.49 mid=0.55/0.71 high=0.48/0.62
-    ... int=65851 intmax=49152 ifree=65851 iblocks=5 ialloc=521
+    ... int=65851 intmax=49152 dma=58063 dmamax=49152 ifree=65851 iblocks=5 ialloc=521
     bat=62 mv=3841 chg=0 chgst=5 rssi=-58 bars=3 ch=6
 EVT beh IDLE->SPEAKING after=4.20s
 ```

@@ -11,6 +11,7 @@ greeting round-trips through Deepgram's LLM and TTS and comes back as PCM. That
 is the end-to-end proof:
 
 ```
+I (673) history_store: no saved history
 I (1100) battery: AXP2101 at 0x34, sampling every 5000 ms
 I (1105) battery: charge target REG64=03 -> 4.2V
 I (1234) wifi: connecting to "YourSSID"
@@ -27,7 +28,26 @@ I (7400) dg_agent: agent finished speaking
 I (7405) main: turn complete, 96000 audio bytes received
 I (9000) audio_io: mic peak L=1842 R=17 
 I (13400) main: ready | turns=1 mic=64000 B rx=96000 B played=96000 B dropped=0 B | heap=8412300 B
+I (15000) history_store: saved slot 0 seq 1: 214 bytes
 ```
+
+**On a device that has talked before**, the first and last of those change, and
+they are the two lines that say persistence is actually working:
+
+```
+I (673)  history_store: loaded slot 3 seq 12: 1841 bytes
+I (676)  dg_agent: resumed 14 turns, 1839 bytes
+I (4805) dg_agent: replaying 6 of 14 turns (send budget)
+```
+
+and the centre of the screen reads `resuming` rather than `connecting`, with no
+greeting spoken. A device that says `no saved history` on every boot is not
+resuming, whatever the screen shows.
+
+The one to watch for is
+`history_store: no 'storage' partition -- history will not persist`, which means
+the store never found its partition and the device is running without memory
+across reboots. It is deliberately not fatal, so nothing else will tell you.
 
 Two of those lines are the battery's whole boot output, and both are worth
 reading rather than skipping:

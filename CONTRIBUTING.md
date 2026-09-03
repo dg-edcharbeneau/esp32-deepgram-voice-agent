@@ -53,12 +53,18 @@ All of it runs on a laptop with no board attached, and CI runs the first two:
 ```bash
 ./host/run.sh        # orb geometry: the C port vs. the upstream TypeScript
 ./host/prompt.sh     # assembles the system prompt, as the device sends it
+./host/store.sh      # the conversation store, against a fake NOR flash
 ./components/tcp_transport/check-patch.sh
 ```
 
 - **Touching `main/orb_geometry.c` means `host/run.sh` must still pass.** That
   file is deliberately free of LVGL and ESP-IDF so it can compile on the host;
   keep it that way. Tolerance is 0.02 px against the reference.
+- **Touching `main/history_store.c` means `host/store.sh` must still pass.** It
+  compiles the real module against a fake NOR flash that clears bits rather than
+  copying them and can cut a write short at any byte, which is the only way to
+  test the claim the module actually makes: that a record is either complete or
+  invisible. A device cannot demonstrate that on cue.
 - **Touching `main/prompt/*.md` or `main/agent_prompt.c`** — diff the assembled
   prompt before and after with `host/prompt.sh`, and check both forms
   (`--resumed` too). Prompt changes are behaviour changes.

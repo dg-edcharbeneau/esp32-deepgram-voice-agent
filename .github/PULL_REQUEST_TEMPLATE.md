@@ -14,6 +14,7 @@ Check what applies:
 - [ ] `./host/run.sh` passes (required if `main/orb_geometry.c` changed)
 - [ ] `./host/prompt.sh` diffed before/after (required if `main/prompt/*` or
       `main/agent_prompt.c` changed)
+- [ ] `./host/store.sh` passes (required if `main/history_store.c` changed)
 - [ ] `./components/tcp_transport/check-patch.sh` passes
 - [ ] Stack frames measured (required if locals, buffers or a stack size grew)
 - [ ] Before/after `TLM` telemetry attached below
