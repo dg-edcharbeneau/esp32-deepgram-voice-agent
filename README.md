@@ -1,5 +1,7 @@
 # ESP32 Deepgram Voice Agent
 
+### → [**TLDR? See the project site**](https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/)
+
 [![build](https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/actions/workflows/build.yml/badge.svg)](https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/actions/workflows/build.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-5.5.5-red.svg)](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/index.html)
