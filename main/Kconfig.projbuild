@@ -434,6 +434,43 @@ menu "Deepgram Agent Device"
         default 1 if AEC_NLP_AGGR
         default 2 if AEC_NLP_VERYAGGR
 
+    config MIC_NS_ENABLE
+        bool "Microphone noise suppression"
+        default n
+        help
+            Steady-state room noise -- fans, HVAC, traffic -- currently goes up
+            the wire to Deepgram at full level. There is no noise suppression on
+            the capture path at all; the AEC above removes the device's OWN
+            speaker, which is a different problem.
+
+            This adds a denoiser AFTER the canceller and before the uplink VAD,
+            so the adaptive filter still sees raw microphone audio (feeding it
+            denoised audio destabilises convergence) while the VAD, the spectrum
+            orb and Deepgram all see the cleaned signal.
+
+            DEFAULT OFF, and deliberately so. The AEC above cost 14.7 kB of
+            internal RAM and 6.5 fps, and that was only established by measuring
+            it on the board. Nothing here is known until the same is done for
+            this. Turn it on, run the bench in docs/audio-path.md, and only then
+            argue about the default.
+
+            Note this is independent of AEC_ENABLE: benching it with the
+            canceller OFF is the cheaper way to isolate the denoiser's own cost.
+
+    config MIC_NS_ESPSR_MODE
+        int "esp-sr suppression mode (0-2)"
+        depends on MIC_NS_ENABLE
+        default 2
+        range 0 2
+        help
+            esp-sr grades its denoiser 0 (mild), 1 (medium), 2 (aggressive) --
+            esp_ns.h defines no mode 3, which the range here used to allow.
+
+            Only the default was ever tried. If this is revisited, start MILDER
+            rather than more aggressive: the engine that was removed did its
+            damage by eating quiet word onsets, and that failure mode is a
+            property of aggressive suppression, not of that one library.
+
     config HEAP_PROBE
         bool "Log internal-RAM floors and allocation failures"
         default n

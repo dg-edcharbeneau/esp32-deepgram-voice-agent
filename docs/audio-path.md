@@ -190,6 +190,162 @@ answer to the question `a4fa137` asked. Nothing has been measured on the device;
 the price list, the budget, the two remaining candidates and the open risks are
 in [docs/notes/echo-cancellation.md](notes/echo-cancellation.md).
 
+## Noise suppression
+
+**Off by default, and not yet measured on the device.** Two engines are built
+behind `CONFIG_MIC_NS_ENABLE` so they can be compared on the same board in the
+same room; the loser gets deleted.
+
+The canceller above removes the device's *own speaker*. It does nothing about the
+room — fans, HVAC, traffic — which until now went up the wire to Deepgram at full
+level. A denoiser is a different stage solving a different problem, and it sits
+**after** the AEC and **before** the tap, the uplink VAD and the sink:
+
+- after the AEC, because a non-linear denoiser upstream of an adaptive filter
+  wrecks its convergence — the filter has to see the same raw microphone the
+  reference lane is echoing into;
+- before the tap, so the orb draws the room the way Deepgram hears it;
+- before the VAD, so `CONFIG_AEC_UPLINK_VAD_PEAK` is measured against a floor
+  that has had the room taken out of it.
+
+### One engine, and a removed one
+
+`CONFIG_MIC_NS_ENABLE` uses esp-sr's standalone `ns_pro` — already linked, no
+new dependency. Its one awkwardness is frame size: `ns_pro_create` takes 10 ms
+frames only (160 samples) and `AUDIO_IO_CAPTURE_FRAMES` is 1024 under the AEC,
+so `1024 % 160 = 64` and it cannot walk the block in place the way
+`aec_process` does. It therefore carries an input and an output FIFO, costing
+7,104 B of internal staging and a standing **64 ms** of added uplink latency.
+
+**SpeexDSP was evaluated and removed.** It was vendored from
+[rjsachse/ESP32-SpeexDSP](https://github.com/rjsachse/ESP32-SpeexDSP) — itself
+an Arduino wrapper over stock upstream SpeexDSP C — specifically because Speex
+accepts any frame size, so a 256-sample frame divided both 1024 and 1280 exactly
+and needed no FIFO at all. That advantage was real and it was not enough:
+
+- **57% of the frame rate**, against esp-sr's 26%. Its state lived in PSRAM
+  (mandatory, see below), so the FFT missed cache on every pass.
+- **It damaged speech.** It ate quiet word onsets — "A quick brown fox" for
+  "The quick brown fox", "Seashells seashells" for "She sells seashells" — and
+  lost an utterance outright, where the no-NS baseline transcribed 4/4.
+- **Its state could not be moved out of PSRAM.** Doing so to buy the frame rate
+  back dropped `intmax` to 10,240 and the device then could not open a session
+  at all: TLS write failed on every retry and it sat in CONNECTING forever. That
+  is the same internal-RAM starvation that killed the earlier full-duplex
+  attempt, and it is also why the upstream library ships `USE_PSRAM` — on a
+  board like this it is load-bearing, not a convenience.
+
+The numbers below are kept so this is not re-proposed.
+
+### What was measured
+
+All three arms on 2026-09-07: cold boot, live session, 150 s each, ~129
+steady-state telemetry samples, same face, same room, identical bench config
+(`CONFIG_AUDIO_CAPTURE_ALWAYS=y`, `CONFIG_SESSION_IDLE_TIMEOUT_S=0`).
+
+| arm | fps | Δfps | `int` mean | Δ internal | `intmax` floor | rx overruns |
+|---|---|---|---|---|---|---|
+| NS off | 20.00 | — | 60,331 | — | 26,624 | +0 |
+| Speex (PSRAM) | 8.63 | **−11.37 (−57%)** | 60,903 | +572 | 29,696 | +0 |
+| esp-sr | 14.80 | **−5.20 (−26%)** | 52,894 | **−7,438** | 21,504 | +0 |
+
+Flash: baseline `0x1a6880`, Speex `0x1ab320` (+18,592 B), esp-sr `0x1ab050`
+(+17,872 B). With `CONFIG_MIC_NS_ENABLE=n` the binary is what it was before any
+of this existed.
+
+**The engines do not rank, they trade.** esp-sr is 2.2× cheaper on CPU and costs
+7.4 kB of internal RAM — the resource this board has least of, and the one whose
+exhaustion drops sessions. Speex costs essentially no internal RAM and more than
+half the frame rate. Neither touched the I2S ring: `rxovf` did not move on any
+arm, so the capture task is not running long enough to starve DMA in either case.
+
+The esp-sr internal cost (7,438 B measured) matches its predicted staging
+(7,104 B) almost exactly, which is the corroboration that the FIFOs are what it
+is paying for.
+
+### The acoustic result — neither engine helped
+
+Measured 2026-09-11: one speaker, four fixed lines, same room and noise for all
+three arms, plus an attempt to talk over the agent each time.
+
+| arm | transcription |
+|---|---|
+| NS off | **4/4 lines correct** |
+| Speex | dropped word **onsets** — "A quick brown fox" for "The quick brown fox", "Seashells seashells" for "She sells seashells" — and lost one utterance entirely |
+| esp-sr | 3/3 correct within the capture window |
+
+**Neither denoiser improved transcription, and Speex made it worse.** At this
+room's noise level Deepgram already handles the audio unaided, so the denoiser
+spends frame rate and buys nothing. Note the scope: this is a statement about
+*this* noise level. A genuinely loud environment has not been tested, and that
+is the only condition under which NS is likely to pay.
+
+ERLE was unaffected, as predicted — NS sits downstream of the canceller.
+`L=7438 → out=63` with the agent speaking, comparable across arms.
+
+### NS goes below the uplink VAD
+
+The first version placed the denoiser **above** the VAD, justified as "the
+threshold is measured against a floor that has had the room taken out of it."
+**That reasoning was backwards.** The VAD compares its input peak against
+`CONFIG_AEC_UPLINK_VAD_PEAK`, and a denoiser upstream of it attenuates the
+*interrupting speech* along with the room — so fewer blocks clear the threshold
+and the interruption never reaches Deepgram.
+
+Blocks discarded by the VAD during playback, comparable runs:
+
+| NS off | NS above the VAD | NS below the VAD |
+|---|---|---|
+| 22 | **49** | **16** |
+
+The middle column was perceptible — interrupting the agent was reported as hard
+to trigger. **The stage now runs below the VAD**, so the VAD decides on the
+post-AEC signal exactly as it did before any of this existed and its threshold
+keeps its original meaning. The denoiser still sits ahead of the tap and the
+sink, so the orb and Deepgram both get cleaned audio.
+
+Order in `capture_task` is now: downmix → AEC → uplink VAD verdict → **NS** →
+level log → session gate → tap → sink.
+
+### Correction: esp-sr adds 64 ms, not 10 ms
+
+An earlier version of this document claimed the esp-sr FIFO cost "up to 10 ms"
+of added latency. That was wrong: 10 ms is only the *input* residue. The output
+FIFO additionally holds a full `CAPTURE_FRAMES` between drains — measured at
+exactly 1024 samples of standing occupancy in steady state, i.e. **64 ms**, and
+it lands directly on the interruption path.
+
+This also explains the `ns=` values in the esp-sr logs that look impossible
+(`out=516 ns=16114`): `out=` is the current block and `ns=` is the FIFO's
+output, which is a block or two behind it. The two are not measuring the same
+moment and should not be compared within a line on that arm.
+
+### What is still open
+
+- A genuinely noisy room. Everything above says NS does not pay at this noise
+  level; it does not say it never pays.
+- `CONFIG_MIC_NS_ESPSR_MODE` was only tried at its default (2, aggressive).
+  Start milder if this is revisited -- onset damage is a property of aggressive
+  suppression, not of the library that was removed.
+- Long-run heap behaviour. All arms were sampled from a boot-fresh heap; a board
+  twenty minutes into use fragments further.
+
+### Bench notes worth keeping
+
+- `CONFIG_AUDIO_CAPTURE_ALWAYS=y` plus `CONFIG_SESSION_IDLE_TIMEOUT_S=0` is the
+  harness: the capture task never parks, so the NS stage runs on every block with
+  no voice needed, and the session holds open so the heap carries real TLS
+  pressure. A boot-fresh idle heap is far more generous and not comparable to
+  the AEC table above.
+- **A tap on the screen toggles the session off** and silently ends a run.
+- **One reader per port.** A serial reader still holding the port makes
+  `idf.py flash` fail with `The chip stopped responding`, which reads like a dead
+  board and is not one.
+- The board does not keep one device node — it has enumerated as both
+  `usbmodem1101` and `usbmodem101`. Glob for it.
+- Reset and read over a **single** handle; a separate reset tool plus a `cat`
+  reader splits the byte stream and produces logs that look like stale builds.
+
 ### The BSP init-order trap
 
 `bsp_audio_codec_speaker_init()` and its microphone twin call `bsp_i2c_init()`
