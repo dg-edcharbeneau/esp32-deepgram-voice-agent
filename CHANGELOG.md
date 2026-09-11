@@ -70,6 +70,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   full capture block between drains, measured at 1024 samples of standing
   occupancy -- straight onto the interruption path.
 
+- **Noise suppression toggles from the BOOT button.** A double click turns it on
+  and off at runtime and the setting persists across reboots;
+  `CONFIG_MIC_NS_DEFAULT_ON` is just the power-on state. The status caption
+  confirms the press, and `mic peak` says `ns=off` for an idle stage rather than
+  `ns=0`, which would read as total suppression.
+
+  The engine's 7,104 B of staging is allocated at init and held either way --
+  deferring it to the first press would mean a multi-kB internal allocation
+  mid-session on a fragmented heap, which is what drops sessions on this board.
+  The toggle buys back CPU, not RAM.
+
+  The gesture is compiled out along with the feature rather than left answering
+  "not built": registering a double click makes `iot_button` hold back every
+  single click until the double-click window closes, and the single click is the
+  session toggle -- the escape hatch. Builds without the denoiser keep it sharp.
+
 - **`rxovf` in the telemetry line.** `audio_codecs_rx_overruns()` has counted
   silently dropped I2S RX frames since the DMA sizing work and nothing ever read
   it. It is now on the TLM line, which is how the bench above could show the

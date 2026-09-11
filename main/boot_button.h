@@ -36,6 +36,8 @@
  * Claims GPIO 0 and wires up:
  *
  *   short click     -> toggle the session
+ *   double click    -> toggle microphone noise suppression (only when
+ *                      CONFIG_MIC_NS_ENABLE is set -- see below)
  *   hold for 3 s    -> forget the saved network and reboot into the portal
  *
  * THE CLICK IS A PLAIN TOGGLE, and no longer quite "the same as tapping the
@@ -45,6 +47,13 @@
  * -- so it does exactly one unconditional thing, and what it does cannot depend
  * on what the audio path happens to be doing. If you want the interrupt, the
  * screen is where it lives.
+ *
+ * THE DOUBLE CLICK IS CONDITIONAL, AND THAT IS DELIBERATE. Registering it makes
+ * iot_button withhold every single click until the double-click window closes,
+ * because it has to see whether a second press is coming. That slows the session
+ * toggle -- the escape hatch -- so the gesture is compiled out entirely when the
+ * denoiser is not built, rather than being present and replying "not available".
+ * A build without the feature pays nothing for it.
  *
  * Safe to call before the display and the network are up; nothing here depends
  * on either, which is the point -- the escape hatch should still work on a

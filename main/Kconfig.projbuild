@@ -457,6 +457,19 @@ menu "Deepgram Agent Device"
             Note this is independent of AEC_ENABLE: benching it with the
             canceller OFF is the cheaper way to isolate the denoiser's own cost.
 
+    config MIC_NS_DEFAULT_ON
+        bool "Start with noise suppression running"
+        depends on MIC_NS_ENABLE
+        default n
+        help
+            The power-on state, and only that -- the BOOT button's double click
+            overrides it at runtime and the choice is remembered across reboots,
+            so this is just what a device does before anyone has touched it.
+
+            Default OFF, because the measurements say the denoiser did not
+            improve transcription at the noise level tested and costs about a
+            quarter of the frame rate. See docs/audio-path.md.
+
     config MIC_NS_ESPSR_MODE
         int "esp-sr suppression mode (0-2)"
         depends on MIC_NS_ENABLE

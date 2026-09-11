@@ -237,6 +237,28 @@ and needed no FIFO at all. That advantage was real and it was not enough:
 
 The numbers below are kept so this is not re-proposed.
 
+### Turning it on and off from the button
+
+`CONFIG_MIC_NS_ENABLE` compiles the denoiser in; **a double click on the BOOT
+button turns it on and off at runtime**, and the choice is saved to NVS so it
+survives a reboot. `CONFIG_MIC_NS_DEFAULT_ON` is only the power-on state before
+anyone has touched it. The status caption confirms each press, and the `mic peak`
+line reports `ns=off` rather than `ns=0` when the stage is idle — zero would read
+as total suppression, which is the opposite of the truth.
+
+Two consequences worth knowing:
+
+- **The RAM is spent either way.** The engine and its 7,104 B of staging are
+  allocated at init and held whether or not it is running. Deferring that to the
+  first press would be worse: a multi-kB internal allocation made mid-session on
+  a fragmented heap is exactly what drops sessions on this board. What the toggle
+  buys back is the CPU — roughly 5 fps — not the memory.
+- **The gesture is compiled out with the feature**, not left present replying
+  "not built". Registering a double click makes `iot_button` withhold every
+  single click until the double-click window closes, and the single click is the
+  session toggle — the documented escape hatch. A build without the denoiser does
+  not pay a slower escape hatch for a feature it does not have.
+
 ### What was measured
 
 All three arms on 2026-09-07: cold boot, live session, 150 s each, ~129

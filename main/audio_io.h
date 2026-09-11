@@ -81,6 +81,30 @@ typedef void (*audio_io_tap_t)(const int16_t *mono, size_t samples);
 #endif
 #define AUDIO_IO_CAPTURE_BYTES  (AUDIO_IO_CAPTURE_FRAMES * (int)sizeof(int16_t))
 
+/*
+ * MICROPHONE NOISE SUPPRESSION, at runtime.
+ *
+ * Present only when CONFIG_MIC_NS_ENABLE is set; the whole group compiles away
+ * otherwise, and so does the BOOT-button gesture that drives it, so a build
+ * without the denoiser pays nothing -- not even the double-click window that
+ * would otherwise slow the single-click session toggle.
+ *
+ * The engine's memory is allocated at init and held whether or not it is
+ * running. What the toggle buys back is CPU (~5 fps), not RAM. See the NS block
+ * in audio_io.c for why deferring the allocation would be worse.
+ *
+ * audio_io_ns_available() says the engine exists and is usable -- it is false
+ * if ns_pro_create() or its staging buffers failed, in which case set() still
+ * records the preference but nothing will process.
+ *
+ * Safe from any task.
+ */
+#if CONFIG_MIC_NS_ENABLE
+void audio_io_ns_set(bool enabled);
+bool audio_io_ns_enabled(void);
+bool audio_io_ns_available(void);
+#endif
+
 /* Opens both codecs at the shared rate and starts the playback task. */
 esp_err_t audio_io_init(int sample_rate);
 

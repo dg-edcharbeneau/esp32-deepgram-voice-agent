@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -308,6 +309,23 @@ static size_t s_ns_out_cap; /* capacity of s_ns_out, in samples -- the bound the
  * loop tests it rather than the handle, so a bad divisor or a failed allocation
  * degrades to a pass-through instead of to a mangled uplink. */
 static bool s_ns_on;
+
+/*
+ * RUNTIME on/off, separate from s_ns_on, which only says the engine EXISTS.
+ * The BOOT button's double click drives this.
+ *
+ * The state is allocated at init and held either way. Deferring the 7 kB of
+ * internal staging until first enable would be worse, not better: a multi-kB
+ * INTERNAL allocation made mid-session on a fragmented heap is precisely the
+ * failure that drops sessions on this board. So the RAM is spent the moment the
+ * feature is compiled in, and what the toggle actually buys back is the ~5 fps.
+ *
+ * volatile and a single word: written from iot_button's task, read every block
+ * by capture_task, and nothing else is shared. The FIFO itself is NEVER touched
+ * from the button task -- capture_task notices the edge and resets it there,
+ * because racing a memcpy against a memset is not worth the two lines it saves.
+ */
+static volatile bool s_ns_run;
 #endif
 
 /* Milliseconds since boot, truncated. One 32-bit store, so no writer can tear it
@@ -340,6 +358,69 @@ static bool s_volume_from_nvs;
 /* Shared with the saved voice; see voices.c. */
 #define NVS_NAMESPACE  "dgagent"
 #define NVS_KEY_VOLUME "out_volume"
+#define NVS_KEY_NS     "mic_ns"
+
+#if CONFIG_MIC_NS_ENABLE
+/* A Kconfig bool is UNDEFINED when off rather than 0, so it cannot be read in a
+ * C expression -- only in #if. The same trap AEC_GATE_DESC documents above. */
+#if CONFIG_MIC_NS_DEFAULT_ON
+#define NS_DEFAULT_ON true
+#else
+#define NS_DEFAULT_ON false
+#endif
+
+/*
+ * Persisted so the choice survives a reboot, in the same namespace the output
+ * volume already uses. A write failure is logged and otherwise ignored: the
+ * toggle has still taken effect for this session, and refusing to denoise
+ * because flash is unhappy would be the wrong trade.
+ */
+static void ns_save(bool enabled)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_NS, enabled ? 1 : 0);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not persist NS setting: %s", esp_err_to_name(err));
+    }
+}
+
+/* NOT_FOUND on a device that has never been toggled, which is the common case
+ * -- fall back to the compile-time default rather than treating it as an error.
+ * Mirrors the saved-volume read below. */
+static bool ns_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return NS_DEFAULT_ON;
+    }
+    uint8_t saved = 0;
+    esp_err_t err = nvs_get_u8(h, NVS_KEY_NS, &saved);
+    nvs_close(h);
+    return (err == ESP_OK) ? (saved != 0) : NS_DEFAULT_ON;
+}
+
+void audio_io_ns_set(bool enabled)
+{
+    if (s_ns_run == enabled) {
+        return;                     /* no write, no log, no flash wear */
+    }
+    s_ns_run = enabled;
+    ns_save(enabled);
+    ESP_LOGI(TAG, "noise suppression %s%s", enabled ? "ON" : "OFF",
+             s_ns_on ? "" : " (engine unavailable -- preference only)");
+}
+
+bool audio_io_ns_enabled(void) { return s_ns_run; }
+bool audio_io_ns_available(void) { return s_ns_on; }
+#endif
+
 /*
  * The capture task's handle, which exists to make starting twice impossible.
  *
@@ -523,6 +604,11 @@ static void capture_task(void *arg)
 
     /* The microphone is open on entry -- audio_io_init() opened it. */
     bool mic_open = true;
+
+#if CONFIG_MIC_NS_ENABLE
+    /* Edge detector for the runtime NS toggle; see s_ns_run. */
+    bool ns_was_running = false;
+#endif
 
     while (1) {
 #if !CONFIG_AUDIO_CAPTURE_ALWAYS
@@ -925,7 +1011,19 @@ static void capture_task(void *arg)
          * so the orb and Deepgram both get the cleaned audio, but no longer able
          * to talk the VAD out of an interruption.
          */
-        if (s_ns_on) {
+        /*
+         * The edge, not the level. Coming back on with a FIFO still holding
+         * samples from before the pause would splice audio from two different
+         * moments together, so the carry is dropped here -- on capture_task,
+         * which is the only thing allowed to touch those buffers.
+         */
+        if (s_ns_run && !ns_was_running) {
+            s_ns_carry = 0;
+            s_ns_have = 0;
+        }
+        ns_was_running = s_ns_run;
+
+        if (s_ns_on && s_ns_run) {
             /*
              * Carry, then process whole frames only, then keep what is left for
              * the next block. Nothing is ever handed a partial frame -- to a
@@ -984,6 +1082,22 @@ static void capture_task(void *arg)
          * combined meter would just look "quiet" -- this shows which channel is
          * actually live.
          */
+        /*
+         * "ns=0" for a denoiser that is not running reads as TOTAL suppression,
+         * which is the opposite of the truth, so an idle stage says so in words.
+         * Empty when the feature is not compiled in at all.
+         */
+        char ns_field[20] = "";
+#if CONFIG_MIC_NS_ENABLE
+        if (!s_ns_run) {
+            snprintf(ns_field, sizeof ns_field, " ns=off");
+        } else if (!s_ns_on) {
+            snprintf(ns_field, sizeof ns_field, " ns=n/a");
+        } else {
+            snprintf(ns_field, sizeof ns_field, " ns=%d", (int)peak_ns);
+        }
+#endif
+
         if (want_level_log) {
 #if CONFIG_AEC_ENABLE
             /*
@@ -998,27 +1112,13 @@ static void capture_task(void *arg)
              * -- ERLE has to stay readable independently of the denoiser, or a
              * regression in one gets attributed to the other.
              */
-            ESP_LOGI(TAG, "mic peak L=%d R=%d out=%d ref=%d dead=%d"
-#if CONFIG_MIC_NS_ENABLE
-                          " ns=%d"
-#endif
-                          "%s",
+            ESP_LOGI(TAG, "mic peak L=%d R=%d out=%d ref=%d dead=%d%s%s",
                      (int)peak_l, (int)peak_r, (int)peak_post,
-                     (int)peak_ref, (int)peak_dead,
-#if CONFIG_MIC_NS_ENABLE
-                     (int)peak_ns,
-#endif
+                     (int)peak_ref, (int)peak_dead, ns_field,
                      audio_io_playback_active() ? " (agent speaking)" : "");
 #else
-            ESP_LOGI(TAG, "mic peak L=%d R=%d"
-#if CONFIG_MIC_NS_ENABLE
-                          " ns=%d"
-#endif
-                          "%s",
-                     (int)peak_l, (int)peak_r,
-#if CONFIG_MIC_NS_ENABLE
-                     (int)peak_ns,
-#endif
+            ESP_LOGI(TAG, "mic peak L=%d R=%d%s%s",
+                     (int)peak_l, (int)peak_r, ns_field,
                      audio_io_playback_active() ? " (gated: agent speaking)" : "");
 #endif
         }
@@ -1379,10 +1479,13 @@ esp_err_t audio_io_init(int sample_rate)
                 s_ns_in = NULL; s_ns_out = NULL;
             } else {
                 s_ns_on = true;
+                s_ns_run = ns_load();
                 ESP_LOGI(TAG, "NS: esp-sr ns_pro, frame=%d, mode=%d, %u B "
                          "internal staging (frame does not divide the %d-sample "
                          "block)", NS_CHUNK, (int)CONFIG_MIC_NS_ESPSR_MODE,
                          (unsigned)(in_stage + out_stage), CAPTURE_FRAMES);
+                ESP_LOGI(TAG, "NS: %s at boot (BOOT double-click toggles)",
+                         s_ns_run ? "RUNNING" : "idle");
             }
         }
     }
