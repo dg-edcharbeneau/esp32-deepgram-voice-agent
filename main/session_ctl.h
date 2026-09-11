@@ -76,6 +76,18 @@ void session_ctl_request_reload_soon(void);
  * main.c -- calls this to put it back, rather than carrying its own copy that
  * cannot know whether the last start failed.
  */
+/*
+ * "Write the denoiser's on/off state to flash when you get a moment."
+ *
+ * Persisting is a flash erase, and a flash erase runs with the cache off, which
+ * stalls every task executing from flash -- including the audio path, one
+ * priority level above the button callback that asks for this. So the button
+ * sets the state and asks here; the worker does the blocking part.
+ */
+#if CONFIG_MIC_NS_ENABLE
+void session_ctl_request_ns_save(void);
+#endif
+
 void session_ctl_repaint_idle_status(void);
 
 /*

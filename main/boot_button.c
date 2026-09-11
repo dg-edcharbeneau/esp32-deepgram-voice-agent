@@ -14,6 +14,13 @@ static const char *TAG = "boot_btn";
 
 #define BOOT_BUTTON_GPIO   0
 #define FORGET_HOLD_MS     3000
+#if CONFIG_MIC_NS_ENABLE
+/* Long enough to read, short enough that the session's own caption comes back
+ * before it is missed. */
+#define NS_NOTICE_MS       2000
+/* Max press length AND max gap for the two presses to count as one gesture. */
+#define NS_DOUBLE_WINDOW_MS 300
+#endif
 
 /* Long enough for the ring to repaint and be read. */
 #define FORGET_NOTICE_MS   1200
@@ -68,20 +75,28 @@ static void on_forget_wifi(void *arg, void *usr_data)
  *
  * Same rule as the other callbacks: this runs on iot_button's task, so it sets
  * a flag and returns. The capture task notices the change on its next block and
- * resets the FIFO there.
+ * resets the FIFO there, and session_ctl's worker does the flash write -- an
+ * NVS commit runs with the cache off and would stall the audio path from here.
  */
 static void on_toggle_ns(void *arg, void *usr_data)
 {
     if (!audio_io_ns_available()) {
         ESP_LOGW(TAG, "EVT bootdouble -- denoiser unavailable");
-        ui_set_status("noise reduction n/a", false);
+        ui_flash_status("noise reduction n/a", NS_NOTICE_MS);
         return;
     }
     const bool on = !audio_io_ns_enabled();
     ESP_LOGI(TAG, "EVT bootdouble -- noise reduction %s", on ? "on" : "off");
     audio_io_ns_set(on);
-    /* Static literals: ui_set_status keeps the pointer, not a copy. */
-    ui_set_status(on ? "noise reduction on" : "noise reduction off", false);
+    session_ctl_request_ns_save();
+    /*
+     * flash, not set_status: this is a confirmation, not a session state.
+     * ui_set_status(..., false) would ALSO assert the session is down, which
+     * this callback has no idea about and which drops the behaviour ladder back
+     * to CONNECTING. Static literals either way -- only the pointer is kept.
+     */
+    ui_flash_status(on ? "noise reduction on" : "noise reduction off",
+                    NS_NOTICE_MS);
 }
 #endif
 
@@ -115,6 +130,28 @@ esp_err_t boot_button_start(void)
                  BOOT_BUTTON_GPIO, esp_err_to_name(err));
         return err;
     }
+
+#if CONFIG_MIC_NS_ENABLE
+    /*
+     * WIDEN THE REPEAT WINDOW, or the double click is not reachable.
+     *
+     * iot_button counts a second press as a repeat only if BOTH the press and
+     * the gap before it come in under short_press_ticks, and the component's
+     * default (CONFIG_BUTTON_SHORT_PRESS_TIME_MS) is 180 ms. A deliberate
+     * two-finger-tap on a stiff through-hole button does not make that: two
+     * attempts on the bench produced no BUTTON_DOUBLE_CLICK at all, only single
+     * clicks, which is how this was found.
+     *
+     * Set per-handle rather than by raising the global Kconfig, so nothing else
+     * that uses iot_button inherits it. The cost lands on the single click,
+     * which is now held back up to this long to see whether a second press is
+     * coming -- 300 ms on the session toggle, still well under the 1.1-6.0 s the
+     * WebSocket handshake takes, so it is not the slow part of starting a
+     * session.
+     */
+    ESP_ERROR_CHECK(iot_button_set_param(btn, BUTTON_SHORT_PRESS_TIME_MS,
+                                         (void *)(intptr_t)NS_DOUBLE_WINDOW_MS));
+#endif
 
     button_event_args_t hold = { .long_press.press_time = FORGET_HOLD_MS };
     ESP_ERROR_CHECK(iot_button_register_cb(btn, BUTTON_LONG_PRESS_START, &hold,

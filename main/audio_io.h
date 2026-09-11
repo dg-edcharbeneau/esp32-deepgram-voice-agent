@@ -100,7 +100,15 @@ typedef void (*audio_io_tap_t)(const int16_t *mono, size_t samples);
  * Safe from any task.
  */
 #if CONFIG_MIC_NS_ENABLE
+/*
+ * set() takes effect on the next capture block and does NOT touch flash;
+ * persist() is the flash erase and BLOCKS, so it belongs on a task that can
+ * afford tens of milliseconds with the cache off -- session_ctl's worker, via
+ * session_ctl_request_ns_save(). Splitting them is what keeps a button callback
+ * from stalling the audio path.
+ */
 void audio_io_ns_set(bool enabled);
+void audio_io_ns_persist(void);
 bool audio_io_ns_enabled(void);
 bool audio_io_ns_available(void);
 #endif

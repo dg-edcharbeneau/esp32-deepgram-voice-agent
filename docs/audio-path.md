@@ -246,7 +246,14 @@ anyone has touched it. The status caption confirms each press, and the `mic peak
 line reports `ns=off` rather than `ns=0` when the stage is idle — zero would read
 as total suppression, which is the opposite of the truth.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
+
+- **Switching it on injects one silent block.** The FIFO is reset on the off→on
+  edge so audio from before the pause cannot be spliced onto audio from after
+  it, and the first block out of a reset FIFO is the priming block, which is
+  silence. That is 64 ms, and it goes up the wire mid-sentence if you toggle
+  while talking. Switching it *off* costs nothing.
+
 
 - **The RAM is spent either way.** The engine and its 7,104 B of staging are
   allocated at init and held whether or not it is running. Deferring that to the

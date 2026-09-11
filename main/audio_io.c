@@ -406,15 +406,31 @@ static bool ns_load(void)
     return (err == ESP_OK) ? (saved != 0) : NS_DEFAULT_ON;
 }
 
+/*
+ * Takes effect immediately; does NOT touch flash. Persisting is a separate,
+ * deferred step -- see audio_io_ns_persist() and the note in audio_io.h -- so
+ * that a caller on a button or timer callback cannot stall the audio path with
+ * a cache-off flash erase.
+ *
+ * The test-then-set is not atomic. That is safe only because exactly one task
+ * calls this (iot_button's); if a second caller ever appears, this needs a lock
+ * or an atomic exchange.
+ */
 void audio_io_ns_set(bool enabled)
 {
     if (s_ns_run == enabled) {
-        return;                     /* no write, no log, no flash wear */
+        return;
     }
     s_ns_run = enabled;
-    ns_save(enabled);
     ESP_LOGI(TAG, "noise suppression %s%s", enabled ? "ON" : "OFF",
              s_ns_on ? "" : " (engine unavailable -- preference only)");
+}
+
+/* Blocking: this is the flash erase. Call it only from a task that can afford
+ * tens of milliseconds with the cache off. */
+void audio_io_ns_persist(void)
+{
+    ns_save(s_ns_run);
 }
 
 bool audio_io_ns_enabled(void) { return s_ns_run; }
@@ -1082,23 +1098,27 @@ static void capture_task(void *arg)
          * combined meter would just look "quiet" -- this shows which channel is
          * actually live.
          */
-        /*
-         * "ns=0" for a denoiser that is not running reads as TOTAL suppression,
-         * which is the opposite of the truth, so an idle stage says so in words.
-         * Empty when the feature is not compiled in at all.
-         */
-        char ns_field[20] = "";
-#if CONFIG_MIC_NS_ENABLE
-        if (!s_ns_run) {
-            snprintf(ns_field, sizeof ns_field, " ns=off");
-        } else if (!s_ns_on) {
-            snprintf(ns_field, sizeof ns_field, " ns=n/a");
-        } else {
-            snprintf(ns_field, sizeof ns_field, " ns=%d", (int)peak_ns);
-        }
-#endif
-
         if (want_level_log) {
+            /*
+             * Built HERE, not once per block. want_level_log is true every 0.5-3
+             * s; this loop runs 15.6 times a second inside the priority-7 audio
+             * task, and formatting a string on every one of them to throw it
+             * away is work this path does not need to do.
+             *
+             * "ns=0" for a denoiser that is not running reads as TOTAL
+             * suppression, which is the opposite of the truth, so an idle stage
+             * says so in words. Empty when the feature is not compiled in.
+             */
+            char ns_field[20] = "";
+#if CONFIG_MIC_NS_ENABLE
+            if (!s_ns_run) {
+                snprintf(ns_field, sizeof ns_field, " ns=off");
+            } else if (!s_ns_on) {
+                snprintf(ns_field, sizeof ns_field, " ns=n/a");
+            } else {
+                snprintf(ns_field, sizeof ns_field, " ns=%d", (int)peak_ns);
+            }
+#endif
 #if CONFIG_AEC_ENABLE
             /*
              * L and R are the RAW microphone lanes; `out` is post-AEC. Both are
