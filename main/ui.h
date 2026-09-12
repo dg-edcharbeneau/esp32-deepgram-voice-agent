@@ -178,6 +178,20 @@ void ui_feed_mic(const int16_t *mono, size_t samples);
 void ui_set_status(const char *text, bool session_live);
 
 /*
+ * Show `text` for `ms`, then fall back to whatever the session was saying.
+ *
+ * Use this for a confirmation the user just triggered. Do NOT reach for
+ * ui_set_status(text, false) to do it: that second argument does not mean "show
+ * my text", it means "the session is down", and it also drops the behaviour
+ * ladder back to CONNECTING -- so a cosmetic message can make a live device
+ * look like it lost its session until the next state change refreshes it.
+ *
+ * Same contract as ui_set_status(): safe from any task, and only the pointer is
+ * kept, so `text` must have static lifetime.
+ */
+void ui_flash_status(const char *text, uint32_t ms);
+
+/*
  * Overlay a QR code in the middle of the screen, or clear it.
  *
  * Used by provisioning to put the setup network on screen as something a phone

@@ -39,6 +39,7 @@
 #include "nvs_flash.h"
 
 #include "agent_name.h"
+#include "audio_codecs.h"
 #include "audio_io.h"
 #include "battery.h"
 #include "boot_button.h"
@@ -1247,7 +1248,7 @@ void app_main(void)
                  "amp=%.3f/%.3f low=%.2f/%.2f mid=%.2f/%.2f high=%.2f/%.2f "
                  "pk=%.3f/%.3f turns=%" PRIu32 " mic=%" PRIu32 " rx=%" PRIu32
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
-                 " txdrop=%" PRIu32 " vadsup=%" PRIu32
+                 " txdrop=%" PRIu32 " vadsup=%" PRIu32 " rxovf=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u dma=%u dmamax=%u"
                  " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
@@ -1263,6 +1264,11 @@ void app_main(void)
                  s_turns, captured, s_audio_bytes, played, dropped,
                  dg_agent_audio_dropped(), dg_agent_transport_dropped(),
                  audio_io_uplink_suppressed(),
+                 /* The I2S RX ring dropping frames on the floor. esp_codec_dev's
+                  * _i2s_data_read() ignores the return code, so an overrun is
+                  * silent at every other layer -- this counter was built for
+                  * that (audio_codecs.c:86-108) and until now nothing read it. */
+                 audio_codecs_rx_overruns(),
                  esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),

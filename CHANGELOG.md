@@ -4,6 +4,115 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Noise suppression is on by default.** `CONFIG_MIC_NS_ENABLE` and
+  `CONFIG_MIC_NS_DEFAULT_ON` both default to `y`, so a fresh checkout builds a
+  device that denoises from boot. The BOOT button's double click still overrides
+  it at runtime and the choice persists.
+
+  The measurements that argued against this are kept rather than dropped: in the
+  room it was tested in the denoiser did not improve transcription -- the no-NS
+  baseline already scored 4/4 -- and it costs about a quarter of the frame rate
+  (20.0 -> 14.8 fps), 7.4 kB of internal RAM, and 64 ms of uplink latency. It is
+  on for louder rooms than that one, and 4/4 is the bar to beat before anyone
+  calls it a win. See [docs/audio-path.md](docs/audio-path.md).
+
+### Added
+
+- **Microphone noise suppression, off by default and not yet measured on the
+  device.** The canceller removes the device's own speaker; nothing removed the
+  *room*, so fans, HVAC and traffic went up the wire to Deepgram at full level.
+  `CONFIG_MIC_NS_ENABLE` adds a denoiser after the AEC and before the tap, the
+  uplink VAD and the sink -- after the canceller because a non-linear stage
+  upstream of an adaptive filter wrecks its convergence, before the rest so the
+  orb, the VAD threshold and Deepgram all see the same cleaned signal.
+
+  It uses esp-sr's `ns_pro`, which was already linked. Its one awkwardness is
+  frame size: `ns_pro_create` takes 10 ms frames only and
+  `AUDIO_IO_CAPTURE_FRAMES` is 1024 under the AEC, so `1024 % 160 = 64` and it
+  cannot walk the block in place the way `aec_process` does. It carries an input
+  and an output FIFO instead, costing 7,104 B of internal staging and a standing
+  64 ms of added uplink latency.
+
+  **SpeexDSP was evaluated and removed.** It was vendored precisely because it
+  accepts any frame size and so needed no FIFO, and that was not enough: it cost
+  57% of the frame rate against esp-sr's 26%, and it damaged speech -- eating
+  quiet word onsets ("A quick brown fox" for "The quick brown fox") and losing
+  an utterance where the no-NS baseline transcribed 4/4. Its state could not be
+  moved out of PSRAM to recover the speed: doing so dropped `intmax` to 10,240
+  and the device could not open a session at all, TLS failing on every retry.
+  The measurements are kept in `docs/audio-path.md` so it is not re-proposed.
+
+  The `mic peak` line gains an `ns=` field beside `out=`. They stay separate on
+  purpose: `out=` is post-AEC and `ns=` post-denoiser, so ERLE remains readable
+  on its own and a regression in one cannot be blamed on the other.
+
+  **Measured on the board**, 150 s per arm from cold boot on a live session:
+
+  | arm | fps | `int` mean | `intmax` floor | rx overruns |
+  |---|---|---|---|---|
+  | off | 20.00 | 60,331 | 26,624 | +0 |
+  | Speex | 8.63 (-57%) | 60,903 | 29,696 | +0 |
+  | esp-sr | 14.80 (-26%) | 52,894 (-7,438) | 21,504 | +0 |
+
+  **They do not rank, they trade.** esp-sr is 2.2x cheaper on CPU and costs
+  7.4 kB of internal RAM -- the resource this board has least of. Speex costs
+  none and more than half the frame rate. Neither moved `rxovf`. Flash is
+  +18,592 B (Speex) / +17,872 B (esp-sr); with the feature off the binary is
+  byte-for-byte what it was.
+
+  **Acoustically, neither engine helped.** One speaker, four fixed lines, same
+  room: NS off transcribed 4/4 correctly; Speex dropped word onsets ("A quick
+  brown fox", "Seashells seashells") and lost an utterance; esp-sr was 3/3 in
+  window. At this noise level Deepgram already handles the audio, so the
+  denoiser spends frame rate for nothing. A genuinely loud room is untested and
+  is the only condition where NS is likely to pay.
+
+  **NS runs below the uplink VAD**, which took two attempts. Placing it above
+  was justified as giving the VAD a cleaner floor; that was backwards -- the
+  denoiser attenuates interrupting speech along with the room, so fewer blocks
+  cleared `VAD_PEAK` and barge-in got perceptibly harder to trigger. Blocks
+  discarded during playback: 22 (off) -> 49 (NS above) -> 16 (NS below). With
+  the stage moved, the VAD decides on the post-AEC signal exactly as it did
+  before, and the denoiser still sits ahead of the tap and the sink.
+
+  **Correction: esp-sr adds 64 ms of uplink latency, not the 10 ms first
+  claimed.** 10 ms is only the input residue; the output FIFO holds a further
+  full capture block between drains, measured at 1024 samples of standing
+  occupancy -- straight onto the interruption path.
+
+- **Noise suppression toggles from the BOOT button.** A double click turns it on
+  and off at runtime and the setting persists across reboots;
+  `CONFIG_MIC_NS_DEFAULT_ON` is just the power-on state. The status caption
+  confirms the press, and `mic peak` says `ns=off` for an idle stage rather than
+  `ns=0`, which would read as total suppression.
+
+  The engine's 7,104 B of staging is allocated at init and held either way --
+  deferring it to the first press would mean a multi-kB internal allocation
+  mid-session on a fragmented heap, which is what drops sessions on this board.
+  The toggle buys back CPU, not RAM.
+
+  The gesture is compiled out along with the feature rather than left answering
+  "not built": registering a double click makes `iot_button` hold back every
+  single click until the double-click window closes, and the single click is the
+  session toggle -- the escape hatch. Builds without the denoiser keep it sharp.
+
+- **`rxovf` in the telemetry line.** `audio_codecs_rx_overruns()` has counted
+  silently dropped I2S RX frames since the DMA sizing work and nothing ever read
+  it. It is now on the TLM line, which is how the bench above could show the
+  denoiser was not starving the capture ring.
+
+  Three measurement traps hit along the way, all recorded in
+  [docs/audio-path.md](docs/audio-path.md): a first esp-sr build that measured
+  +96 B of flash because `1024 % 160 != 0` is a compile-time constant and the
+  compiler had deleted the whole engine; a serial reader left holding the port,
+  which makes `idf.py flash` fail with `The chip stopped responding` and look
+  like dead hardware; and a stale capture log that made a fixed crash appear to
+  still be happening.
+
 ## [0.7.0] - 2026-09-01
 
 ### Added

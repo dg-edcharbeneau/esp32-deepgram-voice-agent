@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,10 @@
 
 #if CONFIG_AEC_ENABLE
 #include "esp_aec.h"
+#endif
+
+#if CONFIG_MIC_NS_ENABLE
+#include "esp_ns.h"
 #endif
 
 static const char *TAG = "audio_io";
@@ -215,6 +220,115 @@ static int16_t *s_aec_out;   /* cancelled microphone */
 static int s_aec_chunk;
 #endif
 
+#if CONFIG_MIC_NS_ENABLE
+/*
+ * NOISE SUPPRESSION.
+ *
+ * Sits AFTER the canceller and before the tap, the uplink VAD and the sink. The
+ * ordering is the whole design:
+ *
+ *   - after the AEC, because a non-linear denoiser upstream of an adaptive
+ *     filter wrecks its convergence -- the filter has to see the same raw
+ *     microphone the reference lane is echoing into;
+ *   - before the tap, so the orb draws the room the way Deepgram hears it
+ *     rather than the way the microphone does;
+ *   - BELOW the uplink VAD, so the denoiser cannot talk the VAD out of an
+ *     interruption. This was the second attempt; see the VAD note below.
+ *
+ * MEASURED on this board, 150 s per arm from cold boot on a live session, then
+ * an acoustic A/B with one speaker reading four fixed lines in one room:
+ *
+ *                      fps     int mean   intmax    transcription
+ *   NS off           20.00      60,331    26,624    4/4 lines correct
+ *   esp-sr           14.80      52,894    21,504    3/3 in window
+ *   SpeexDSP          8.63      60,903    29,696    dropped word onsets
+ *
+ * SPEEXDSP WAS EVALUATED AND REMOVED. It cost 57% of the frame rate -- the
+ * denoiser ran from PSRAM, where its FFT missed cache on every pass -- and it
+ * chewed quiet word onsets, turning "The quick brown fox" into "A quick brown
+ * fox" and losing an utterance outright. Moving its state to internal RAM to
+ * buy the speed back was tried and is a hard fail: intmax fell to 10,240 and
+ * the device could not open a session at all, TLS write failing on every retry.
+ * It is gone from the tree; this note is here so it is not re-proposed.
+ *
+ * NEITHER ENGINE IMPROVED TRANSCRIPTION AT THIS ROOM'S NOISE LEVEL. Deepgram
+ * already handled the audio unaided, so in that room the denoiser paid frame
+ * rate for nothing. The feature ships anyway, for louder rooms than that one --
+ * but the number above is the one to beat before anyone calls it a win, and it
+ * is kept here rather than quietly dropped for that reason.
+ *
+ * NS ABOVE THE VAD WAS A MISTAKE, AND HAS BEEN FIXED. The VAD compares the peak
+ * it is given against CONFIG_AEC_UPLINK_VAD_PEAK, and a denoiser upstream of it
+ * attenuates the INTERRUPTING SPEECH along with the room -- so fewer blocks
+ * clear the threshold and barge-in gets harder. Blocks the VAD discarded during
+ * playback, measured across comparable runs:
+ *
+ *   NS off 22    NS above the VAD 49    NS below the VAD 16
+ *
+ * The original justification for the old ordering -- that a cleaner floor would
+ * help the VAD -- had it backwards, and the middle column is what that cost:
+ * roughly double, and perceptible, reported as barge-in being hard to trigger.
+ * With the stage moved below, the VAD sees the post-AEC signal exactly as it did
+ * before any of this existed and the number returns to baseline.
+ *
+ * No partial frame ever reaches the engine -- to a stateful noise estimator
+ * that is a frame of SILENCE, and it would ratchet the noise floor down onto
+ * the speech.
+ */
+/*
+ * esp-sr grades its denoiser 0-2 rather than in dB, and ns_pro_create() takes
+ * 10 ms frames ONLY -- 160 samples at 16 kHz.
+ *
+ * 1024 % 160 = 64. The frame does NOT divide the capture block, so unlike
+ * aec_process() this cannot just walk the block in place; it needs a FIFO that
+ * spans block boundaries.
+ *
+ * There are TWO residues, and missing the second one is the easy mistake here.
+ * The input residue is what is left after the last whole frame, at most
+ * NS_CHUNK-1 samples. The output residue is its mirror: 1024 samples in yields
+ * 960 out on one block and 1040 on the next, so the produced count oscillates
+ * around the block size and a fixed-size copy would alternately starve and
+ * discard. Hence an output FIFO as well, drained exactly CAPTURE_FRAMES at a
+ * time.
+ *
+ * The cost is one block of silence at startup while the FIFO primes, and a
+ * STANDING 64 ms of added uplink latency -- not the 10 ms an earlier version of
+ * this comment claimed. The 10 ms is only the input residue; the output FIFO
+ * additionally holds a full CAPTURE_FRAMES between drains, measured at exactly
+ * 1024 samples of standing occupancy in steady state. On a voice agent, 64 ms
+ * straight onto the interruption path is a real cost.
+ */
+#define NS_CHUNK 160
+static ns_handle_t s_ns;
+static int16_t *s_ns_in;    /* input carry, then this block */
+static int16_t *s_ns_out;   /* output FIFO -- ns_process() will not work in place */
+static size_t s_ns_carry;   /* unprocessed input samples held over, < NS_CHUNK */
+static size_t s_ns_have;    /* processed output samples waiting to be emitted */
+static size_t s_ns_out_cap; /* capacity of s_ns_out, in samples -- the bound the
+                             * production loop checks against */
+/* Set only once the engine is known to be usable at this frame size; the process
+ * loop tests it rather than the handle, so a bad divisor or a failed allocation
+ * degrades to a pass-through instead of to a mangled uplink. */
+static bool s_ns_on;
+
+/*
+ * RUNTIME on/off, separate from s_ns_on, which only says the engine EXISTS.
+ * The BOOT button's double click drives this.
+ *
+ * The state is allocated at init and held either way. Deferring the 7 kB of
+ * internal staging until first enable would be worse, not better: a multi-kB
+ * INTERNAL allocation made mid-session on a fragmented heap is precisely the
+ * failure that drops sessions on this board. So the RAM is spent the moment the
+ * feature is compiled in, and what the toggle actually buys back is the ~5 fps.
+ *
+ * volatile and a single word: written from iot_button's task, read every block
+ * by capture_task, and nothing else is shared. The FIFO itself is NEVER touched
+ * from the button task -- capture_task notices the edge and resets it there,
+ * because racing a memcpy against a memset is not worth the two lines it saves.
+ */
+static volatile bool s_ns_run;
+#endif
+
 /* Milliseconds since boot, truncated. One 32-bit store, so no writer can tear it
  * and no reader can catch it half-updated. */
 static inline uint32_t now_ms(void)
@@ -245,6 +359,85 @@ static bool s_volume_from_nvs;
 /* Shared with the saved voice; see voices.c. */
 #define NVS_NAMESPACE  "dgagent"
 #define NVS_KEY_VOLUME "out_volume"
+#define NVS_KEY_NS     "mic_ns"
+
+#if CONFIG_MIC_NS_ENABLE
+/* A Kconfig bool is UNDEFINED when off rather than 0, so it cannot be read in a
+ * C expression -- only in #if. The same trap AEC_GATE_DESC documents above. */
+#if CONFIG_MIC_NS_DEFAULT_ON
+#define NS_DEFAULT_ON true
+#else
+#define NS_DEFAULT_ON false
+#endif
+
+/*
+ * Persisted so the choice survives a reboot, in the same namespace the output
+ * volume already uses. A write failure is logged and otherwise ignored: the
+ * toggle has still taken effect for this session, and refusing to denoise
+ * because flash is unhappy would be the wrong trade.
+ */
+static void ns_save(bool enabled)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_NS, enabled ? 1 : 0);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not persist NS setting: %s", esp_err_to_name(err));
+    }
+}
+
+/* NOT_FOUND on a device that has never been toggled, which is the common case
+ * -- fall back to the compile-time default rather than treating it as an error.
+ * Mirrors the saved-volume read below. */
+static bool ns_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return NS_DEFAULT_ON;
+    }
+    uint8_t saved = 0;
+    esp_err_t err = nvs_get_u8(h, NVS_KEY_NS, &saved);
+    nvs_close(h);
+    return (err == ESP_OK) ? (saved != 0) : NS_DEFAULT_ON;
+}
+
+/*
+ * Takes effect immediately; does NOT touch flash. Persisting is a separate,
+ * deferred step -- see audio_io_ns_persist() and the note in audio_io.h -- so
+ * that a caller on a button or timer callback cannot stall the audio path with
+ * a cache-off flash erase.
+ *
+ * The test-then-set is not atomic. That is safe only because exactly one task
+ * calls this (iot_button's); if a second caller ever appears, this needs a lock
+ * or an atomic exchange.
+ */
+void audio_io_ns_set(bool enabled)
+{
+    if (s_ns_run == enabled) {
+        return;
+    }
+    s_ns_run = enabled;
+    ESP_LOGI(TAG, "noise suppression %s%s", enabled ? "ON" : "OFF",
+             s_ns_on ? "" : " (engine unavailable -- preference only)");
+}
+
+/* Blocking: this is the flash erase. Call it only from a task that can afford
+ * tens of milliseconds with the cache off. */
+void audio_io_ns_persist(void)
+{
+    ns_save(s_ns_run);
+}
+
+bool audio_io_ns_enabled(void) { return s_ns_run; }
+bool audio_io_ns_available(void) { return s_ns_on; }
+#endif
+
 /*
  * The capture task's handle, which exists to make starting twice impossible.
  *
@@ -428,6 +621,11 @@ static void capture_task(void *arg)
 
     /* The microphone is open on entry -- audio_io_init() opened it. */
     bool mic_open = true;
+
+#if CONFIG_MIC_NS_ENABLE
+    /* Edge detector for the runtime NS toggle; see s_ns_run. */
+    bool ns_was_running = false;
+#endif
 
     while (1) {
 #if !CONFIG_AUDIO_CAPTURE_ALWAYS
@@ -672,33 +870,6 @@ static void capture_task(void *arg)
         }
 #endif
 
-#if CONFIG_MIC_LEVEL_LOG
-        /*
-         * Per-channel peaks, not a combined level. If the board only wires one
-         * of the ES7210's inputs, the downmix above halves every sample and a
-         * combined meter would just look "quiet" -- this shows which channel is
-         * actually live.
-         */
-        if (want_level_log) {
-#if CONFIG_AEC_ENABLE
-            /*
-             * L and R are the RAW microphone lanes; `out` is what actually
-             * leaves this task. Both are printed because the pair is the
-             * measurement -- out against L/R while the speaker is live is the
-             * ERLE, and a single number cannot show it. `dead` is MIC4,
-             * AC-coupled to AGND: it reads 3-9 always, and is the control that
-             * identifies the slot order.
-             */
-            ESP_LOGI(TAG, "mic peak L=%d R=%d out=%d ref=%d dead=%d%s",
-                     (int)peak_l, (int)peak_r, (int)peak_post,
-                     (int)peak_ref, (int)peak_dead,
-                     audio_io_playback_active() ? " (agent speaking)" : "");
-#else
-            ESP_LOGI(TAG, "mic peak L=%d R=%d%s", (int)peak_l, (int)peak_r,
-                     audio_io_playback_active() ? " (gated: agent speaking)" : "");
-#endif
-        }
-#endif
 
         /*
          * Half duplex. The speaker and mic sit centimetres apart, so without a
@@ -833,6 +1004,144 @@ static void capture_task(void *arg)
             }
         } else {
             s_vad_hold = 0;
+        }
+#endif
+
+#if CONFIG_MIC_NS_ENABLE
+#if CONFIG_MIC_LEVEL_LOG
+        int32_t peak_ns = 0;
+#endif
+        /*
+         * BELOW THE UPLINK VAD, DELIBERATELY, AND THIS IS THE SECOND PLACEMENT.
+         *
+         * The first version ran the denoiser above the VAD, on the theory that a
+         * cleaner floor would make the threshold easier to set. Measured, it did
+         * the opposite: the denoiser attenuates the INTERRUPTING SPEECH along
+         * with the room, so fewer blocks cleared CONFIG_AEC_UPLINK_VAD_PEAK and
+         * barge-in got measurably harder -- blocks discarded during playback
+         * went 22 -> 49, and interrupting the agent was reported as hard to
+         * trigger.
+         *
+         * So the VAD above keeps deciding on the post-AEC signal, exactly as it
+         * did before any of this existed, and its threshold keeps its meaning.
+         * The denoiser runs here instead: still ahead of the tap and the sink,
+         * so the orb and Deepgram both get the cleaned audio, but no longer able
+         * to talk the VAD out of an interruption.
+         */
+        /*
+         * The edge, not the level. Coming back on with a FIFO still holding
+         * samples from before the pause would splice audio from two different
+         * moments together, so the carry is dropped here -- on capture_task,
+         * which is the only thing allowed to touch those buffers.
+         */
+        if (s_ns_run && !ns_was_running) {
+            s_ns_carry = 0;
+            s_ns_have = 0;
+        }
+        ns_was_running = s_ns_run;
+
+        if (s_ns_on && s_ns_run) {
+            /*
+             * Carry, then process whole frames only, then keep what is left for
+             * the next block. Nothing is ever handed a partial frame -- to a
+             * stateful noise estimator that is a frame of silence, and it would
+             * ratchet the noise floor down onto the speech.
+             */
+            memcpy(s_ns_in + s_ns_carry, mono, CAPTURE_FRAMES * sizeof(int16_t));
+            const size_t avail = s_ns_carry + CAPTURE_FRAMES;
+            size_t done = 0;
+            while (done + NS_CHUNK <= avail) {
+                /* The bound is the buffer, not the input. Without it the FIFO
+                 * ran off its end and corrupted the next allocation on the
+                 * heap -- which showed up as a stack overflow in an unrelated
+                 * task, three frames away from anything to do with this code. */
+                if (s_ns_have + NS_CHUNK > s_ns_out_cap) {
+                    break;
+                }
+                ns_process(s_ns, s_ns_in + done, s_ns_out + s_ns_have);
+                done += NS_CHUNK;
+                s_ns_have += NS_CHUNK;
+            }
+            s_ns_carry = avail - done;
+            memmove(s_ns_in, s_ns_in + done, s_ns_carry * sizeof(int16_t));
+
+            if (s_ns_have >= CAPTURE_FRAMES) {
+                memcpy(mono, s_ns_out, CAPTURE_FRAMES * sizeof(int16_t));
+                s_ns_have -= CAPTURE_FRAMES;
+                memmove(s_ns_out, s_ns_out + CAPTURE_FRAMES,
+                        s_ns_have * sizeof(int16_t));
+            } else {
+                /* Priming, first block only. Silence rather than the raw block:
+                 * emitting undenoised audio here would put the one frame the
+                 * bench is least likely to look at on a different code path. */
+                memset(mono, 0, CAPTURE_FRAMES * sizeof(int16_t));
+            }
+#if CONFIG_MIC_LEVEL_LOG
+            /* Read here rather than in the loop above for the same reason
+             * peak_post is: a level computed upstream of the stage it is meant
+             * to be measuring has been mistaken for evidence on this path once
+             * already. */
+            if (want_level_log) {
+                for (size_t i = 0; i < CAPTURE_FRAMES; i++) {
+                    int32_t a = (mono[i] < 0) ? -(int32_t)mono[i] : (int32_t)mono[i];
+                    if (a > peak_ns) peak_ns = a;
+                }
+            }
+#endif
+        }
+#endif
+
+
+#if CONFIG_MIC_LEVEL_LOG
+        /*
+         * Per-channel peaks, not a combined level. If the board only wires one
+         * of the ES7210's inputs, the downmix above halves every sample and a
+         * combined meter would just look "quiet" -- this shows which channel is
+         * actually live.
+         */
+        if (want_level_log) {
+            /*
+             * Built HERE, not once per block. want_level_log is true every 0.5-3
+             * s; this loop runs 15.6 times a second inside the priority-7 audio
+             * task, and formatting a string on every one of them to throw it
+             * away is work this path does not need to do.
+             *
+             * "ns=0" for a denoiser that is not running reads as TOTAL
+             * suppression, which is the opposite of the truth, so an idle stage
+             * says so in words. Empty when the feature is not compiled in.
+             */
+            char ns_field[20] = "";
+#if CONFIG_MIC_NS_ENABLE
+            if (!s_ns_run) {
+                snprintf(ns_field, sizeof ns_field, " ns=off");
+            } else if (!s_ns_on) {
+                snprintf(ns_field, sizeof ns_field, " ns=n/a");
+            } else {
+                snprintf(ns_field, sizeof ns_field, " ns=%d", (int)peak_ns);
+            }
+#endif
+#if CONFIG_AEC_ENABLE
+            /*
+             * L and R are the RAW microphone lanes; `out` is post-AEC. Both are
+             * printed because the pair is the measurement -- out against L/R
+             * while the speaker is live is the ERLE, and a single number cannot
+             * show it. `dead` is MIC4, AC-coupled to AGND: it reads 3-9 always,
+             * and is the control that identifies the slot order.
+             *
+             * `out` is the LAST stage only when the denoiser is off; with it on,
+             * `ns` is what leaves this task. Keeping them separate is the point
+             * -- ERLE has to stay readable independently of the denoiser, or a
+             * regression in one gets attributed to the other.
+             */
+            ESP_LOGI(TAG, "mic peak L=%d R=%d out=%d ref=%d dead=%d%s%s",
+                     (int)peak_l, (int)peak_r, (int)peak_post,
+                     (int)peak_ref, (int)peak_dead, ns_field,
+                     audio_io_playback_active() ? " (agent speaking)" : "");
+#else
+            ESP_LOGI(TAG, "mic peak L=%d R=%d%s%s",
+                     (int)peak_l, (int)peak_r, ns_field,
+                     audio_io_playback_active() ? " (gated: agent speaking)" : "");
+#endif
         }
 #endif
 
@@ -1154,6 +1463,50 @@ esp_err_t audio_io_init(int sample_rate)
                 ESP_LOGI(TAG, "AEC: FD_LOW_COST, chunk=%d, %d per capture block, "
                          "nlp=%d, gate=%s", s_aec_chunk, CAPTURE_FRAMES / s_aec_chunk,
                          (int)CONFIG_AEC_NLP_LEVEL, AEC_GATE_DESC);
+            }
+        }
+    }
+#endif
+
+#if CONFIG_MIC_NS_ENABLE
+    {
+        {
+            /*
+             * The two staging buffers are NOT the same size, and the earlier
+             * version of this that assumed they were overran the output by
+             * 1.4 kB and took out the neighbouring task's stack.
+             *
+             * Input needs one block plus the carry: < NS_CHUNK held over.
+             *
+             * Output needs TWO blocks plus a chunk. The priming block produces
+             * 960 samples and cannot drain (960 < 1024), so the next block
+             * starts with 960 already banked and adds up to another 1024+160 on
+             * top before it gets to drain anything. Worst case is therefore
+             * (CAPTURE_FRAMES - 1) + CAPTURE_FRAMES + NS_CHUNK.
+             */
+            const size_t in_stage  = (CAPTURE_FRAMES + NS_CHUNK) * sizeof(int16_t);
+            const size_t out_stage = (2 * CAPTURE_FRAMES + 2 * NS_CHUNK) * sizeof(int16_t);
+            s_ns_out_cap = 2 * CAPTURE_FRAMES + 2 * NS_CHUNK;
+            s_ns = ns_pro_create(NS_CHUNK * 1000 / 16000, CONFIG_MIC_NS_ESPSR_MODE,
+                                 16000);
+            s_ns_in = heap_caps_aligned_alloc(16, in_stage,
+                                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            s_ns_out = heap_caps_aligned_alloc(16, out_stage,
+                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (s_ns == NULL || s_ns_in == NULL || s_ns_out == NULL) {
+                ESP_LOGE(TAG, "esp-sr NS init failed -- running WITHOUT it");
+                if (s_ns != NULL) { ns_destroy(s_ns); s_ns = NULL; }
+                free(s_ns_in); free(s_ns_out);
+                s_ns_in = NULL; s_ns_out = NULL;
+            } else {
+                s_ns_on = true;
+                s_ns_run = ns_load();
+                ESP_LOGI(TAG, "NS: esp-sr ns_pro, frame=%d, mode=%d, %u B "
+                         "internal staging (frame does not divide the %d-sample "
+                         "block)", NS_CHUNK, (int)CONFIG_MIC_NS_ESPSR_MODE,
+                         (unsigned)(in_stage + out_stage), CAPTURE_FRAMES);
+                ESP_LOGI(TAG, "NS: %s at boot (BOOT double-click toggles)",
+                         s_ns_run ? "RUNNING" : "idle");
             }
         }
     }

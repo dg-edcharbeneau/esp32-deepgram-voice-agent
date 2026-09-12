@@ -434,6 +434,66 @@ menu "Deepgram Agent Device"
         default 1 if AEC_NLP_AGGR
         default 2 if AEC_NLP_VERYAGGR
 
+    config MIC_NS_ENABLE
+        bool "Microphone noise suppression"
+        default y
+        help
+            Steady-state room noise -- fans, HVAC, traffic -- otherwise goes up
+            the wire to Deepgram at full level. The AEC above removes the
+            device's OWN speaker, which is a different problem and does nothing
+            about the room.
+
+            Uses esp-sr's standalone ns_pro. The stage runs AFTER the canceller
+            (a non-linear denoiser upstream of an adaptive filter wrecks its
+            convergence) and BELOW the uplink VAD (a denoiser upstream of the
+            VAD attenuates interrupting speech along with the room, which makes
+            barge-in harder -- that was measured, see docs/audio-path.md). It is
+            still ahead of the display tap and the network sink, so the orb and
+            Deepgram both get the cleaned audio.
+
+            WHAT IT COSTS, measured on this board:
+
+              fps          20.0 -> 14.8
+              internal RAM -7.4 kB, held whether or not it is running
+              latency      +64 ms on the uplink, from the frame-size FIFO
+              overruns     unchanged
+
+            The RAM is spent at init either way; the BOOT button's double click
+            only recovers the CPU. Independent of AEC_ENABLE.
+
+            Note the honest caveat: in the room this was tested in, the denoiser
+            did NOT improve transcription -- the no-NS baseline already scored
+            4/4. It is here for louder environments than that one.
+
+    config MIC_NS_DEFAULT_ON
+        bool "Start with noise suppression running"
+        depends on MIC_NS_ENABLE
+        default y
+        help
+            The power-on state, and only that. The BOOT button's double click
+            overrides it at runtime and the choice is remembered across reboots,
+            so this is what a device does before anyone has touched it -- and
+            after an NVS erase, which is the case that makes it worth setting.
+
+            Note what it commits to: the denoiser costs about a quarter of the
+            frame rate and did not improve transcription in the room it was
+            tested in. Turning this off gives a device that boots quiet and fast
+            and denoises only when someone asks for it.
+
+    config MIC_NS_ESPSR_MODE
+        int "esp-sr suppression mode (0-2)"
+        depends on MIC_NS_ENABLE
+        default 2
+        range 0 2
+        help
+            esp-sr grades its denoiser 0 (mild), 1 (medium), 2 (aggressive) --
+            esp_ns.h defines no mode 3, which the range here used to allow.
+
+            Only the default was ever tried. If this is revisited, start MILDER
+            rather than more aggressive: the engine that was removed did its
+            damage by eating quiet word onsets, and that failure mode is a
+            property of aggressive suppression, not of that one library.
+
     config HEAP_PROBE
         bool "Log internal-RAM floors and allocation failures"
         default n

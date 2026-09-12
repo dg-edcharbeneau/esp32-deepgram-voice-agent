@@ -55,6 +55,12 @@ static TaskHandle_t s_task;
  * a gesture and never gets displaced by one.
  */
 static volatile bool s_flush_wanted;
+/* Same shape and the same reason: the microphone denoiser's on/off state is
+ * persisted to NVS, and an NVS commit is a flash erase that stalls tasks
+ * running from flash while the cache is off. The BOOT button's callback must
+ * not do that -- it runs on iot_button's task, with the audio path one
+ * priority level away. */
+static volatile bool s_ns_save_wanted;
 /*
  * "Reopen the session when you get a moment, and only if there is one."
  *
@@ -282,6 +288,13 @@ static void session_ctl_task(void *arg)
             dg_agent_flush_history();
         }
 
+#if CONFIG_MIC_NS_ENABLE
+        if (s_ns_save_wanted) {
+            s_ns_save_wanted = false;
+            audio_io_ns_persist();
+        }
+#endif
+
         if (req == 0) {
             continue;
         }
@@ -501,6 +514,18 @@ void session_ctl_request_history_flush(void)
         xTaskNotify(s_task, 0, eNoAction);
     }
 }
+
+#if CONFIG_MIC_NS_ENABLE
+void session_ctl_request_ns_save(void)
+{
+    /* eNoAction for the reason spelled out above: the notification value is a
+     * single slot, and persistence must never be able to eat a user's press. */
+    s_ns_save_wanted = true;
+    if (s_task != NULL) {
+        xTaskNotify(s_task, 0, eNoAction);
+    }
+}
+#endif
 
 /* Same mechanism, same reason: see s_reload_wanted. */
 void session_ctl_request_reload_soon(void)

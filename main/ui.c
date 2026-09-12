@@ -777,6 +777,9 @@ static const char *s_status = "starting";
 static const char *volatile s_qr_payload;
 static lv_obj_t *qr_obj;
 static bool s_session_live;
+/* Transient caption overlay; see ui_flash_status(). */
+static const char *s_flash;
+static uint32_t s_flash_until_ms;
 
 static volatile bool s_stopped;
 
@@ -1245,6 +1248,28 @@ void ui_set_status(const char *text, bool session_live)
     s_session_live = session_live;
 }
 
+/*
+ * A caption that says something for a moment and then gets out of the way.
+ *
+ * This exists because the alternative was abused: to show a transient
+ * confirmation, callers were passing session_live = false to ui_set_status(),
+ * which does NOT mean "show my text" -- it means "the session is down". That
+ * also forces the behaviour ladder back to CONNECTING (see reported_behaviour),
+ * so a cosmetic message could make a live device look like it had dropped its
+ * session, and it stayed that way until the next agent state change happened to
+ * refresh it.
+ *
+ * So this touches neither s_status nor s_session_live: it overlays them, for a
+ * deadline, and then the label goes back to whatever the session was already
+ * saying. Same lifetime contract as ui_set_status -- the pointer is kept, not
+ * the bytes, so pass a literal.
+ */
+void ui_flash_status(const char *text, uint32_t ms)
+{
+    s_flash = (text != NULL) ? text : "";
+    s_flash_until_ms = (uint32_t)(esp_timer_get_time() / 1000) + ms;
+}
+
 void ui_set_failed(bool failed)
 {
     s_failed = failed;
@@ -1260,7 +1285,15 @@ static void update_status_label(ui_behaviour_t beh)
      * and therefore another render pass.
      */
     const char *want;
-    if (s_test_active) {
+    /*
+     * Ahead of every other case, including the display test: a confirmation the
+     * user just triggered is the most recent thing they did, and it is on a
+     * deadline, so nothing else should be able to hide it.
+     */
+    if (s_flash != NULL &&
+        (int32_t)((uint32_t)(esp_timer_get_time() / 1000) - s_flash_until_ms) < 0) {
+        want = s_flash;
+    } else if (s_test_active) {
         /* Which state is on screen -- without it the test is a slideshow of
          * unlabelled poses and you cannot tell a miss from a subtle one. */
         want = s_test_steps[s_test_step].label;
