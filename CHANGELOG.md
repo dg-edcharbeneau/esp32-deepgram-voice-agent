@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Noise suppression is on by default.** `CONFIG_MIC_NS_ENABLE` and
+  `CONFIG_MIC_NS_DEFAULT_ON` both default to `y`, so a fresh checkout builds a
+  device that denoises from boot. The BOOT button's double click still overrides
+  it at runtime and the choice persists.
+
+  The measurements that argued against this are kept rather than dropped: in the
+  room it was tested in the denoiser did not improve transcription -- the no-NS
+  baseline already scored 4/4 -- and it costs about a quarter of the frame rate
+  (20.0 -> 14.8 fps), 7.4 kB of internal RAM, and 64 ms of uplink latency. It is
+  on for louder rooms than that one, and 4/4 is the bar to beat before anyone
+  calls it a win. See [docs/audio-path.md](docs/audio-path.md).
+
 ### Added
 
 - **Microphone noise suppression, off by default and not yet measured on the

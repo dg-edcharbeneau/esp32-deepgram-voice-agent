@@ -192,23 +192,47 @@ in [docs/notes/echo-cancellation.md](notes/echo-cancellation.md).
 
 ## Noise suppression
 
-**Off by default, and not yet measured on the device.** Two engines are built
-behind `CONFIG_MIC_NS_ENABLE` so they can be compared on the same board in the
-same room; the loser gets deleted.
+**On by default**, using esp-sr's standalone `ns_pro`. `CONFIG_MIC_NS_ENABLE`
+compiles it in; `CONFIG_MIC_NS_DEFAULT_ON` is the power-on state, and a double
+click on the BOOT button overrides that at runtime.
 
 The canceller above removes the device's *own speaker*. It does nothing about the
-room — fans, HVAC, traffic — which until now went up the wire to Deepgram at full
-level. A denoiser is a different stage solving a different problem, and it sits
-**after** the AEC and **before** the tap, the uplink VAD and the sink:
+room — fans, HVAC, traffic — which otherwise goes up the wire to Deepgram at full
+level. A denoiser is a different stage solving a different problem.
 
-- after the AEC, because a non-linear denoiser upstream of an adaptive filter
+Order in `capture_task`, and every position in it was argued for:
+
+```
+downmix → AEC → uplink VAD verdict → NS → level log → session gate → tap → sink
+```
+
+- **After the AEC**, because a non-linear denoiser upstream of an adaptive filter
   wrecks its convergence — the filter has to see the same raw microphone the
-  reference lane is echoing into;
-- before the tap, so the orb draws the room the way Deepgram hears it;
-- before the VAD, so `CONFIG_AEC_UPLINK_VAD_PEAK` is measured against a floor
-  that has had the room taken out of it.
+  reference lane is echoing into.
+- **Below the uplink VAD.** The first version had it above, reasoning that a
+  cleaner floor would make the threshold easier to set. That was backwards and
+  it was measured; see below.
+- **Ahead of the tap and the sink**, so the orb draws the room the way Deepgram
+  hears it.
 
-### One engine, and a removed one
+### What it costs
+
+| | |
+|---|---|
+| frame rate | 20.0 → **14.8 fps** |
+| internal RAM | **−7.4 kB**, held whether or not it is running |
+| uplink latency | **+64 ms**, from the frame-size FIFO |
+| RX overruns | unchanged |
+
+The RAM is spent at init either way, so the button only recovers the CPU.
+
+**The honest caveat, kept deliberately:** in the room this was tested in the
+denoiser did *not* improve transcription — the no-NS baseline already scored 4/4.
+It is here for louder environments than that one, and the measurements that say
+so are below rather than quietly dropped.
+
+
+### Why esp-sr, and why not SpeexDSP
 
 `CONFIG_MIC_NS_ENABLE` uses esp-sr's standalone `ns_pro` — already linked, no
 new dependency. Its one awkwardness is frame size: `ns_pro_create` takes 10 ms
@@ -292,7 +316,7 @@ The esp-sr internal cost (7,438 B measured) matches its predicted staging
 (7,104 B) almost exactly, which is the corroboration that the FIFOs are what it
 is paying for.
 
-### The acoustic result — neither engine helped
+### The acoustic result
 
 Measured 2026-09-11: one speaker, four fixed lines, same room and noise for all
 three arms, plus an attempt to talk over the agent each time.
@@ -312,7 +336,7 @@ is the only condition under which NS is likely to pay.
 ERLE was unaffected, as predicted — NS sits downstream of the canceller.
 `L=7438 → out=63` with the agent speaking, comparable across arms.
 
-### NS goes below the uplink VAD
+### Why NS goes below the uplink VAD
 
 The first version placed the denoiser **above** the VAD, justified as "the
 threshold is measured against a floor that has had the room taken out of it."
@@ -336,7 +360,7 @@ sink, so the orb and Deepgram both get cleaned audio.
 Order in `capture_task` is now: downmix → AEC → uplink VAD verdict → **NS** →
 level log → session gate → tap → sink.
 
-### Correction: esp-sr adds 64 ms, not 10 ms
+### The 64 ms, and where it comes from
 
 An earlier version of this document claimed the esp-sr FIFO cost "up to 10 ms"
 of added latency. That was wrong: 10 ms is only the *input* residue. The output
@@ -351,13 +375,22 @@ moment and should not be compared within a line on that arm.
 
 ### What is still open
 
-- A genuinely noisy room. Everything above says NS does not pay at this noise
-  level; it does not say it never pays.
-- `CONFIG_MIC_NS_ESPSR_MODE` was only tried at its default (2, aggressive).
-  Start milder if this is revisited -- onset damage is a property of aggressive
-  suppression, not of the library that was removed.
-- Long-run heap behaviour. All arms were sampled from a boot-fresh heap; a board
-  twenty minutes into use fragments further.
+The feature ships; these are the threads left, in the order I would pull them.
+
+- **A genuinely noisy room.** Everything measured here says the denoiser does not
+  pay at the noise level tested. It does not say it never pays, and that is the
+  whole reason it is on the board.
+- **`CONFIG_MIC_NS_ESPSR_MODE` has only been run at its default, 2 (aggressive).**
+  Start milder. Eating quiet word onsets is what disqualified SpeexDSP, it is a
+  property of aggressive suppression rather than of that one library, and one
+  esp-sr run hinted at it ("A quick brown fox **jumped**"). A single utterance,
+  so not conclusive — which is exactly why it is worth a deliberate run.
+- **`CONFIG_AEC_UPLINK_VAD_PEAK` has not been re-tuned for a denoised signal.**
+  Moving NS below the VAD restored barge-in to baseline, so nothing is broken,
+  but the threshold is still the one chosen for the undenoised floor.
+- **Long-run heap behaviour.** Every capture started from a boot-fresh heap. A
+  board twenty minutes into use fragments further — `intmax` has been recorded
+  dipping to 6,144 over ~22 minutes against the 25,600 measured here.
 
 ### Bench notes worth keeping
 

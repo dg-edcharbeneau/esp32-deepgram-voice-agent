@@ -436,39 +436,49 @@ menu "Deepgram Agent Device"
 
     config MIC_NS_ENABLE
         bool "Microphone noise suppression"
-        default n
+        default y
         help
-            Steady-state room noise -- fans, HVAC, traffic -- currently goes up
-            the wire to Deepgram at full level. There is no noise suppression on
-            the capture path at all; the AEC above removes the device's OWN
-            speaker, which is a different problem.
+            Steady-state room noise -- fans, HVAC, traffic -- otherwise goes up
+            the wire to Deepgram at full level. The AEC above removes the
+            device's OWN speaker, which is a different problem and does nothing
+            about the room.
 
-            This adds a denoiser AFTER the canceller and before the uplink VAD,
-            so the adaptive filter still sees raw microphone audio (feeding it
-            denoised audio destabilises convergence) while the VAD, the spectrum
-            orb and Deepgram all see the cleaned signal.
+            Uses esp-sr's standalone ns_pro. The stage runs AFTER the canceller
+            (a non-linear denoiser upstream of an adaptive filter wrecks its
+            convergence) and BELOW the uplink VAD (a denoiser upstream of the
+            VAD attenuates interrupting speech along with the room, which makes
+            barge-in harder -- that was measured, see docs/audio-path.md). It is
+            still ahead of the display tap and the network sink, so the orb and
+            Deepgram both get the cleaned audio.
 
-            DEFAULT OFF, and deliberately so. The AEC above cost 14.7 kB of
-            internal RAM and 6.5 fps, and that was only established by measuring
-            it on the board. Nothing here is known until the same is done for
-            this. Turn it on, run the bench in docs/audio-path.md, and only then
-            argue about the default.
+            WHAT IT COSTS, measured on this board:
 
-            Note this is independent of AEC_ENABLE: benching it with the
-            canceller OFF is the cheaper way to isolate the denoiser's own cost.
+              fps          20.0 -> 14.8
+              internal RAM -7.4 kB, held whether or not it is running
+              latency      +64 ms on the uplink, from the frame-size FIFO
+              overruns     unchanged
+
+            The RAM is spent at init either way; the BOOT button's double click
+            only recovers the CPU. Independent of AEC_ENABLE.
+
+            Note the honest caveat: in the room this was tested in, the denoiser
+            did NOT improve transcription -- the no-NS baseline already scored
+            4/4. It is here for louder environments than that one.
 
     config MIC_NS_DEFAULT_ON
         bool "Start with noise suppression running"
         depends on MIC_NS_ENABLE
-        default n
+        default y
         help
-            The power-on state, and only that -- the BOOT button's double click
+            The power-on state, and only that. The BOOT button's double click
             overrides it at runtime and the choice is remembered across reboots,
-            so this is just what a device does before anyone has touched it.
+            so this is what a device does before anyone has touched it -- and
+            after an NVS erase, which is the case that makes it worth setting.
 
-            Default OFF, because the measurements say the denoiser did not
-            improve transcription at the noise level tested and costs about a
-            quarter of the frame rate. See docs/audio-path.md.
+            Note what it commits to: the denoiser costs about a quarter of the
+            frame rate and did not improve transcription in the room it was
+            tested in. Turning this off gives a device that boots quiet and fast
+            and denoises only when someone asks for it.
 
     config MIC_NS_ESPSR_MODE
         int "esp-sr suppression mode (0-2)"

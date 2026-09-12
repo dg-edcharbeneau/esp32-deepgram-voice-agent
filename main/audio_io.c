@@ -251,10 +251,11 @@ static int s_aec_chunk;
  * the device could not open a session at all, TLS write failing on every retry.
  * It is gone from the tree; this note is here so it is not re-proposed.
  *
- * NEITHER ENGINE IMPROVED TRANSCRIPTION. At this room's noise level Deepgram
- * already handles the audio, so the denoiser pays frame rate for nothing. That
- * is a statement about THIS noise level -- a genuinely loud room is untested,
- * and is the only condition where this is likely to be worth switching on.
+ * NEITHER ENGINE IMPROVED TRANSCRIPTION AT THIS ROOM'S NOISE LEVEL. Deepgram
+ * already handled the audio unaided, so in that room the denoiser paid frame
+ * rate for nothing. The feature ships anyway, for louder rooms than that one --
+ * but the number above is the one to beat before anyone calls it a win, and it
+ * is kept here rather than quietly dropped for that reason.
  *
  * NS ABOVE THE VAD WAS A MISTAKE, AND HAS BEEN FIXED. The VAD compares the peak
  * it is given against CONFIG_AEC_UPLINK_VAD_PEAK, and a denoiser upstream of it
