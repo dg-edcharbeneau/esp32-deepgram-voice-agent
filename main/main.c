@@ -1242,6 +1242,15 @@ void app_main(void)
             wait_ms = TELEMETRY_SWITCH_MS;
         }
 
+        /*
+         * The 50 ms sampler's floors, which this 1 s line cannot see for itself.
+         * -1 for "never sampled" -- CONFIG_HEAP_PROBE off, or the sampler not up
+         * yet -- following the same convention the battery fields below use, so
+         * anything parsing this line can tell no-reading from a real zero.
+         */
+        uint32_t lo_int = UINT32_MAX, lo_dma = UINT32_MAX;
+        heap_probe_get_minima(&lo_int, NULL, &lo_dma);
+
         ESP_LOGI(TAG,
                  "TLM up=%.1f face=%s%s beh=%s src=%s sess=%s "
                  "frames=%" PRIu32 " fps=%.1f draw=%.1f/%.1f "
@@ -1250,6 +1259,7 @@ void app_main(void)
                  " played=%" PRIu32 " drop=%" PRIu32 " updrop=%" PRIu32
                  " txdrop=%" PRIu32 " vadsup=%" PRIu32 " rxovf=%" PRIu32
                  " heap=%" PRIu32 " int=%u intmax=%u dma=%u dmamax=%u"
+                 " lowint=%d lowdma=%d"
                  " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
                  " rssi=%d bars=%d ch=%d",
@@ -1289,6 +1299,8 @@ void app_main(void)
                   */
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+                 (lo_int == UINT32_MAX) ? -1 : (int)lo_int,
+                 (lo_dma == UINT32_MAX) ? -1 : (int)lo_dma,
                  (unsigned)ih.total_free_bytes, (unsigned)ih.free_blocks,
                  (unsigned)ih.allocated_blocks,
                  /* -1, not 0: "no reading" and "flat" have to be told apart by

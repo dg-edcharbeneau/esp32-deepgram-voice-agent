@@ -100,6 +100,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single click until the double-click window closes, and the single click is the
   session toggle -- the escape hatch. Builds without the denoiser keep it sharp.
 
+- **`lowint` and `lowdma` in the telemetry line.** `heap_probe`'s 50 ms sampler
+  has tracked three internal-RAM low-water marks since it was written and
+  nothing ever read them back -- every long run this firmware has done recorded
+  its own worst case and then threw it away. `heap_probe_get_minima()` exports
+  them and the TLM line now carries the two that matter, `-1` when the probe is
+  compiled out so "never sampled" cannot be mistaken for a floor of zero.
+
+  It earned itself immediately. The 1 Hz TLM line has been over-reporting
+  headroom by a wide margin: on one 60 s boot `dmamax` read 19,456 live while
+  the true floor was 11,776, and on the next it was **6,656** -- roughly a
+  quarter of the 25,600 previously quoted from a 1 Hz sample. The margin against
+  the 1,630 B `INTERNAL|DMA` allocation that drops sessions is therefore about
+  4x, not 15x. Nothing is broken, but the number to watch is smaller than the
+  one on record.
+
 - **`rxovf` in the telemetry line.** `audio_codecs_rx_overruns()` has counted
   silently dropped I2S RX frames since the DMA sizing work and nothing ever read
   it. It is now on the TLM line, which is how the bench above could show the

@@ -394,6 +394,13 @@ The feature ships; these are the threads left, in the order I would pull them.
 
 ### Bench notes worth keeping
 
+- **Read `lowdma=`, not `dmamax=`.** The TLM line samples at 1 Hz and cannot see
+  a collapse between samples; `heap_probe`'s 50 ms sampler can, and `lowint=` /
+  `lowdma=` are its floors since boot. Measured on two consecutive 60 s and 20 s
+  boots: `dmamax` read 19,456 and 20,480 live while the floors were **11,776**
+  and **6,656**. Quoting the live figure overstates headroom by 2-3x. `-1` means
+  `CONFIG_HEAP_PROBE` is off, not a floor of zero.
+
 - `CONFIG_AUDIO_CAPTURE_ALWAYS=y` plus `CONFIG_SESSION_IDLE_TIMEOUT_S=0` is the
   harness: the capture task never parks, so the NS stage runs on every block with
   no voice needed, and the session holds open so the heap carries real TLS
