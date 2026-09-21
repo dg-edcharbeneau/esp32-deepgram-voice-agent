@@ -327,14 +327,32 @@ three arms, plus an attempt to talk over the agent each time.
 | Speex | dropped word **onsets** — "A quick brown fox" for "The quick brown fox", "Seashells seashells" for "She sells seashells" — and lost one utterance entirely |
 | esp-sr | 3/3 correct within the capture window |
 
-**Neither denoiser improved transcription, and Speex made it worse.** At this
-room's noise level Deepgram already handles the audio unaided, so the denoiser
-spends frame rate and buys nothing. Note the scope: this is a statement about
-*this* noise level. A genuinely loud environment has not been tested, and that
-is the only condition under which NS is likely to pay.
+**Neither denoiser improved transcription in THIS room, and Speex made it
+worse.** At this noise level Deepgram already handles the audio unaided, so the
+denoiser spent frame rate and bought nothing. The scope was always the caveat:
+it is a statement about a quiet room, and the loud room is the condition NS
+exists for. That one has since been tried — see the field report below.
 
 ERLE was unaffected, as predicted — NS sits downstream of the canceller.
 `L=7438 → out=63` with the agent speaking, comparable across arms.
+
+### Field report: the loud room, 2026-09-19
+
+**Uninstrumented, and flagged as such.** Both arms — `CONFIG_MIC_NS_ENABLE` off
+and on at mode 2 — were run by hand in one genuinely loud room, in one sitting,
+by the person holding the board. **With the denoiser on the device worked well**;
+that is the first evidence in NS's favour this project has, and it is evidence
+for exactly the condition the feature was switched on for.
+
+What it is not: a capture. No serial log was taken, so there are no per-arm
+transcripts, no `fps`, no `vadsup`, no `rxovf`, no `lowdma`, and no `mic peak`
+readings to confirm the two arms met the same ambient level. It is one
+experienced pair of ears comparing two builds back to back, which is worth more
+than nothing and less than the table above it.
+
+So the quiet-room result stands as measured, this stands as reported, and the
+two should not be read off the same axis. The instrumented version of this run
+is still the open item; what has changed is the expected sign of its result.
 
 ### Why NS goes below the uplink VAD
 
@@ -377,9 +395,12 @@ moment and should not be compared within a line on that arm.
 
 The feature ships; these are the threads left, in the order I would pull them.
 
-- **A genuinely noisy room.** Everything measured here says the denoiser does not
-  pay at the noise level tested. It does not say it never pays, and that is the
-  whole reason it is on the board.
+- **A genuinely noisy room, instrumented.** Tried by hand on 2026-09-19 and the
+  denoiser helped (see the field report above), which is the first result that
+  favours it — but no capture was taken, so there are no per-arm numbers and no
+  proof the two arms saw the same ambient. Re-running it with a log is now about
+  confirming a positive rather than hunting for one, which makes it cheaper to
+  justify and no less worth doing.
 - **`CONFIG_MIC_NS_ESPSR_MODE` has only been run at its default, 2 (aggressive).**
   Start milder. Eating quiet word onsets is what disqualified SpeexDSP, it is a
   property of aggressive suppression rather than of that one library, and one

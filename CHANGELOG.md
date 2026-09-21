@@ -100,6 +100,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single click until the double-click window closes, and the single click is the
   session toggle -- the escape hatch. Builds without the denoiser keep it sharp.
 
+- **Loud-room field report for the denoiser.** Both arms (NS off, and on at
+  mode 2) run by hand in one genuinely loud room on 2026-09-19: with the
+  denoiser on the device worked well. That is the first evidence in the
+  feature's favour, and it is evidence for the exact condition it was switched
+  on for -- every prior measurement said it did not pay.
+
+  Recorded as a field report, not a measurement. No serial capture was taken, so
+  there are no per-arm transcripts, no fps/vadsup/rxovf/lowdma, and no mic-peak
+  check that both arms saw the same ambient. The quiet-room table stands as
+  measured and this stands as reported; they are not on the same axis, and the
+  instrumented run stays an open item in docs/audio-path.md.
+
 - **`lowint` and `lowdma` in the telemetry line.** `heap_probe`'s 50 ms sampler
   has tracked three internal-RAM low-water marks since it was written and
   nothing ever read them back -- every long run this firmware has done recorded

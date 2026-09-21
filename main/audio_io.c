@@ -254,8 +254,13 @@ static int s_aec_chunk;
  * NEITHER ENGINE IMPROVED TRANSCRIPTION AT THIS ROOM'S NOISE LEVEL. Deepgram
  * already handled the audio unaided, so in that room the denoiser paid frame
  * rate for nothing. The feature ships anyway, for louder rooms than that one --
- * but the number above is the one to beat before anyone calls it a win, and it
- * is kept here rather than quietly dropped for that reason.
+ * and the 4/4 above is the number to beat before anyone calls it a win.
+ *
+ * A LOUD ROOM HAS SINCE BEEN TRIED BY HAND AND THE DENOISER HELPED (2026-09-19,
+ * both arms, one sitting). That is the first result in its favour -- but it was
+ * uninstrumented: no log, so no per-arm transcripts and no confirmation the two
+ * arms met the same ambient. Reported, not measured. docs/audio-path.md carries
+ * the field report and keeps the instrumented run as an open item.
  *
  * NS ABOVE THE VAD WAS A MISTAKE, AND HAS BEEN FIXED. The VAD compares the peak
  * it is given against CONFIG_AEC_UPLINK_VAD_PEAK, and a denoiser upstream of it
