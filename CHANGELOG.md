@@ -112,6 +112,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measured and this stands as reported; they are not on the same axis, and the
   instrumented run stays an open item in docs/audio-path.md.
 
+- **35-minute heap run: no drift, and the risk window is startup.** 2,093
+  samples, 2,091 with a live session, NS at mode 2, zero crashes, zero reboots.
+  The DMA floor reached 8,704 B at t=4.2 s and **did not move again for the
+  remaining 35 minutes**; `dmamax` stayed pinned at 19,456, `rxovf` never left
+  120, fps held 10.4-10.6. The collapse happens inside the first two seconds as
+  Wi-Fi, TLS and the display come up -- so the exposure is startup contention,
+  not a slow leak, which is the opposite of what the open item assumed.
+
+  **Nobody spoke during it.** turns=0, played=0, rx=0: the device streamed 67 MB
+  of microphone audio upstream and was otherwise idle. This establishes that the
+  uplink path does not leak or fragment; it says nothing about the churn a
+  conversation brings -- TTS buffers, history writes, reconnects -- which is
+  where the 6,144 B previously recorded over ~22 minutes most likely came from.
+  The open item is narrowed to "under real conversation", not closed.
+
 - **`lowint` and `lowdma` in the telemetry line.** `heap_probe`'s 50 ms sampler
   has tracked three internal-RAM low-water marks since it was written and
   nothing ever read them back -- every long run this firmware has done recorded

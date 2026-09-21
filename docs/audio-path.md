@@ -409,9 +409,47 @@ The feature ships; these are the threads left, in the order I would pull them.
 - **`CONFIG_AEC_UPLINK_VAD_PEAK` has not been re-tuned for a denoised signal.**
   Moving NS below the VAD restored barge-in to baseline, so nothing is broken,
   but the threshold is still the one chosen for the undenoised floor.
-- **Long-run heap behaviour.** Every capture started from a boot-fresh heap. A
-  board twenty minutes into use fragments further — `intmax` has been recorded
-  dipping to 6,144 over ~22 minutes against the 25,600 measured here.
+- **Long-run heap behaviour, under real conversation.** A 35-minute run is
+  recorded below and found no drift at all — but nobody spoke during it, so the
+  allocation churn that actually fragments this heap never happened. That is the
+  part still untested.
+
+### Long run, 2026-09-21: the heap does not drift, but nobody spoke
+
+35 minutes (2,099 s), 2,093 telemetry samples, 2,091 with a live session, NS
+running at mode 2, `CONFIG_HEAP_PROBE=y`, idle timeout pinned off.
+**Zero crashes, zero reboots.**
+
+| | 1 Hz observed min | 50 ms true floor |
+|---|---|---|
+| internal free | 39,551 | **22,163** |
+| largest DMA block | 19,456 | **8,704** |
+
+The finding is *when* that floor was reached: **`lowdma` hit 8,704 at t = 4.2 s
+and did not move again for the remaining 35 minutes.** `dmamax` sat pinned at
+19,456 the whole time, `rxovf` never left 120, and fps held 10.4–10.6 from the
+five-minute mark onward. The `heap_probe` boot lines show the whole collapse
+happening inside the first two seconds, as Wi-Fi, TLS and the display come up.
+
+So the risk window is **startup, not longevity** — at least for this workload.
+That is the opposite of what the open item assumed, and it is worth knowing
+before anyone budgets for a slow leak that does not appear to exist.
+
+**The caveat is the whole caveat, so it goes in bold: nobody spoke.**
+`turns=0`, `played=0`, `rx=0`, no playback blocks. The device streamed 67 MB of
+microphone audio upstream and was otherwise idle. What this run establishes is
+that the *uplink path* — capture → AEC → NS → WebSocket — neither leaks nor
+fragments over 35 minutes. What it does not touch is the churn a conversation
+brings: TTS playback buffers, history writes to flash, face changes, reconnects.
+The 6,144 B previously recorded over ~22 minutes almost certainly came from that
+kind of use, and nothing here contradicts it.
+
+> One number not to carry forward yet: fps averaged **10.56** here against the
+> **14.80** in the table above. Both are NS-on, but the runs differ in length,
+> build and whether the heap probe was sampling, so they are not comparable and
+> the discrepancy is unexplained rather than a regression. The 14.80 is what the
+> cost table still quotes; re-measure both arms in one sitting before changing
+> it.
 
 ### Bench notes worth keeping
 
