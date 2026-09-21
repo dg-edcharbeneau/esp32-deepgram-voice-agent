@@ -219,7 +219,7 @@ downmix → AEC → uplink VAD verdict → NS → level log → session gate →
 
 | | |
 |---|---|
-| frame rate | 20.0 → **14.8 fps** |
+| frame rate | **−16% to −26%** (measured twice, see below) |
 | internal RAM | **−7.4 kB**, held whether or not it is running |
 | uplink latency | **+64 ms**, from the frame-size FIFO |
 | RX overruns | unchanged |
@@ -444,12 +444,70 @@ brings: TTS playback buffers, history writes to flash, face changes, reconnects.
 The 6,144 B previously recorded over ~22 minutes almost certainly came from that
 kind of use, and nothing here contradicts it.
 
-> One number not to carry forward yet: fps averaged **10.56** here against the
-> **14.80** in the table above. Both are NS-on, but the runs differ in length,
-> build and whether the heap probe was sampling, so they are not comparable and
-> the discrepancy is unexplained rather than a regression. The 14.80 is what the
-> cost table still quotes; re-measure both arms in one sitting before changing
-> it.
+> **This run's fps is an outlier and should not be quoted.** It averaged 10.56,
+> and three later replicates of a byte-identical configuration read 15.00, 14.96
+> and 14.81 — a spread of 0.19 fps. So the 10.56 is ~30% below where that build
+> actually sits, and it is not normal variance. See the fps section below; note
+> also that this run is the only one in the whole exercise that logged transport
+> congestion (`txdrop=46`, `updrop=73`, against zero in every replicate), and
+> that the board was power-cycled between it and the replicates. The heap
+> findings above stand, but they were taken on an atypically slow run.
+
+### What the denoiser actually costs in frame rate
+
+Measured 2026-09-21, five arms in one sitting, 300 s each, ~279 steady-state
+samples per arm, same face, session pinned open. Three of them are replicates of
+one configuration, which is what makes the spread readable.
+
+| arm | fps mean | min | draw avg | amp |
+|---|---|---|---|---|
+| NS off, probe off | **17.74** | 16.1 | 17.5 ms | 0.015 |
+| NS on, probe off | **14.87** | 13.6 | 21.2 ms | 0.005 |
+| NS on, probe on | 15.00 | 13.5 | 21.3 ms | 0.005 |
+| NS on, probe on (replicate) | 14.96 | 13.6 | 21.4 ms | 0.005 |
+| NS on, probe on (replicate) | 14.81 | 13.5 | 21.4 ms | 0.005 |
+
+**Here the denoiser costs 2.87 fps, or −16.2%. The 2026-09-07 table above says
+−5.20 fps, or −26%, and both were measured in one sitting** — so this is two
+honest measurements of the same quantity disagreeing, not an artefact of
+comparing across runs. (An earlier draft of this section claimed the older
+numbers came from separate sittings. They did not; that was wrong.)
+
+What reproduces and what does not is the interesting part:
+
+| | 2026-09-07 | 2026-09-21 |
+|---|---|---|
+| NS on | 14.80 | 14.87 (and 15.00 / 14.96 / 14.81) |
+| NS off | **20.00** | **17.74** |
+
+**The NS-on figure is stable to within 0.2 fps across two weeks. The baseline
+moved by 2.26.** Two known differences, neither yet shown to be the cause: the
+September bench set `CONFIG_AUDIO_CAPTURE_ALWAYS=y` and this one did not, and
+there are two weeks of code between them (the VAD reorder, `rxovf`,
+`lowint`/`lowdma`, the review fixes).
+
+So treat the denoiser's frame-rate cost as **somewhere between −16% and −26%**,
+and do not quote either endpoint as settled. The `esp-ram-board` and stack
+skills both make the same point in different words: a figure is only as good as
+the sitting it came from.
+
+Note the confound runs *against* the finding, as it did in the acoustic work:
+`amp` falls 0.015 → 0.005 because the denoiser quiets what the orb draws, which
+should make drawing cheaper. Draw time rose anyway, 17.5 → 21.2 ms. The CPU cost
+is real and if anything understated here.
+
+**`CONFIG_HEAP_PROBE` is free.** 14.87 → 15.00, a +0.9% difference sitting inside
+a ±0.6% replicate spread. The 50 ms sampler at priority 1 on core 0 does not
+measurably cost frame rate, which was a live hypothesis and is now dead.
+
+**fps is reproducible to ±0.6% within a sitting** (15.00 / 14.96 / 14.81), so
+these numbers are solid — as long as nothing is compared across sittings. That
+makes the 10.56 from the 35-minute run genuinely anomalous rather than noisy,
+and it remains unexplained. The two things that distinguish it: it is the only
+run that logged transport congestion, and the board was power-cycled between it
+and the replicates. If a ~30% frame-rate deficit that survives a reset but
+clears on a power cycle is real, it matters more than the denoiser does — worth
+watching for, not yet worth a theory.
 
 ### Bench notes worth keeping
 

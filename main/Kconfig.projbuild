@@ -453,7 +453,8 @@ menu "Deepgram Agent Device"
 
             WHAT IT COSTS, measured on this board:
 
-              fps          20.0 -> 14.8
+              fps          -16% to -26% (measured twice, two sittings,
+                           and they disagree -- docs/audio-path.md)
               internal RAM -7.4 kB, held whether or not it is running
               latency      +64 ms on the uplink, from the frame-size FIFO
               overruns     unchanged

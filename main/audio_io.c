@@ -241,6 +241,14 @@ static int s_aec_chunk;
  *                      fps     int mean   intmax    transcription
  *   NS off           20.00      60,331    26,624    4/4 lines correct
  *   esp-sr           14.80      52,894    21,504    3/3 in window
+ *
+ * THE fps COLUMN WAS RE-MEASURED 2026-09-21 AND DID NOT AGREE. Five arms in one
+ * sitting, three of them replicates: NS on read 14.87/15.00/14.96/14.81 -- so
+ * the 14.80 above is solid -- but NS off read 17.74, not 20.00. Same-sitting
+ * deltas of -26% and -16% for the same quantity. Treat the cost as a range
+ * until that is resolved; docs/audio-path.md has the table and the two known
+ * config differences. CONFIG_HEAP_PROBE was a suspect and is not the cause:
+ * it costs +0.9%, inside the replicate spread.
  *   SpeexDSP          8.63      60,903    29,696    dropped word onsets
  *
  * SPEEXDSP WAS EVALUATED AND REMOVED. It cost 57% of the frame rate -- the

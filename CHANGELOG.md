@@ -112,6 +112,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measured and this stands as reported; they are not on the same axis, and the
   instrumented run stays an open item in docs/audio-path.md.
 
+- **Re-measured the denoiser's frame-rate cost, and the two measurements
+  disagree.** Five arms in one sitting, 300 s each, three of them replicates:
+  NS off 17.74 fps, NS on 14.87, and replicates at 15.00 / 14.96 / 14.81. So
+  fps is reproducible to +/-0.6% within a sitting -- but that gives a cost of
+  -16.2%, where the 2026-09-07 bench (also one sitting) gave -26%.
+
+  The NS-on figure is stable across two weeks (14.80 then, 14.81-15.00 now).
+  The BASELINE is what moved: 20.00 -> 17.74. Two known differences, neither
+  shown to be the cause: the September bench set CONFIG_AUDIO_CAPTURE_ALWAYS=y
+  and this one did not, and there are two weeks of code between them. The cost
+  is therefore documented as a RANGE, -16% to -26%, in docs/audio-path.md, the
+  Kconfig help and audio_io.c, rather than either endpoint being asserted.
+
+  CONFIG_HEAP_PROBE was the leading suspect and is exonerated: it costs +0.9%,
+  inside the replicate spread. The 50 ms sampler does not measurably cost frame
+  rate.
+
+  This also retires the 10.56 fps from the 35-minute run as an OUTLIER, not a
+  regression -- it sits ~30% below three replicates of a byte-identical build.
+  It is the only run in the exercise that logged transport congestion
+  (txdrop=46, updrop=73 against zero everywhere else), and the board was
+  power-cycled between it and the replicates. A ~30% frame-rate deficit that
+  survives a reset but clears on a power cycle would matter more than the
+  denoiser if it is real; recorded as something to watch for, not a theory.
+
 - **35-minute heap run: no drift, and the risk window is startup.** 2,093
   samples, 2,091 with a live session, NS at mode 2, zero crashes, zero reboots.
   The DMA floor reached 8,704 B at t=4.2 s and **did not move again for the
