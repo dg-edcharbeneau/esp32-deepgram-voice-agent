@@ -129,10 +129,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at amp ~0.028 against 0.013, and higher amplitude is more pixel work for the
   orb, so it should have been slower, yet it read 20.00.
 
-  Working position: the denoiser costs about -15%, and the -26% derives from a
-  baseline that has not reproduced. The cost stays documented as a RANGE in
-  docs/audio-path.md, the Kconfig help and audio_io.c until someone reproduces
-  20.00 or finds what changed.
+  The 2x2 was completed 2026-09-22 and the flag is inert in BOTH rows: NS off
+  17.37 vs 17.24, NS on 14.91 vs 14.89. So the denoiser costs about -14%, and
+  the -26% rests on a baseline that has now failed to reproduce three times
+  while the NS-on figure reproduced seven times out of seven (14.80-15.00).
+  docs/audio-path.md, the Kconfig help and audio_io.c now quote -14%.
+
+  Incidental finding worth keeping: WITH NS ON, FRAME RATE IS INSENSITIVE TO
+  ROOM NOISE. The fourth arm ran at 38% higher raw ambient than the other three,
+  and post-NS amp did not follow (0.0052 against 0.0071), so the orb's pixel
+  work and therefore fps stayed flat. That is also why that arm was kept despite
+  failing the +/-20% raw-ambient rule -- for fps the driver is the post-NS level,
+  and the denoiser decouples it from the room.
 
   CONFIG_HEAP_PROBE was the leading suspect and is exonerated: it costs +0.9%,
   inside the replicate spread. The 50 ms sampler does not measurably cost frame

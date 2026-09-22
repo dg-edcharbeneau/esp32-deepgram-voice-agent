@@ -219,7 +219,7 @@ downmix → AEC → uplink VAD verdict → NS → level log → session gate →
 
 | | |
 |---|---|
-| frame rate | **−16% to −26%** (measured twice, see below) |
+| frame rate | **about −14%** (17.4 → 14.9; see below) |
 | internal RAM | **−7.4 kB**, held whether or not it is running |
 | uplink latency | **+64 ms**, from the frame-size FIFO |
 | RX overruns | unchanged |
@@ -484,16 +484,33 @@ What reproduces and what does not is the interesting part:
 moved by 2.26.**
 
 `CONFIG_AUDIO_CAPTURE_ALWAYS` was the leading suspect — the September bench set
-it and the later one did not — and **it is ruled out.** Measured 2026-09-22,
-NS off, everything else held, quiet room, 279 samples each:
+it and the later one did not — and **it is ruled out in both rows of a full
+2×2.** Measured 2026-09-22, ~280 samples per arm:
 
-| | fps | draw | amp |
+| | `CAPTURE_ALWAYS=n` | `CAPTURE_ALWAYS=y` | flag effect |
 |---|---|---|---|
-| `CAPTURE_ALWAYS=n` | 17.37 | 17.7 ms | 0.013 |
-| `CAPTURE_ALWAYS=y` | 17.24 | 17.6 ms | 0.013 |
+| **NS off** | 17.37 | 17.24 | −0.13 |
+| **NS on** | 14.91 | 14.89 | −0.02 |
 
-0.13 fps apart, inside the ±0.6% replicate spread. NS on in the same sitting
-read 14.91, consistent with the 14.81–15.00 from the day before.
+Both differences sit inside the ±0.6% replicate spread. The flag does nothing.
+NS on reproduces the 14.81–15.00 measured the day before, and 14.80 measured
+two weeks before that.
+
+> **A note on the fourth arm, because it fails a rule stated elsewhere in this
+> document.** Its raw ambient (`mic peak L` mean 46.7) ran 38% above the other
+> three arms (32.6 / 34.6 / 34.1), which the ±20% rule in the bench notes would
+> reject. It is kept, on the mechanism rather than on convenience: what drives
+> the orb's pixel work — and therefore fps — is the **post-NS** level the
+> visualiser receives, and that was 0.0052 against arm 3's 0.0071. Arm 4 drew
+> *less*, so if ambient had biased it, it would have biased it **faster**, and it
+> read 0.02 fps slower. The ±20% rule is about raw level because raw level is
+> what the transcription and suppression-depth comparisons turn on; for fps the
+> denoiser decouples the two.
+>
+> That decoupling is itself worth recording: **with NS on, frame rate is
+> insensitive to room noise.** Raw ambient rose 38% and post-NS `amp` did not
+> follow, so the display cost stayed flat. Nobody was looking for that, and it is
+> a genuine second-order benefit of the denoiser.
 
 So the shift is not a bench flag, and that makes it harder to explain rather
 than easier: **none of the code that changed between the two sittings touches
@@ -507,9 +524,12 @@ the orb, so that run should have been slower, and it read 20.00. That inversion
 is unexplained, and three tightly-clustered recent replicates are better
 evidence than one older reading.
 
-Working position: **the denoiser costs about −15%, and the −26% derives from a
-baseline that has not reproduced.** The range stays documented until someone
-either reproduces 20.00 or finds what changed.
+Working position: **the denoiser costs about −14%**, from four arms across two
+days (17.37 → 14.91 and 17.24 → 14.89, with 17.74 → 14.87 the day before). The
+**−26% derives from a baseline that has now failed to reproduce three times**
+while the NS-on figure reproduced every time. The range stays in the older
+tables until someone reproduces 20.00 or finds what changed, but −14% is the
+number to plan with.
 
 Note the confound runs *against* the finding, as it did in the acoustic work:
 `amp` falls 0.015 → 0.005 because the denoiser quiets what the orb draws, which
