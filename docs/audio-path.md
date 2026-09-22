@@ -481,15 +481,35 @@ What reproduces and what does not is the interesting part:
 | NS off | **20.00** | **17.74** |
 
 **The NS-on figure is stable to within 0.2 fps across two weeks. The baseline
-moved by 2.26.** Two known differences, neither yet shown to be the cause: the
-September bench set `CONFIG_AUDIO_CAPTURE_ALWAYS=y` and this one did not, and
-there are two weeks of code between them (the VAD reorder, `rxovf`,
-`lowint`/`lowdma`, the review fixes).
+moved by 2.26.**
 
-So treat the denoiser's frame-rate cost as **somewhere between −16% and −26%**,
-and do not quote either endpoint as settled. The `esp-ram-board` and stack
-skills both make the same point in different words: a figure is only as good as
-the sitting it came from.
+`CONFIG_AUDIO_CAPTURE_ALWAYS` was the leading suspect — the September bench set
+it and the later one did not — and **it is ruled out.** Measured 2026-09-22,
+NS off, everything else held, quiet room, 279 samples each:
+
+| | fps | draw | amp |
+|---|---|---|---|
+| `CAPTURE_ALWAYS=n` | 17.37 | 17.7 ms | 0.013 |
+| `CAPTURE_ALWAYS=y` | 17.24 | 17.6 ms | 0.013 |
+
+0.13 fps apart, inside the ±0.6% replicate spread. NS on in the same sitting
+read 14.91, consistent with the 14.81–15.00 from the day before.
+
+So the shift is not a bench flag, and that makes it harder to explain rather
+than easier: **none of the code that changed between the two sittings touches
+the NS-off path.** The VAD reorder is inside `#if CONFIG_MIC_NS_ENABLE`, which
+is compiled out in these arms; `rxovf` and `lowint`/`lowdma` are three calls a
+second; `ui_flash_status` short-circuits on a NULL check.
+
+One reason to doubt the older figure rather than the newer ones: **September ran
+at `amp` ≈ 0.028 against 0.013 here.** Higher amplitude is *more* pixel work for
+the orb, so that run should have been slower, and it read 20.00. That inversion
+is unexplained, and three tightly-clustered recent replicates are better
+evidence than one older reading.
+
+Working position: **the denoiser costs about −15%, and the −26% derives from a
+baseline that has not reproduced.** The range stays documented until someone
+either reproduces 20.00 or finds what changed.
 
 Note the confound runs *against* the finding, as it did in the acoustic work:
 `amp` falls 0.015 → 0.005 because the denoiser quiets what the orb draws, which

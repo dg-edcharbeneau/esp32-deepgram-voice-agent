@@ -118,12 +118,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fps is reproducible to +/-0.6% within a sitting -- but that gives a cost of
   -16.2%, where the 2026-09-07 bench (also one sitting) gave -26%.
 
-  The NS-on figure is stable across two weeks (14.80 then, 14.81-15.00 now).
-  The BASELINE is what moved: 20.00 -> 17.74. Two known differences, neither
-  shown to be the cause: the September bench set CONFIG_AUDIO_CAPTURE_ALWAYS=y
-  and this one did not, and there are two weeks of code between them. The cost
-  is therefore documented as a RANGE, -16% to -26%, in docs/audio-path.md, the
-  Kconfig help and audio_io.c, rather than either endpoint being asserted.
+  The NS-on figure is stable across two weeks (14.80 then, 14.81-15.00 now, and
+  14.91 on a third day). The BASELINE is what moved: 20.00 -> 17.2-17.7.
+
+  CONFIG_AUDIO_CAPTURE_ALWAYS was the leading suspect and is RULED OUT: with NS
+  off and everything else held, 17.37 with the flag off against 17.24 with it
+  on, 0.13 fps apart and inside the replicate spread. That makes the shift
+  harder to explain, not easier -- none of the code that changed between the two
+  sittings touches the NS-off path. One reason to doubt the OLDER figure: it ran
+  at amp ~0.028 against 0.013, and higher amplitude is more pixel work for the
+  orb, so it should have been slower, yet it read 20.00.
+
+  Working position: the denoiser costs about -15%, and the -26% derives from a
+  baseline that has not reproduced. The cost stays documented as a RANGE in
+  docs/audio-path.md, the Kconfig help and audio_io.c until someone reproduces
+  20.00 or finds what changed.
 
   CONFIG_HEAP_PROBE was the leading suspect and is exonerated: it costs +0.9%,
   inside the replicate spread. The 50 ms sampler does not measurably cost frame
