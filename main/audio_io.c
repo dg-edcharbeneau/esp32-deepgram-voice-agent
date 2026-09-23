@@ -248,11 +248,12 @@ static int s_aec_chunk;
  * cost is about -14%, not the -26% this table implies, and the baseline is the
  * figure that has failed to reproduce.
  *
- * Two suspects tested and both exonerated: CONFIG_HEAP_PROBE costs +0.9% and
- * CONFIG_AUDIO_CAPTURE_ALWAYS costs 0.02-0.13 fps, each inside the +/-0.6%
- * replicate spread. What changed between the sittings is still unknown, and
- * nothing in the code that changed touches the NS-off path. docs/audio-path.md
- * has the 2x2 and the reasoning.
+ * Three suspects tested, all exonerated: CONFIG_HEAP_PROBE (+0.9%),
+ * CONFIG_AUDIO_CAPTURE_ALWAYS (0.02-0.13 fps), and the code itself -- the
+ * September tree was checked out into a worktree, built NS-off and flashed, and
+ * read 17.22 against today's 17.37 at matched ambient. The 20.00 cannot be
+ * reproduced from the source that recorded it, so it is that READING which is
+ * unreliable, not any change since. docs/audio-path.md has the whole chain.
  *   SpeexDSP          8.63      60,903    29,696    dropped word onsets
  *
  * SPEEXDSP WAS EVALUATED AND REMOVED. It cost 57% of the frame rate -- the

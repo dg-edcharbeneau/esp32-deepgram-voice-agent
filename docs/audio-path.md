@@ -518,18 +518,25 @@ the NS-off path.** The VAD reorder is inside `#if CONFIG_MIC_NS_ENABLE`, which
 is compiled out in these arms; `rxovf` and `lowint`/`lowdma` are three calls a
 second; `ui_flash_status` short-circuits on a NULL check.
 
-One reason to doubt the older figure rather than the newer ones: **September ran
-at `amp` ≈ 0.028 against 0.013 here.** Higher amplitude is *more* pixel work for
-the orb, so that run should have been slower, and it read 20.00. That inversion
-is unexplained, and three tightly-clustered recent replicates are better
-evidence than one older reading.
+**The code is exonerated, and that settles it.** The September tree itself —
+`a98b094`, checked out into a worktree, built with NS off and flashed today —
+reads **17.22 fps** at ambient 31.4, against 17.37 at ambient 32.6 for current
+`HEAD`. Same code that recorded 20.00, same device, 2.8 fps slower.
 
-Working position: **the denoiser costs about −14%**, from four arms across two
-days (17.37 → 14.91 and 17.24 → 14.89, with 17.74 → 14.87 the day before). The
-**−26% derives from a baseline that has now failed to reproduce three times**
-while the NS-on figure reproduced every time. The range stays in the older
-tables until someone reproduces 20.00 or finds what changed, but −14% is the
-number to plan with.
+So all three candidate explanations are dead: it is not `CONFIG_HEAP_PROBE`
+(+0.9%), not `CONFIG_AUDIO_CAPTURE_ALWAYS` (0.02–0.13 fps), and not the two
+weeks of code between the sittings (0.15 fps, measured directly).
+
+That leaves the 2026-09-07 reading itself. It cannot be reproduced from its own
+source tree, and it was internally odd at the time: it ran at `amp` ≈ 0.028
+against 0.013 here, and higher amplitude is *more* pixel work for the orb, so it
+should have been **slower** than today's runs rather than 16% faster.
+
+**Treat 20.00 as unreliable and stop quoting −26%.** The denoiser costs about
+**−14%** — eight NS-off readings now span 17.22–17.74 and none approach 20.00,
+while NS-on has reproduced at 14.80–15.00 on four separate days. The older
+tables keep their original numbers as the record of what that sitting reported,
+with this note attached.
 
 Note the confound runs *against* the finding, as it did in the acoustic work:
 `amp` falls 0.015 → 0.005 because the denoiser quiets what the orb draws, which

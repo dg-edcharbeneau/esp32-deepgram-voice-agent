@@ -129,6 +129,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at amp ~0.028 against 0.013, and higher amplitude is more pixel work for the
   orb, so it should have been slower, yet it read 20.00.
 
+  RESOLVED 2026-09-22: the code is exonerated too. The September tree
+  (a98b094) was checked out into a worktree, built with NS off and flashed, and
+  read 17.22 fps at ambient 31.4 -- against 17.37 at ambient 32.6 for current
+  HEAD. The same source that recorded 20.00 cannot reproduce it. So it is that
+  READING which is unreliable, not anything that changed since, and -26% should
+  no longer be quoted. Eight NS-off readings now span 17.22-17.74 and none
+  approach 20.00, while NS-on has reproduced at 14.80-15.00 on four days. The
+  cost is about -14%.
+
   The 2x2 was completed 2026-09-22 and the flag is inert in BOTH rows: NS off
   17.37 vs 17.24, NS on 14.91 vs 14.89. So the denoiser costs about -14%, and
   the -26% rests on a baseline that has now failed to reproduce three times
