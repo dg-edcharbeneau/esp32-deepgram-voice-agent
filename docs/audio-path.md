@@ -200,6 +200,36 @@ The canceller above removes the device's *own speaker*. It does nothing about th
 room — fans, HVAC, traffic — which otherwise goes up the wire to Deepgram at full
 level. A denoiser is a different stage solving a different problem.
 
+### Why it is on by default
+
+Because **almost nobody changes a default**, so the default decides what nearly
+every device actually does, and the two ways of being wrong are not equally bad:
+
+| | denoiser ON | denoiser OFF |
+|---|---|---|
+| **quiet room** | costs ~14% of the frame rate and 7.4 kB; transcription unaffected — the baseline already scored 4/4 | free |
+| **loud room** | helped, by ear, in the one room it has been tried in | **the product does not do its job** |
+
+Being wrong in the quiet-room case costs a slightly choppier orb. Being wrong in
+the loud-room case costs the transcript, which is the entire point of the
+device. So the default belongs where the expensive mistake is the one it
+prevents — and the toggle exists for anyone who would rather have the frame rate
+back (BOOT double-click, remembered across reboots).
+
+Worth being explicit that this is a **product judgement, not a measurement
+result.** The measurements below do not justify it on their own: in the only
+instrumented room, the denoiser bought nothing. What justifies it is that the
+room the device gets deployed into is not the room it was measured in, and the
+cost of guessing wrong is asymmetric.
+
+**The corollary raises the stakes on `CONFIG_MIC_NS_ESPSR_MODE`, which is 2
+(aggressive) and has never been run at anything else.** If mode 2 chews quiet
+word onsets — the failure that disqualified SpeexDSP, hinted at once by esp-sr
+("A quick brown fox **jumped**") — then default-on propagates that to every
+device, including the noisy-room users it is meant to protect. That is the one
+way this default could actively harm the people it is for, and it is the reason
+the mode question is still listed as open rather than closed.
+
 Order in `capture_task`, and every position in it was argued for:
 
 ```

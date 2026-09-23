@@ -275,6 +275,13 @@ static int s_aec_chunk;
  * arms met the same ambient. Reported, not measured. docs/audio-path.md carries
  * the field report and keeps the instrumented run as an open item.
  *
+ * AND THAT IS WHY IT SHIPS ON ANYWAY. Almost nobody changes a default, so the
+ * default decides what nearly every device does, and the two ways of being
+ * wrong are not equally bad: wrong in a quiet room costs ~14% of the frame rate
+ * with transcription unaffected, wrong in a loud room costs the transcript. The
+ * default belongs where the expensive mistake is the one it prevents. A product
+ * judgement, not a measurement -- the numbers above are the honest price of it.
+ *
  * NS ABOVE THE VAD WAS A MISTAKE, AND HAS BEEN FIXED. The VAD compares the peak
  * it is given against CONFIG_AEC_UPLINK_VAD_PEAK, and a denoiser upstream of it
  * attenuates the INTERRUPTING SPEECH along with the room -- so fewer blocks
