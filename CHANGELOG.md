@@ -96,6 +96,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The boot captures are too short to be measurements, but together they suggest
   the bench figure may be the outlier rather than the 10.5. It is cosmetic --
   the orb animates less smoothly -- and not yet understood.
+- **On a network with more than one access point under the same name, the
+  device can join a weaker one**, which drops uplink audio or fails to start a
+  session. Workaround: move the device closer to the main access point, or give
+  the access points separate names. This is not new in 0.8.0: across 20 boots
+  on a two-AP network, v0.7.0 and 0.8.0 alike were clean on every session that
+  joined the strong AP and failed on every session that joined the weak one.
+  Scanning every channel and joining the strongest AP was tried and held back:
+  it still joined the weak AP on 2 of 10 boots, because the strong one did not
+  always answer the scan, and it roughly doubled the time to get online.
 
 ## [0.7.0] - 2026-09-01
 
