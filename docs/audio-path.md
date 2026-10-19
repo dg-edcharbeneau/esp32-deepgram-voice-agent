@@ -600,6 +600,10 @@ watching for, not yet worth a theory.
   no voice needed, and the session holds open so the heap carries real TLS
   pressure. A boot-fresh idle heap is far more generous and not comparable to
   the AEC table above.
+- **Check the flash delta before trusting a run.** The first esp-sr build
+  measured +96 B, because `1024 % 160 != 0` is a compile-time constant and the
+  compiler had deleted the whole engine as unreachable. Every number from that
+  build described a device with no denoiser. The real figure is +17,872 B.
 - **A tap on the screen toggles the session off** and silently ends a run.
 - **One reader per port.** A serial reader still holding the port makes
   `idf.py flash` fail with `The chip stopped responding`, which reads like a dead

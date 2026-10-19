@@ -10,213 +10,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Noise suppression is on by default.** `CONFIG_MIC_NS_ENABLE` and
   `CONFIG_MIC_NS_DEFAULT_ON` both default to `y`, so a fresh checkout builds a
-  device that denoises from boot. The BOOT button's double click still overrides
-  it at runtime and the choice persists.
+  device that denoises from boot. A double click on BOOT turns it off, and the
+  choice persists.
 
-  WHY ON, given that the measurements do not justify it on their own: almost
-  nobody changes a default, so the default decides what nearly every device
-  actually does, and the two ways of being wrong are not equally bad. Wrong in a
-  quiet room costs ~14% of the frame rate, 7.4 kB and 64 ms, with transcription
-  unaffected -- the no-NS baseline already scored 4/4. Wrong in a loud room
-  costs the transcript, which is the point of the device. The default belongs
-  where the expensive mistake is the one it prevents, and the BOOT double-click
-  gives the frame rate back to anyone who wants it.
-
-  Recorded as a product judgement rather than a measurement result, because it
-  is one. The measurements that argue against it are kept rather than dropped;
-  see [docs/audio-path.md](docs/audio-path.md).
-
-  The corollary is that this raises the stakes on CONFIG_MIC_NS_ESPSR_MODE,
-  which is 2 (aggressive) and has never run at anything else. If mode 2 chews
-  quiet word onsets -- the failure that disqualified SpeexDSP -- default-on
-  propagates that to every device, including the noisy-room users it exists to
-  protect. That is why the mode question stays open.
+  This is a product judgement, not a measurement result. Almost nobody changes
+  a default, so the default decides what nearly every device does, and the two
+  ways of being wrong are not equally bad. Wrong in a quiet room costs about 14%
+  of the frame rate, 7.4 kB of internal RAM and 64 ms of uplink latency, with
+  transcription unaffected. Wrong in a loud room costs the transcript, which is
+  the point of the device. The measurements that argue against the default are
+  kept in [docs/audio-path.md](docs/audio-path.md).
 
 ### Added
 
-- **Microphone noise suppression, off by default and not yet measured on the
-  device.** The canceller removes the device's own speaker; nothing removed the
-  *room*, so fans, HVAC and traffic went up the wire to Deepgram at full level.
-  `CONFIG_MIC_NS_ENABLE` adds a denoiser after the AEC and before the tap, the
-  uplink VAD and the sink -- after the canceller because a non-linear stage
-  upstream of an adaptive filter wrecks its convergence, before the rest so the
-  orb, the VAD threshold and Deepgram all see the same cleaned signal.
+- **Microphone noise suppression** (`CONFIG_MIC_NS_ENABLE`). The canceller
+  removes the device's own speaker; nothing removed the *room*, so fans, HVAC
+  and traffic went up the wire to Deepgram at full level. esp-sr's `ns_pro`,
+  which was already linked, now runs after the AEC -- a non-linear stage
+  upstream of an adaptive filter wrecks its convergence -- and below the uplink
+  VAD, so it cannot attenuate interrupting speech out of a barge-in. Its 10 ms
+  frames do not divide the 1024-sample capture block, so it runs through an
+  input and an output FIFO. Flash is +17,872 B; with the feature off the binary
+  is byte-for-byte what it was.
 
-  It uses esp-sr's `ns_pro`, which was already linked. Its one awkwardness is
-  frame size: `ns_pro_create` takes 10 ms frames only and
-  `AUDIO_IO_CAPTURE_FRAMES` is 1024 under the AEC, so `1024 % 160 = 64` and it
-  cannot walk the block in place the way `aec_process` does. It carries an input
-  and an output FIFO instead, costing 7,104 B of internal staging and a standing
-  64 ms of added uplink latency.
+  Measured on the board:
 
-  **SpeexDSP was evaluated and removed.** It was vendored precisely because it
-  accepts any frame size and so needed no FIFO, and that was not enough: it cost
-  57% of the frame rate against esp-sr's 26%, and it damaged speech -- eating
-  quiet word onsets ("A quick brown fox" for "The quick brown fox") and losing
-  an utterance where the no-NS baseline transcribed 4/4. Its state could not be
-  moved out of PSRAM to recover the speed: doing so dropped `intmax` to 10,240
-  and the device could not open a session at all, TLS failing on every retry.
-  The measurements are kept in `docs/audio-path.md` so it is not re-proposed.
+  | | NS off | NS on |
+  |---|---|---|
+  | frame rate | 17.2-17.7 fps | 14.8-15.0 fps (about -14%) |
+  | internal RAM | -- | -7,438 B, held whether or not it is running |
+  | uplink latency | -- | +64 ms |
 
-  The `mic peak` line gains an `ns=` field beside `out=`. They stay separate on
-  purpose: `out=` is post-AEC and `ns=` post-denoiser, so ERLE remains readable
-  on its own and a regression in one cannot be blamed on the other.
+  The NS-on figure reproduced on four separate days. An earlier bench quoted
+  -26% against a 20.00 fps baseline that has since failed to reproduce, even
+  when its own source tree was rebuilt and flashed; that figure should not be
+  quoted.
 
-  **Measured on the board**, 150 s per arm from cold boot on a live session:
+  What it buys is less certain. In the one instrumented room, nothing: the NS-off
+  baseline already transcribed 4/4. In a genuinely loud room on 2026-09-19 the
+  device worked well with it on -- but that was tried by hand with no log, so it
+  is a field report, not a measurement.
 
-  | arm | fps | `int` mean | `intmax` floor | rx overruns |
-  |---|---|---|---|---|
-  | off | 20.00 | 60,331 | 26,624 | +0 |
-  | Speex | 8.63 (-57%) | 60,903 | 29,696 | +0 |
-  | esp-sr | 14.80 (-26%) | 52,894 (-7,438) | 21,504 | +0 |
+  **SpeexDSP was evaluated and removed.** It ran at 8.63 fps against esp-sr's
+  14.80 in the same sitting, and it ate quiet word onsets ("A quick brown fox"
+  for "The quick brown fox"). Moving its state out of PSRAM to recover the speed
+  left the device unable to open a session at all.
 
-  **They do not rank, they trade.** esp-sr is 2.2x cheaper on CPU and costs
-  7.4 kB of internal RAM -- the resource this board has least of. Speex costs
-  none and more than half the frame rate. Neither moved `rxovf`. Flash is
-  +18,592 B (Speex) / +17,872 B (esp-sr); with the feature off the binary is
-  byte-for-byte what it was.
+  The `mic peak` line gains an `ns=` field beside `out=`, reading `ns=off` when
+  the stage is idle rather than `ns=0`, which would look like total suppression.
 
-  **Acoustically, neither engine helped.** One speaker, four fixed lines, same
-  room: NS off transcribed 4/4 correctly; Speex dropped word onsets ("A quick
-  brown fox", "Seashells seashells") and lost an utterance; esp-sr was 3/3 in
-  window. At this noise level Deepgram already handles the audio, so the
-  denoiser spends frame rate for nothing. A genuinely loud room is untested and
-  is the only condition where NS is likely to pay.
+- **A double click on BOOT toggles noise suppression** at runtime, and the
+  setting persists across reboots; `CONFIG_MIC_NS_DEFAULT_ON` is only the
+  power-on state. The status caption confirms the press. The engine's RAM is
+  allocated at init and held either way -- allocating it on the first press
+  would mean a multi-kB internal allocation mid-session on a fragmented heap,
+  which is what drops sessions on this board -- so the toggle buys back CPU, not
+  RAM. The gesture is compiled out with the feature: registering a double click
+  makes every single click wait out the double-click window, and the single
+  click is the session toggle.
 
-  **NS runs below the uplink VAD**, which took two attempts. Placing it above
-  was justified as giving the VAD a cleaner floor; that was backwards -- the
-  denoiser attenuates interrupting speech along with the room, so fewer blocks
-  cleared `VAD_PEAK` and barge-in got perceptibly harder to trigger. Blocks
-  discarded during playback: 22 (off) -> 49 (NS above) -> 16 (NS below). With
-  the stage moved, the VAD decides on the post-AEC signal exactly as it did
-  before, and the denoiser still sits ahead of the tap and the sink.
+- **`rxovf`, `lowint` and `lowdma` on the telemetry line.** `rxovf` counts I2S
+  RX frames the capture ring dropped, which is how the denoiser was shown not to
+  starve it. `lowint` and `lowdma` are `heap_probe`'s 50 ms low-water marks since
+  boot, `-1` when `CONFIG_HEAP_PROBE` is off. They matter because the 1 Hz
+  `dmamax` reading overstates headroom by 2-3x: one boot read 20,480 B live
+  against a true floor of 6,656 B, which puts the margin over the 1,630 B
+  `INTERNAL|DMA` allocation that drops sessions at about 4x, not 15x.
 
-  **Correction: esp-sr adds 64 ms of uplink latency, not the 10 ms first
-  claimed.** 10 ms is only the input residue; the output FIFO holds a further
-  full capture block between drains, measured at 1024 samples of standing
-  occupancy -- straight onto the interruption path.
+### Known issues
 
-- **Noise suppression toggles from the BOOT button.** A double click turns it on
-  and off at runtime and the setting persists across reboots;
-  `CONFIG_MIC_NS_DEFAULT_ON` is just the power-on state. The status caption
-  confirms the press, and `mic peak` says `ns=off` for an idle stage rather than
-  `ns=0`, which would read as total suppression.
-
-  The engine's 7,104 B of staging is allocated at init and held either way --
-  deferring it to the first press would mean a multi-kB internal allocation
-  mid-session on a fragmented heap, which is what drops sessions on this board.
-  The toggle buys back CPU, not RAM.
-
-  The gesture is compiled out along with the feature rather than left answering
-  "not built": registering a double click makes `iot_button` hold back every
-  single click until the double-click window closes, and the single click is the
-  session toggle -- the escape hatch. Builds without the denoiser keep it sharp.
-
-- **Loud-room field report for the denoiser.** Both arms (NS off, and on at
-  mode 2) run by hand in one genuinely loud room on 2026-09-19: with the
-  denoiser on the device worked well. That is the first evidence in the
-  feature's favour, and it is evidence for the exact condition it was switched
-  on for -- every prior measurement said it did not pay.
-
-  Recorded as a field report, not a measurement. No serial capture was taken, so
-  there are no per-arm transcripts, no fps/vadsup/rxovf/lowdma, and no mic-peak
-  check that both arms saw the same ambient. The quiet-room table stands as
-  measured and this stands as reported; they are not on the same axis, and the
-  instrumented run stays an open item in docs/audio-path.md.
-
-- **Re-measured the denoiser's frame-rate cost, and the two measurements
-  disagree.** Five arms in one sitting, 300 s each, three of them replicates:
-  NS off 17.74 fps, NS on 14.87, and replicates at 15.00 / 14.96 / 14.81. So
-  fps is reproducible to +/-0.6% within a sitting -- but that gives a cost of
-  -16.2%, where the 2026-09-07 bench (also one sitting) gave -26%.
-
-  The NS-on figure is stable across two weeks (14.80 then, 14.81-15.00 now, and
-  14.91 on a third day). The BASELINE is what moved: 20.00 -> 17.2-17.7.
-
-  CONFIG_AUDIO_CAPTURE_ALWAYS was the leading suspect and is RULED OUT: with NS
-  off and everything else held, 17.37 with the flag off against 17.24 with it
-  on, 0.13 fps apart and inside the replicate spread. That makes the shift
-  harder to explain, not easier -- none of the code that changed between the two
-  sittings touches the NS-off path. One reason to doubt the OLDER figure: it ran
-  at amp ~0.028 against 0.013, and higher amplitude is more pixel work for the
-  orb, so it should have been slower, yet it read 20.00.
-
-  RESOLVED 2026-09-22: the code is exonerated too. The September tree
-  (a98b094) was checked out into a worktree, built with NS off and flashed, and
-  read 17.22 fps at ambient 31.4 -- against 17.37 at ambient 32.6 for current
-  HEAD. The same source that recorded 20.00 cannot reproduce it. So it is that
-  READING which is unreliable, not anything that changed since, and -26% should
-  no longer be quoted. Eight NS-off readings now span 17.22-17.74 and none
-  approach 20.00, while NS-on has reproduced at 14.80-15.00 on four days. The
-  cost is about -14%.
-
-  The 2x2 was completed 2026-09-22 and the flag is inert in BOTH rows: NS off
-  17.37 vs 17.24, NS on 14.91 vs 14.89. So the denoiser costs about -14%, and
-  the -26% rests on a baseline that has now failed to reproduce three times
-  while the NS-on figure reproduced seven times out of seven (14.80-15.00).
-  docs/audio-path.md, the Kconfig help and audio_io.c now quote -14%.
-
-  Incidental finding worth keeping: WITH NS ON, FRAME RATE IS INSENSITIVE TO
-  ROOM NOISE. The fourth arm ran at 38% higher raw ambient than the other three,
-  and post-NS amp did not follow (0.0052 against 0.0071), so the orb's pixel
-  work and therefore fps stayed flat. That is also why that arm was kept despite
-  failing the +/-20% raw-ambient rule -- for fps the driver is the post-NS level,
-  and the denoiser decouples it from the room.
-
-  CONFIG_HEAP_PROBE was the leading suspect and is exonerated: it costs +0.9%,
-  inside the replicate spread. The 50 ms sampler does not measurably cost frame
-  rate.
-
-  This also retires the 10.56 fps from the 35-minute run as an OUTLIER, not a
-  regression -- it sits ~30% below three replicates of a byte-identical build.
-  It is the only run in the exercise that logged transport congestion
-  (txdrop=46, updrop=73 against zero everywhere else), and the board was
-  power-cycled between it and the replicates. A ~30% frame-rate deficit that
-  survives a reset but clears on a power cycle would matter more than the
-  denoiser if it is real; recorded as something to watch for, not a theory.
-
-- **35-minute heap run: no drift, and the risk window is startup.** 2,093
-  samples, 2,091 with a live session, NS at mode 2, zero crashes, zero reboots.
-  The DMA floor reached 8,704 B at t=4.2 s and **did not move again for the
-  remaining 35 minutes**; `dmamax` stayed pinned at 19,456, `rxovf` never left
-  120, fps held 10.4-10.6. The collapse happens inside the first two seconds as
-  Wi-Fi, TLS and the display come up -- so the exposure is startup contention,
-  not a slow leak, which is the opposite of what the open item assumed.
-
-  **Nobody spoke during it.** turns=0, played=0, rx=0: the device streamed 67 MB
-  of microphone audio upstream and was otherwise idle. This establishes that the
-  uplink path does not leak or fragment; it says nothing about the churn a
-  conversation brings -- TTS buffers, history writes, reconnects -- which is
-  where the 6,144 B previously recorded over ~22 minutes most likely came from.
-  The open item is narrowed to "under real conversation", not closed.
-
-- **`lowint` and `lowdma` in the telemetry line.** `heap_probe`'s 50 ms sampler
-  has tracked three internal-RAM low-water marks since it was written and
-  nothing ever read them back -- every long run this firmware has done recorded
-  its own worst case and then threw it away. `heap_probe_get_minima()` exports
-  them and the TLM line now carries the two that matter, `-1` when the probe is
-  compiled out so "never sampled" cannot be mistaken for a floor of zero.
-
-  It earned itself immediately. The 1 Hz TLM line has been over-reporting
-  headroom by a wide margin: on one 60 s boot `dmamax` read 19,456 live while
-  the true floor was 11,776, and on the next it was **6,656** -- roughly a
-  quarter of the 25,600 previously quoted from a 1 Hz sample. The margin against
-  the 1,630 B `INTERNAL|DMA` allocation that drops sessions is therefore about
-  4x, not 15x. Nothing is broken, but the number to watch is smaller than the
-  one on record.
-
-- **`rxovf` in the telemetry line.** `audio_codecs_rx_overruns()` has counted
-  silently dropped I2S RX frames since the DMA sizing work and nothing ever read
-  it. It is now on the TLM line, which is how the bench above could show the
-  denoiser was not starving the capture ring.
-
-  Three measurement traps hit along the way, all recorded in
-  [docs/audio-path.md](docs/audio-path.md): a first esp-sr build that measured
-  +96 B of flash because `1024 % 160 != 0` is a compile-time constant and the
-  compiler had deleted the whole engine; a serial reader left holding the port,
-  which makes `idf.py flash` fail with `The chip stopped responding` and look
-  like dead hardware; and a stale capture log that made a fixed crash appear to
-  still be happening.
+- **Suppression has only ever run at level 2 (aggressive).**
+  `CONFIG_MIC_NS_ESPSR_MODE` defaults to 2; levels 0 and 1 are untested. If
+  level 2 clips quiet word onsets -- the failure that disqualified SpeexDSP, and
+  hinted at once by esp-sr -- default-on spreads that to every device. If
+  transcripts start losing their first word, double click BOOT to turn
+  suppression off.
+- **Heap behaviour under long conversation is untested.** A 35-minute run found
+  no drift: the DMA floor was reached 4.2 s after boot and never moved again.
+  But nobody spoke during it, so the churn of playback, history writes and
+  reconnects was not exercised.
+- **An unexplained frame-rate gap.** The 14.8-15.0 fps figure above comes from
+  300 s bench runs. Live sessions have read about 10.5 fps three times: a
+  35-minute run (10.56), and two short boot captures on 2026-10-16 and
+  2026-10-18 (10.0-10.9), the second on this release's shipping configuration.
+  The boot captures are too short to be measurements, but together they suggest
+  the bench figure may be the outlier rather than the 10.5. It is cosmetic --
+  the orb animates less smoothly -- and not yet understood.
 
 ## [0.7.0] - 2026-09-01
 
