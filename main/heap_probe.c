@@ -1,5 +1,12 @@
 #include "heap_probe.h"
 
+/* Outside the #if: BOTH arms define heap_probe_get_minima(), and the stub needs
+ * NULL and UINT32_MAX as much as the real one does. Leaving these inside the
+ * guard compiled fine in the default-on build and broke the default-OFF one,
+ * which is the arm nobody looks at. */
+#include <stddef.h>
+#include <stdint.h>
+
 #include "sdkconfig.h"
 
 #if CONFIG_HEAP_PROBE
@@ -149,12 +156,52 @@ void heap_probe_start(void)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
 }
 
+/*
+ * Read-only, and deliberately not synchronised. Each field is a single aligned
+ * word written by one task (the sampler) and read by another, so a reader can
+ * see one field from before an update and another from after -- which for a
+ * monotonically falling floor means a figure that is stale, never one that is
+ * wrong in the dangerous direction. A lock here would buy consistency between
+ * three numbers that are not compared with each other, at the cost of putting
+ * the TLM line behind the 50 ms sampler.
+ */
+void heap_probe_get_minima(uint32_t *free, uint32_t *largest,
+                           uint32_t *dma_largest)
+{
+    if (free != NULL) {
+        *free = s_min_free;
+    }
+    if (largest != NULL) {
+        *largest = s_min_largest;
+    }
+    if (dma_largest != NULL) {
+        *dma_largest = s_min_dma_largest;
+    }
+}
+
 #else /* !CONFIG_HEAP_PROBE */
 
 /* Default off, and off means absent: no hook, no task, no 2,560 B stack. The
  * empty definition keeps the call site in app_main unconditional. */
 void heap_probe_start(void)
 {
+}
+
+/* UINT32_MAX, not 0: "never sampled" has to be distinguishable from "the floor
+ * was zero", or a caller that prints this unguarded reports a catastrophe that
+ * did not happen. */
+void heap_probe_get_minima(uint32_t *free, uint32_t *largest,
+                           uint32_t *dma_largest)
+{
+    if (free != NULL) {
+        *free = UINT32_MAX;
+    }
+    if (largest != NULL) {
+        *largest = UINT32_MAX;
+    }
+    if (dma_largest != NULL) {
+        *dma_largest = UINT32_MAX;
+    }
 }
 
 #endif
