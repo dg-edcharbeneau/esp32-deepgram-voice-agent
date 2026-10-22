@@ -6,7 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Barge-in at volume 70 and above.** Talking over the agent had stopped
+  working above volume 50, with nothing changed on the device. The firmware is
+  not what changed: 0.7.0 and the 30 August build that first recorded barge-in
+  working both fail the same way today, on the same settings and the same echo
+  levels. Two device-side settings were what made it break, and are what fix it:
+
+  - **`CONFIG_MIC_IN_GAIN` 24 -> 18 dB.** At 24 dB the agent's echo, with a
+    voice on top of it, pinned the microphone at full scale; a clipped echo
+    cannot be cancelled, and the interruption never left the device intact --
+    replaying the recorded uplink into Flux STT on its own found no turn there
+    either. 30 dB was tried and is worse: the device heard itself read the time
+    and answered it.
+  - **`CONFIG_AEC_UPLINK_VAD_PEAK` 400 -> 200.** The gate's threshold is a
+    sample value and scales with the gain; 200 is the old 400 at 18 dB. Left at
+    400, the gate cut a talking-over voice into fragments and interruptions only
+    landed in the agent's pauses.
+
+  Measured on the board at volume 70: no clipping, residual echo under 100,
+  interruptions detected reliably, best with noise suppression on (the default).
+  One half remains Deepgram-side: in session
+  `01a165b8-6a6f-7180-96d0-c5210810b4a2` Flux STT finds a turn in the replayed
+  uplink at ~22.7 s where the live agent did not barge in. See
+  [docs/audio-path.md](docs/audio-path.md).
+
 ### Changed
+
+- **The agent's model is gpt-5.4-mini** (was gpt-4o-mini). After a working
+  barge-in on "okay", gpt-4o-mini resumed the story it had been cut off from, and
+  ignored a prompt rule against it; gpt-5.4-mini stopped and stayed stopped, with
+  no noticeable change in reply latency.
 
 - **Noise suppression is on by default.** `CONFIG_MIC_NS_ENABLE` and
   `CONFIG_MIC_NS_DEFAULT_ON` both default to `y`, so a fresh checkout builds a
@@ -21,6 +52,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   calls it a win. See [docs/audio-path.md](docs/audio-path.md).
 
 ### Added
+
+- **`CONFIG_AUDIO_RECORD`, a recording of what the device heard and sent.**
+  Debug only, off by default. Each session's first 60 s go into PSRAM -- the raw
+  microphone before cancellation, and exactly what reached Deepgram -- and are
+  printed after the session ends; `host/rec2wav.py` turns a captured log into a
+  WAV labelled with the request_id and aligned to the server's "seconds into
+  call". `host/flux_replay.py` streams such a recording back into Flux STT. The
+  two together are what split the barge-in failure into its device and server
+  halves.
 
 - **A clock, timers and alarms.** The agent can say the time and the date, set
   its timezone, and set timers and one-shot or weekly alarms. Alarms go off with

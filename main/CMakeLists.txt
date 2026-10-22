@@ -29,6 +29,7 @@ idf_component_register(
         alarms.c
         alarm_sched.c
         font_clock_72.c
+        audio_rec.c
     INCLUDE_DIRS .
     # Flash rodata, no RAM until something reads it. Editing any of these
     # rebuilds, so a page or prompt change is a normal edit-and-flash.

@@ -17,6 +17,7 @@
 
 #include "audio_codecs.h"
 #include "audio_io.h"
+#include "audio_rec.h"
 
 #if CONFIG_AEC_ENABLE
 #include "esp_aec.h"
@@ -920,6 +921,10 @@ static void capture_task(void *arg)
 #endif
         }
 
+        /* Debug recording (CONFIG_AUDIO_RECORD): the microphone as it is, before
+         * the canceller touches it. A no-op stub otherwise. */
+        audio_rec_raw(mono, audio_io_playback_active());
+
         /*
          * CANCEL BEFORE ANY GATE, TAP OR SINK. Everything downstream -- the level
          * the orb draws, what Deepgram hears -- should see the cleaned signal,
@@ -1307,6 +1312,7 @@ static void capture_task(void *arg)
 #endif
             s_sink((const uint8_t *)mono, mono_bytes);
             s_captured += mono_bytes;
+            audio_rec_sent(mono);   /* exactly what went up; see audio_rec.h */
         }
     }
 }
@@ -1636,6 +1642,9 @@ esp_err_t audio_io_init(int sample_rate)
     }
 
     /* Core 1, to keep codec work off the core running the Wi-Fi stack. */
+    /* Before capture can start; a no-op unless CONFIG_AUDIO_RECORD. */
+    audio_rec_init(CAPTURE_FRAMES);
+
     if (xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, NULL, 6, NULL, 1) != pdPASS) {
         return ESP_FAIL;
     }
@@ -1840,6 +1849,7 @@ void audio_io_mute_playback(bool muted)
 void audio_io_capture_set_enabled(bool enabled)
 {
     s_capture_enabled = enabled;
+    audio_rec_capture(enabled);
 }
 
 void audio_io_capture_set_monitor(bool monitor)

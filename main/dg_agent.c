@@ -247,6 +247,11 @@ static volatile bool s_test_pending;
  * mid-turn: try again once they have probably finished, a few times. */
 #define INJECT_RETRY_MS  2000
 #define INJECT_RETRIES   4
+/* The current session's request_id and when its Welcome arrived. WebSocket task
+ * writes; readers (the audio recorder) only look after a session has ended. */
+static char s_request_id[48];
+static volatile int64_t s_welcome_us;
+
 static portMUX_TYPE s_announce_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_announce[ANNOUNCE_MAX];
 static uint32_t s_announce_ms;       /* 0 when the slot is empty */
@@ -1963,7 +1968,7 @@ static esp_err_t send_settings(void)
     cJSON *think = cJSON_AddObjectToObject(agent, "think");
     cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
     cJSON_AddStringToObject(think_provider, "type", "open_ai");
-    cJSON_AddStringToObject(think_provider, "model", "gpt-4o-mini");
+    cJSON_AddStringToObject(think_provider, "model", "gpt-5.4-mini");
 
     /*
      * The persona, assembled from the blocks in main/prompt. Built in PSRAM and freed
@@ -2414,6 +2419,11 @@ static void handle_json(const char *json, int len)
         /* Worth logging: this id is what Deepgram support asks for. */
         ESP_LOGI(TAG, "Welcome, request_id=%s",
                  cJSON_IsString(rid) ? rid->valuestring : "?");
+        /* Kept as well, so a recording of this session can name it and say where
+         * "seconds into call" -- the server logs' clock -- starts. */
+        strlcpy(s_request_id, cJSON_IsString(rid) ? rid->valuestring : "?",
+                sizeof(s_request_id));
+        s_welcome_us = esp_timer_get_time();
 
     } else if (strcmp(t, "SettingsApplied") == 0) {
         static uint32_t sessions;
@@ -3248,6 +3258,14 @@ esp_err_t dg_agent_stop(void)
 
     ESP_LOGI(TAG, "session stopped");
     return ESP_OK;
+}
+
+const char *dg_agent_request_id(int64_t *welcome_us)
+{
+    if (welcome_us != NULL) {
+        *welcome_us = s_welcome_us;
+    }
+    return s_request_id[0] ? s_request_id : "?";
 }
 
 bool dg_agent_is_ready(void)

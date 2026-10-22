@@ -32,13 +32,13 @@ Two ordering notes, both easy to get wrong:
   since the curve is what converts the number into dB.
 
 The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
-(+0 dB), mic gain 24 dB`.
+(+0 dB), mic gain 18 dB`.
 
 ## Tuning
 
 | Option | Default | When to change it |
 |---|---|---|
-| `CONFIG_MIC_IN_GAIN` | 24 dB | raise if mic peaks stay near zero while you talk |
+| `CONFIG_MIC_IN_GAIN` | 18 dB | **not upward**: at 24 dB the agent's echo clips the mic and barge-in fails, at 30 dB it hears itself. Move `CONFIG_AEC_UPLINK_VAD_PEAK` with it |
 | `CONFIG_AUDIO_OUT_VOLUME` | 70 | speaker too quiet, or clipping at the top of the range |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
 | `CONFIG_HEAP_PROBE` | off | chasing an allocation failure — names the size **and caps** that failed, which the `TLM` line cannot. This is what found the fault behind the v0.7.0 session drops; turn it on before touching any memory knob |
@@ -59,7 +59,7 @@ bringing it up on different hardware. See
 | `CONFIG_AEC_ENABLE` | on | off returns the device to half duplex — no canceller, no voice barge-in, and ~14.7 kB internal RAM and ~6 fps back |
 | `CONFIG_MIC_GATE_WHILE_AGENT_SPEAKS` | off | on to close the mic during playback while keeping the canceller. The setting to reach for when bringing this up on unfamiliar hardware |
 | `CONFIG_AEC_UPLINK_VAD` | on | leave on. Withholds blocks with no speech during playback; without it the uplink saturates TLS and the session drops |
-| `CONFIG_AEC_UPLINK_VAD_PEAK` | 400 | raise if the reply keeps the uplink open, lower if quiet interruptions are missed. Read `out=` in the `mic peak` log |
+| `CONFIG_AEC_UPLINK_VAD_PEAK` | 200 | scales with the mic gain (400 was the 24 dB value). Raise if the reply keeps the uplink open, lower if interruptions only land in the agent's pauses. Read `out=` in the `mic peak` log, or record a session |
 | `CONFIG_AEC_NLP_LEVEL` | normal | more suppression, but it suppresses hardest during double-talk — the barge-in moment |
 | `CONFIG_AEC_REF_GAIN_DB` | 12 dB | reference lane too quiet or clipping; check `ref=` in the `mic peak` log |
 | `CONFIG_AEC_FULL_DUPLEX_MAX_VOLUME` | 100 | lower only if barge-in works quietly and fails loud. Below 100 it silently reverts to half duplex above that volume while the prompt still promises full |
