@@ -47,6 +47,7 @@
 #include "esp_lv_adapter.h"
 #include "esp_lv_adapter_input.h"
 
+#include "alarm_sched.h"
 #include "audio_io.h"
 #include "battery.h"
 #include "orb_colors.h"
@@ -55,6 +56,9 @@
 #include "ui_face.h"
 
 static const char *TAG = "ui";
+
+/* main/font_clock_72.c: digits and a colon, 72 px. */
+LV_FONT_DECLARE(font_clock_72);
 
 #define CENTER_X (BSP_LCD_H_RES / 2)
 #define CENTER_Y (BSP_LCD_V_RES / 2)
@@ -816,6 +820,14 @@ static bool s_sig_drawn;
 #endif
 static volatile bool s_failed;
 
+/* The sleep clock, from ui_set_clock(). Store here, apply there, like the rest. */
+static volatile bool s_clk_valid;
+static volatile int  s_clk_hh, s_clk_mm;
+static volatile int  s_next_day = -1;
+static volatile int  s_next_hh, s_next_mm;
+static volatile bool s_clk_h12;
+static volatile bool s_ringing;
+
 /*
  * The connection phase the session layer last reported, or NONE.
  *
@@ -846,6 +858,10 @@ static lv_obj_t *status_label;
 #if CONFIG_UI_SHOW_INDICATORS
 static lv_obj_t *hint_label;
 #endif
+/* The sleep face's time, and the next alarm under it. See update_clock(). */
+static lv_obj_t *clock_label;
+static lv_obj_t *ampm_label;
+static lv_obj_t *next_label;
 static uint32_t s_frame;
 static lv_indev_t *s_touch;
 static void (*s_gesture_handler)(ui_gesture_t gesture);
@@ -1074,6 +1090,23 @@ void ui_set_signal(int bars, bool weak, bool valid)
     (void)weak;
     (void)valid;
 #endif
+}
+
+void ui_set_clock(bool valid, int hh, int mm, int next_day, int next_hh, int next_mm,
+                  bool h12)
+{
+    s_clk_h12 = h12;
+    s_clk_hh = hh;
+    s_clk_mm = mm;
+    s_next_day = next_day;
+    s_next_hh = next_hh;
+    s_next_mm = next_mm;
+    s_clk_valid = valid;
+}
+
+void ui_set_ringing(bool ringing)
+{
+    s_ringing = ringing;
 }
 
 void ui_set_battery(int percent, bool charging, bool low, bool valid)
@@ -1366,7 +1399,8 @@ static void draw_arc_status(uint32_t now)
             arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
             lv_canvas_finish_layer(canvas_obj, &layer);
             lv_obj_invalidate_area(canvas_obj, &s_arc_box);
-            lv_obj_remove_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+            /* The centre label comes back in update_clock(), which owns its
+             * HIDDEN flag -- the clock can be hiding it too. */
         }
         return;
     }
@@ -1397,10 +1431,7 @@ static void draw_arc_status(uint32_t now)
         return;
     }
 
-    if (!s_arc_drawn) {
-        s_arc_drawn = true;
-        lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
-    }
+    s_arc_drawn = true;   /* update_clock() hides the centre label off this */
 
     lv_canvas_init_layer(canvas_obj, &layer);
     /* Black the ground every frame, not only on a change: the faces repaint
@@ -1411,6 +1442,116 @@ static void draw_arc_status(uint32_t now)
     arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24, lv_color_white(), opa);
     lv_canvas_finish_layer(canvas_obj, &layer);
     lv_obj_invalidate_area(canvas_obj, &s_arc_box);
+}
+
+/*
+ * THE SLEEP CLOCK, and the one place the centre label's HIDDEN flag is decided.
+ *
+ * Labels rather than canvas ink, the same choice status_label made: LVGL
+ * composites a widget over whatever the orb repaints underneath, so there is no
+ * wipe-and-invalidate bookkeeping to get wrong, and the dim breathing orb behind
+ * the digits is the "still alive" cue the sleep design exists to keep.
+ *
+ * Asleep only, and never over the QR code or the display test, both of which
+ * own the screen. A touch wakes the panel on the press (gesture_event_cb), so
+ * the clock is gone on the same frame the conversation face comes back.
+ *
+ * Re-texted when the integers change and not otherwise: at 5 fps asleep a
+ * set_text per frame would re-lay-out and re-invalidate 72 px glyphs for nothing.
+ * The colon does not blink for the same reason, and because this is an AMOLED:
+ * a static picture held for hours marks the panel, so the pair also steps a few
+ * pixels each minute, walking a 5 x 5 grid that takes 25 minutes to repeat.
+ */
+static void update_clock(void)
+{
+    const bool show = s_asleep && s_clk_valid && !s_test_active && s_qr_payload == NULL;
+
+    static int shown_hh = -1, shown_mm = -1;
+    static int shown_day = -2, shown_nhh = -1, shown_nmm = -1;
+    static bool shown, shown_h12, shown_ampm;
+
+    const bool h12 = s_clk_h12;
+    if (show) {
+        const int hh = s_clk_hh, mm = s_clk_mm;
+        const bool relayout = hh != shown_hh || mm != shown_mm || h12 != shown_h12;
+        if (relayout) {
+            shown_hh = hh;
+            shown_mm = mm;
+            const int32_t dx = ((mm % 5) - 2) * 3;
+            const int32_t dy = (((mm / 5) % 5) - 2) * 3;
+            if (h12) {
+                /* "8:52", no leading zero -- a 12-hour clock never shows one. */
+                lv_label_set_text_fmt(clock_label, "%d:%02d", (hh % 12) ? (hh % 12) : 12, mm);
+                lv_label_set_text(ampm_label, hh < 12 ? "AM" : "PM");
+                /*
+                 * The digits are centred on their own and the AM/PM tucks under
+                 * them, right edges flush. Beside them it was centred as a pair,
+                 * which put the digits visibly off the middle of a round panel --
+                 * judged on the device. The montserrat_24 box carries its own
+                 * ascender padding, which is the gap between the two.
+                 */
+                lv_obj_align(clock_label, LV_ALIGN_CENTER, dx, dy - 10);
+                lv_obj_update_layout(clock_label);
+                lv_obj_align_to(ampm_label, clock_label, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 0);
+            } else {
+                lv_label_set_text_fmt(clock_label, "%02d:%02d", hh, mm);
+                lv_obj_align(clock_label, LV_ALIGN_CENTER, dx, dy - 10);
+            }
+            /* Below the AM/PM when there is one, so the two never share a line. */
+            lv_obj_align(next_label, LV_ALIGN_CENTER, dx, dy + (h12 ? 58 : 36));
+        }
+        const int day = s_next_day, nhh = s_next_hh, nmm = s_next_mm;
+        if (day != shown_day || nhh != shown_nhh || nmm != shown_nmm || h12 != shown_h12) {
+            static const char *const WDAY[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+            shown_day = day;
+            shown_nhh = nhh;
+            shown_nmm = nmm;
+            char hm[12];
+            alarm_fmt_time(nhh, nmm, h12, hm, sizeof(hm));
+            if (day < 0 || day > 7) {
+                lv_label_set_text(next_label, "");
+            } else if (day == 7) {
+                lv_label_set_text_fmt(next_label, "alarm %s", hm);
+            } else {
+                lv_label_set_text_fmt(next_label, "alarm %s %s", WDAY[day], hm);
+            }
+        }
+        shown_h12 = h12;
+    }
+    if (show != shown) {
+        shown = show;
+        if (show) {
+            lv_obj_remove_flag(clock_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(next_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(clock_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(next_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    const bool want_ampm = show && h12;
+    if (want_ampm != shown_ampm) {
+        shown_ampm = want_ampm;
+        if (want_ampm) {
+            lv_obj_remove_flag(ampm_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(ampm_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    /*
+     * Two things can want the centre word out of the way -- the caption bent
+     * round the rim, which is the same word moved, and the clock -- and they
+     * used to be one. Deciding it here, once, after both, is what stops one of
+     * them un-hiding the label while the other still needs it gone.
+     */
+    const bool hide_status = s_arc_drawn || show;
+    if (hide_status != lv_obj_has_flag(status_label, LV_OBJ_FLAG_HIDDEN)) {
+        if (hide_status) {
+            lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 #if CONFIG_UI_SHOW_INDICATORS
@@ -2298,6 +2439,8 @@ static void frame_timer_cb(lv_timer_t *timer)
      * signal bars. This overlay has nothing to do with either indicator.
      */
     draw_arc_status((uint32_t)(draw_start_us / 1000));
+    /* After the caption: it reads s_arc_drawn to decide the centre label. */
+    update_clock();
 
     tlm_accumulate_frame(draw_start_us);
 }
@@ -2348,6 +2491,21 @@ static void gesture_event_cb(lv_event_t *e)
          */
         s_sleep_want = false;
         apply_sleep(false);
+        /*
+         * A ringing alarm takes the whole panel. A press anywhere dismisses it,
+         * and the press is then nobody else's: clearing the button gate here is
+         * what stops the release turning into a tap that toggles the session,
+         * or a hold that offers to forget it. The display test cannot be
+         * running -- main.c never rings into it, and it owns the screen anyway.
+         */
+        if (s_ringing) {
+            s_press_in_button = false;
+            s_press_active = false;
+            if (s_gesture_handler) {
+                s_gesture_handler(UI_DISMISS);
+            }
+            break;
+        }
         s_press_in_button = press_is_in_button(e);
         s_press_active = s_press_in_button;
         break;
@@ -2637,6 +2795,31 @@ static esp_err_t build_ui(void)
     lv_obj_set_style_text_color(hint_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
     lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 34);
 #endif
+
+    /* The sleep clock, hidden until the panel sleeps; see update_clock(). The
+     * digits-only font is generated -- the command is in its header -- because
+     * a full 72 px Montserrat would spend ~100 kB of flash on letters a clock
+     * never draws. */
+    clock_label = lv_label_create(scr);
+    lv_label_set_text(clock_label, "");
+    lv_obj_set_style_text_font(clock_label, &font_clock_72, LV_PART_MAIN);
+    lv_obj_set_style_text_color(clock_label, lv_color_white(), LV_PART_MAIN);
+    lv_obj_add_flag(clock_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_center(clock_label);
+
+    /* Grey and small, like the hint: it qualifies the digits, it is not one. */
+    ampm_label = lv_label_create(scr);
+    lv_label_set_text(ampm_label, "");
+    lv_obj_set_style_text_font(ampm_label, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ampm_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
+    lv_obj_add_flag(ampm_label, LV_OBJ_FLAG_HIDDEN);
+
+    next_label = lv_label_create(scr);
+    lv_label_set_text(next_label, "");
+    lv_obj_set_style_text_font(next_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(next_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
+    lv_obj_add_flag(next_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(next_label, LV_ALIGN_CENTER, 0, 36);
 
     /*
      * The screen, not the canvas. lv_canvas derives from lv_image, whose

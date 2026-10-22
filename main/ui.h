@@ -57,6 +57,14 @@ typedef enum {
      * session header, exactly as tap and hold do.
      */
     UI_TEST_DONE,
+
+    /*
+     * A press ANYWHERE on the panel while an alarm rings -- see ui_set_ringing().
+     * Sent on the press, and the tap or hold that press would otherwise have
+     * become is swallowed, so dismissing can never also start, stop or restart
+     * a session.
+     */
+    UI_DISMISS,
 } ui_gesture_t;
 
 /*
@@ -162,6 +170,31 @@ void ui_set_battery(int percent, bool charging, bool low, bool valid);
  * when the icon is actually on screen.
  */
 void ui_set_signal(int bars, bool weak, bool valid);
+
+/*
+ * The time for the sleep face. Safe from any task: it stores, and the frame
+ * timer draws -- integers, never a string, because the labels here repaint on
+ * a change of value and a string rewritten in place has none.
+ *
+ * Shown only while the panel is asleep: the conversation owns the screen while
+ * the device is awake, and a dim clock is the useful thing for the rest of its
+ * life. `valid` false hides it rather than showing a 1970 time.
+ *
+ * next_day says when the soonest alarm or timer goes off: -1 none, 7 today,
+ * otherwise its tm_wday. The caller works out "today", because only it knows
+ * the date -- a weekly alarm one week out has today's weekday too.
+ *
+ * h12 draws "8:52" with a small "PM" beside it, and the next alarm the same
+ * way; otherwise "20:52". The choice is clock.c's (clock_12h()), not this file's.
+ */
+void ui_set_clock(bool valid, int hh, int mm, int next_day, int next_hh, int next_mm,
+                  bool h12);
+
+/*
+ * An alarm is chiming: a press anywhere on the panel becomes UI_DISMISS, not
+ * just one on the centre button. Safe from any task.
+ */
+void ui_set_ringing(bool ringing);
 
 /* audio_io_tap_t-compatible. Agent audio wins when both are active. */
 void ui_feed_agent(const int16_t *mono, size_t samples);

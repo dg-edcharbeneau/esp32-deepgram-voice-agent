@@ -41,6 +41,7 @@ typedef enum {
     REQ_RELOAD,   /* same work as RESTART, but keeps the conversation */
     REQ_STOP,     /* stop if running; never starts */
     REQ_RELOAD_SOON, /* like RELOAD, but a no-op when nothing is running */
+    REQ_START_SOON,  /* start if stopped; a no-op when already running */
 } request_t;
 
 static TaskHandle_t s_task;
@@ -74,6 +75,15 @@ static volatile bool s_ns_save_wanted;
  * the no-op it should always have been.
  */
 static volatile bool s_reload_wanted;
+/*
+ * "Open a session as soon as you can." The alarm's request, and a flag for the
+ * same reason as the two above, plus one of its own: request() DROPS anything
+ * that lands while the worker is busy or inside the cooldown, and an alarm that
+ * fires a second after the idle timeout stopped the session lands in exactly
+ * that window. A gesture dropped there is fine -- the user taps again. An alarm
+ * has nobody to tap again, so its start must wait its turn instead of losing it.
+ */
+static volatile bool s_start_wanted;
 /* Whether the last start attempt failed, so the idle label can say so. */
 static volatile bool s_start_failed;
 static dg_agent_callbacks_t s_callbacks;
@@ -252,6 +262,15 @@ static void session_ctl_task(void *arg)
                 xTaskNotify(s_task, 0, eNoAction);
             }
         }
+        /* Same promotion, same deference to a real request in hand. */
+        if (s_start_wanted) {
+            if (req == 0) {
+                s_start_wanted = false;
+                req = REQ_START_SOON;
+            } else {
+                xTaskNotify(s_task, 0, eNoAction);
+            }
+        }
 
         /*
          * Raise the flag BEFORE the flush, not after. The flush blocks for a
@@ -358,6 +377,18 @@ static void session_ctl_task(void *arg)
             }
             ESP_LOGI(TAG, "reloading session (deferred)");
             do_stop();
+            do_start();
+            break;
+        case REQ_START_SOON:
+            /* Already up: the alarm's announcement goes out on the live session,
+             * so there is nothing to do here -- and `continue`, for the reason
+             * REQ_RELOAD_SOON gives, so a no-op is not charged a cooldown. */
+            if (s_running) {
+                s_busy = false;
+                s_busy_since_ms = 0;
+                continue;
+            }
+            ESP_LOGI(TAG, "starting session (deferred)");
             do_start();
             break;
         case REQ_RELOAD:
@@ -531,6 +562,15 @@ void session_ctl_request_ns_save(void)
 void session_ctl_request_reload_soon(void)
 {
     s_reload_wanted = true;
+    if (s_task != NULL) {
+        xTaskNotify(s_task, 0, eNoAction);
+    }
+}
+
+/* Same mechanism again: see s_start_wanted. */
+void session_ctl_request_start_soon(void)
+{
+    s_start_wanted = true;
     if (s_task != NULL) {
         xTaskNotify(s_task, 0, eNoAction);
     }

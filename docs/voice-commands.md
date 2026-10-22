@@ -1,8 +1,9 @@
 # Changing things by asking
 
 Everything the agent can change about itself mid-conversation -- volume, name,
-face, orb colour, voice -- and what each one costs, plus the two things it can
-read about itself: charge and Wi-Fi signal.
+face, orb colour, voice -- and what each one costs, plus what it can read about
+itself: charge, Wi-Fi signal, and the time. Timers and alarms are on their own
+page.
 
 ## Changing the volume by asking
 
@@ -140,6 +141,20 @@ alongside it rather than being rounded up to "full".
 The dots on screen use the same reading, and the same hysteresed `low` flag, so
 what the device says and what it shows cannot disagree. See
 [the display](display.md) for where they are drawn.
+
+## Asking the time, and setting timers and alarms
+
+Four tools, all described in [the clock page](clock.md): `get_time`,
+`set_clock` (timezone and 12/24-hour), `set_alarm` (timers too) and `alarms`
+(list and cancel).
+"What time is it?", "I'm in Chicago", "set a pasta timer for ten minutes",
+"wake me at 7 on weekdays", "what alarms do I have?" and "cancel all of them"
+all land on one of them.
+
+The model is told plainly that it does not know the time and must read it every
+time. It will otherwise answer from the last time it read the clock, or from
+nothing at all. Without a valid clock, `get_time` says so and `set_alarm`
+refuses, but a timer still works, on the monotonic clock.
 
 ## Asking how the Wi-Fi is
 

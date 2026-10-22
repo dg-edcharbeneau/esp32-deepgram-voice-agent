@@ -55,6 +55,13 @@ flowchart TB
         bat["battery.c<br/><i>AXP2101 fuel gauge, read-only, own sampler</i>"]
     end
 
+    subgraph time["Time"]
+        clk["clock.c<br/><i>SNTP, timezone, 12/24-hour</i>"]
+        tz["tz_table.c<br/><i>IANA to POSIX rules</i>"]
+        alm["alarms.c<br/><i>timers + alarms, NVS, ringing</i>"]
+        sched["alarm_sched.c<br/><i>next occurrence, parsing;<br/>host-testable</i>"]
+    end
+
     subgraph disp["Display"]
         ui["ui.c<br/><i>panel, touch, canvas, frame timer, VAD</i>"]
         spectrum["face_spectrum.c<br/><i>FFT bars</i>"]
@@ -64,7 +71,12 @@ flowchart TB
         arc["arc_text.c<br/><i>the status word, bent along the bezel</i>"]
     end
 
-    main --> session & aio & ui & boot & sta & creds & prov & voices & bat
+    main --> session & aio & ui & boot & sta & creds & prov & voices & bat & clk & alm
+    clk --> tz
+    alm --> sched & clk & aio & ui
+    alm -. "announce / start_soon" .-> agent & session
+    agent --> clk & alm
+    prov --> clk
     session --> agent
     agent --> voices & faces & colors & ui & aio & prompt & aname & bat & hstore
     prompt --> voices & faces & colors & aname

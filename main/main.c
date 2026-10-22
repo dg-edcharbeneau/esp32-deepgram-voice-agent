@@ -28,6 +28,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -39,10 +40,12 @@
 #include "nvs_flash.h"
 
 #include "agent_name.h"
+#include "alarms.h"
 #include "audio_codecs.h"
 #include "audio_io.h"
 #include "battery.h"
 #include "boot_button.h"
+#include "clock.h"
 #include "heap_probe.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
@@ -569,6 +572,21 @@ static void on_gesture(ui_gesture_t gesture)
     const bool forget_offered = in_forget_window();
     s_forget_armed_ms = 0;
 
+    /*
+     * A RINGING ALARM OWNS EVERY GESTURE. While it chimes, a tap would read as
+     * an interrupt (the chime makes audio_io_playback_active() true) and a hold
+     * as an offer to forget the conversation -- neither of which is what someone
+     * slapping a ringing device means. ui.c also turns a press anywhere on the
+     * panel into UI_DISMISS while it rings, because a sleepy hand does not aim
+     * for a 70 px button. Ahead of the switch, so nothing below can also act.
+     */
+    if (gesture == UI_DISMISS || (alarms_ringing() && (gesture == UI_TAP || gesture == UI_HOLD))) {
+        ESP_LOGI(TAG, "EVT alarm dismiss (%s)", gesture == UI_DISMISS ? "anywhere"
+                                                : gesture == UI_TAP ? "tap" : "hold");
+        alarms_dismiss();
+        return;
+    }
+
     switch (gesture) {
     case UI_TAP:
         /*
@@ -670,6 +688,10 @@ static void on_gesture(ui_gesture_t gesture)
             s_notice_until_ms = now_ms() + FORGET_CONFIRM_MS + STATUS_NOTICE_MS;
             ui_set_status("forget? hold again", false);
         }
+        break;
+
+    case UI_DISMISS:
+        /* Handled above; listed so the switch stays exhaustive. */
         break;
 
     case UI_TEST_DONE:
@@ -794,6 +816,7 @@ void app_main(void)
     /* After nvs_flash_init(), before the first Settings message is built. */
     voices_init();
     agent_name_init();
+    alarms_init();
 
     /* Before the session, so the greeting has somewhere to go the moment it
      * arrives. */
@@ -809,6 +832,14 @@ void app_main(void)
     battery_start();
 
     ESP_ERROR_CHECK(wifi_stack_init());
+
+    /*
+     * After both of the things it hangs off: battery_start() has the I2C bus up
+     * for the RTC, and wifi_stack_init() has created the default event loop it
+     * watches for an address on. Reading the RTC here, before the station has
+     * even started associating, is what lets the clock be right from boot.
+     */
+    clock_start();
 
     /*
      * Non-blocking, and bringing the panel up costs ~1.2 s in the CO5300 reset
@@ -974,6 +1005,38 @@ void app_main(void)
         ui_set_signal(sig.bars, sig.weak, sig_ok);
 
         /*
+         * CLOCK AND ALARMS. Here because everything slow they do -- applying a
+         * timezone, the RTC write after a sync, the NVS write after a change,
+         * working out next Tuesday across a DST change -- belongs on the task
+         * that is allowed to be slow, and a second is all the resolution an alarm
+         * clock needs. Before the sleep logic below, which reads alarms_ringing().
+         *
+         * The face gets integers, never a string: ui.c compares text by pointer,
+         * so a time rewritten in place would never repaint.
+         */
+        clock_tick();
+        alarms_tick();
+        {
+            struct tm lt;
+            const bool clk_ok = clock_now(NULL, &lt);
+            /* -1 none, 7 today, else the weekday: "today" is decided here, by
+             * date, because a weekly alarm a week out shares today's weekday. */
+            int next_day = -1, next_hh = 0, next_mm = 0;
+            int64_t next = 0;
+            if (clk_ok && alarms_next(&next)) {
+                const time_t nt = (time_t)next;
+                struct tm nl;
+                localtime_r(&nt, &nl);
+                next_day = (nl.tm_year == lt.tm_year && nl.tm_yday == lt.tm_yday) ? 7 : nl.tm_wday;
+                next_hh = nl.tm_hour;
+                next_mm = nl.tm_min;
+            }
+            ui_set_clock(clk_ok, clk_ok ? lt.tm_hour : 0, clk_ok ? lt.tm_min : 0,
+                         next_day, next_hh, next_mm, clock_12h());
+            ui_set_ringing(alarms_ringing());
+        }
+
+        /*
          * CRITICAL: hold the panel asleep, session or no session. It is the
          * largest single draw on the board and dimming it is the only lever this
          * firmware has over how long the rest of the charge lasts. The session is
@@ -1022,8 +1085,15 @@ void app_main(void)
 
         if (bat_critical) {
             /* Ahead of the session check, which is the only branch that would
-             * otherwise wake the panel back up on the next pass. */
+             * otherwise wake the panel back up on the next pass. Ahead of a
+             * ringing alarm too: the chime, the caption and the announcement all
+             * still happen on a dim panel, and a cell this low needs it dim. */
             ui_set_sleep(true);
+        } else if (alarms_ringing()) {
+            /* Awake while it chimes, and the sleep clock restarts from now so
+             * the panel does not drop straight back down once it stops. */
+            stopped_since_ms = now_ms();
+            ui_set_sleep(false);
         } else if (session_ctl_is_running()) {
             stopped_since_ms = 0;
             ui_set_sleep(false);
@@ -1252,7 +1322,7 @@ void app_main(void)
                  " heap=%" PRIu32 " int=%u intmax=%u dma=%u dmamax=%u"
                  " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
-                 " rssi=%d bars=%d ch=%d",
+                 " rssi=%d bars=%d ch=%d clk=%d alm=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1306,6 +1376,8 @@ void app_main(void)
                   * would read as the best signal ever measured. */
                  sig_ok ? sig.rssi : -1,
                  sig_ok ? (int)sig.bars : -1,
-                 sig_ok ? (int)sig.channel : -1);
+                 sig_ok ? (int)sig.channel : -1,
+                 /* Where the wall clock came from: 0 none yet, 1 RTC, 2 SNTP. */
+                 (int)clock_source(), alarms_count());
     }
 }

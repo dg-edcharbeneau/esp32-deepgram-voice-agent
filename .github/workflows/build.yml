@@ -81,3 +81,8 @@ jobs:
         run: |
           ./host/prompt.sh > /dev/null
           ./host/prompt.sh --resumed > /dev/null
+
+      # No tzdata dependency, unlike host/alarms.sh, so it can gate: a BOOT press
+      # during an alarm must never reach the 3-second forget-wi-fi hold.
+      - name: BOOT button during an alarm
+        run: ./host/button.sh

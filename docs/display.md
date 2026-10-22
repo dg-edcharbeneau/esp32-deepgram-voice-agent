@@ -254,6 +254,15 @@ showing a QR code, and a signal icon beside it would be describing a link that
 does not exist yet. `CONFIG_WIFI_SIGNAL_SHOW_BARS` turns the icon off and leaves
 the TLM line and the voice tool intact.
 
+### The sleep clock
+
+While the panel sleeps -- dim, 5 fps, 30 s after a session stops -- a large
+`HH:MM` sits in the middle over the slow orb, with the next alarm in small type
+under it. These are labels, not canvas ink, and a touch removes them on the same
+frame it wakes the panel. The digits step a few pixels each minute, because a
+static picture held for hours marks an AMOLED. The details are in
+[the clock page](clock.md#the-sleep-clock).
+
 ### Telemetry
 
 One machine-parseable line per second, plus `EVT` lines on every transition:
@@ -262,9 +271,12 @@ One machine-parseable line per second, plus `EVT` lines on every transition:
 TLM up=123.4 face=orb beh=SPEAKING src=agent sess=ready frames=22 fps=22.8
     draw=17.4/20.1 amp=0.41/0.56 low=0.32/0.49 mid=0.55/0.71 high=0.48/0.62
     ... int=65851 intmax=49152 dma=58063 dmamax=49152 ifree=65851 iblocks=5 ialloc=521
-    bat=62 mv=3841 chg=0 chgst=5 rssi=-58 bars=3 ch=6
+    bat=62 mv=3841 chg=0 chgst=5 rssi=-58 bars=3 ch=6 clk=2 alm=1
 EVT beh IDLE->SPEAKING after=4.20s
 ```
+
+`clk=` is where the wall clock came from (0 none yet, 1 RTC, 2 SNTP), and `alm=`
+how many timers and alarms are pending; see [the clock](clock.md).
 
 `bat=`, `rssi=`, `bars=` and `ch=` are **-1 when there is no reading** -- no
 association, or no sample yet. Zero would be a lie in both cases: 0% and 0 dBm

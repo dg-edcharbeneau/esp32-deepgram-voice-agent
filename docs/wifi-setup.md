@@ -99,6 +99,13 @@ The normal path. Nothing to install.
    real test is the first connection, because the device has no route to Deepgram
    while it is running the portal.
 
+   **Timezone** is filled in from the phone's own zone, which is almost always
+   the device's too. Change it if not; the agent can also change it later
+   ("I'm in Chicago"). Blank keeps whatever was saved. A zone the device's table
+   does not know is skipped and logged rather than failing the save, because a
+   bad timezone should not strand anyone on the setup network. See
+   [the clock](clock.md#timezones).
+
 6. **Save and connect.** The page confirms, the device reboots, the setup network
    disappears. On the way back up you should see `got ip …` and then hear the
    greeting. **The greeting is the proof** — it is the first thing that requires

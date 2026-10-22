@@ -20,7 +20,9 @@
 #include "agent_prompt.h"
 #include "api_key.h"
 #include "audio_io.h"
+#include "alarms.h"
 #include "battery.h"
+#include "clock.h"
 #include "wifi_sta.h"
 #include "dg_agent.h"
 #include "faces.h"
@@ -217,6 +219,40 @@ static volatile bool s_reload_pending;
 /* Same deferral as s_reload_pending, for the same reason: let the agent finish
  * the sentence before the socket it is speaking over goes away. */
 static volatile bool s_test_pending;
+
+/*
+ * Something the agent must say that nobody asked for -- today, only an alarm
+ * going off. One slot: the text, and when it was queued.
+ *
+ * It has two ways out, and which one depends on the session it lands in:
+ *   - A fresh conversation, no history: send_settings() makes it the GREETING.
+ *     Spoken exactly once when Settings is applied, with nothing to race, and
+ *     the configured greeting would only be in its way.
+ *   - Anything else: InjectAgentMessage, sent by keepalive_task once the session
+ *     is ready. That task and no other, because it is already the TEXT sender
+ *     that dg_agent_stop() waits for (s_sending_ka); an inject from the alarm's
+ *     task would hold the client lock outside that quiesce and hang a stop.
+ *
+ * It outlives a stop or a dropped socket, the way s_test_pending does -- the
+ * whole point is that the alarm usually fires with no session up -- but only for
+ * ANNOUNCE_TTL_MS. A device that could not reach Deepgram for five minutes
+ * should not then announce a timer that ended five minutes ago as though it
+ * just had.
+ */
+/* The longest alarms.c composes is 55 bytes: "It's 12:30. This is your " and a
+ * 23-byte label and " alarm.". Four of these are static, so it is kept tight. */
+#define ANNOUNCE_MAX     64
+#define ANNOUNCE_TTL_MS  (2 * 60 * 1000)
+/* After InjectionRefused, which with behavior "queue" means the user was
+ * mid-turn: try again once they have probably finished, a few times. */
+#define INJECT_RETRY_MS  2000
+#define INJECT_RETRIES   4
+static portMUX_TYPE s_announce_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_announce[ANNOUNCE_MAX];
+static uint32_t s_announce_ms;       /* 0 when the slot is empty */
+static char s_injected[ANNOUNCE_MAX]; /* the last one sent, for a retry */
+static int s_inject_tries;
+static esp_timer_handle_t s_inject_retry;
 
 /*
  * The conversation so far, replayed into the next session's Settings so that
@@ -1047,6 +1083,131 @@ void dg_agent_flush_history(void)
     s_save_failures = 0;
 }
 
+/* ---------------- announcements ---------------- */
+
+static uint32_t ms_now(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* Whether a live, unexpired announcement is waiting. */
+static bool announce_pending(void)
+{
+    portENTER_CRITICAL(&s_announce_lock);
+    bool live = s_announce_ms != 0 && (ms_now() - s_announce_ms) < ANNOUNCE_TTL_MS;
+    if (!live) {
+        s_announce_ms = 0;
+    }
+    portEXIT_CRITICAL(&s_announce_lock);
+    return live;
+}
+
+/* Take it out of the slot, if it is there and not stale. */
+static bool announce_take(char *out)
+{
+    portENTER_CRITICAL(&s_announce_lock);
+    const bool live = s_announce_ms != 0 && (ms_now() - s_announce_ms) < ANNOUNCE_TTL_MS;
+    if (live) {
+        memcpy(out, s_announce, ANNOUNCE_MAX);
+    }
+    s_announce_ms = 0;
+    portEXIT_CRITICAL(&s_announce_lock);
+    return live;
+}
+
+static void announce_put(const char *text)
+{
+    portENTER_CRITICAL(&s_announce_lock);
+    strlcpy(s_announce, text, sizeof(s_announce));
+    s_announce_ms = ms_now() | 1;   /* never 0, which means empty */
+    portEXIT_CRITICAL(&s_announce_lock);
+}
+
+static void inject_retry_cb(void *arg)
+{
+    (void)arg;
+    if (s_keepalive_task != NULL) {
+        xTaskNotifyGive(s_keepalive_task);
+    }
+}
+
+void dg_agent_announce(const char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+    /*
+     * Two alarms ringing before the session opens must both be said, so a
+     * second is appended to the first rather than replacing it. If the pair
+     * will not fit, the first stands and the second is dropped -- with a log
+     * line, and its chime and caption already went off.
+     */
+    bool appended = false, dropped = false;
+    portENTER_CRITICAL(&s_announce_lock);
+    if (s_announce_ms != 0 && (ms_now() - s_announce_ms) < ANNOUNCE_TTL_MS) {
+        const size_t have = strlen(s_announce);
+        if (have + 1 + strlen(text) < sizeof(s_announce)) {
+            s_announce[have] = ' ';
+            strlcpy(s_announce + have + 1, text, sizeof(s_announce) - have - 1);
+            appended = true;
+        } else {
+            dropped = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_announce_lock);
+    if (dropped) {
+        ESP_LOGW(TAG, "EVT announce dropped (slot full): %s", text);
+        return;
+    }
+    if (!appended) {
+        announce_put(text);
+    }
+    s_inject_tries = 0;
+    /* Live already: the keepalive task sends it now. Not live: SettingsApplied
+     * pokes it, or send_settings() takes it as the greeting. */
+    if (s_ready && s_keepalive_task != NULL) {
+        xTaskNotifyGive(s_keepalive_task);
+    }
+}
+
+/*
+ * {"type":"InjectAgentMessage","behavior":"queue","message":"..."} into `out`,
+ * by hand rather than through cJSON: this runs on keepalive_task's 3 kB stack,
+ * where printf-family formatting and cJSON's printer are both more frame than
+ * a fixed string needs. The message is escaped; a label is whatever the user
+ * said, and a quote in it must not end the JSON string.
+ *
+ * "queue" rather than the default: the default is refused while the agent is
+ * mid-turn as well as the user, and an alarm landing in the middle of a reply
+ * should wait for it, not bounce.
+ */
+static size_t build_inject(const char *msg, char *out, size_t cap)
+{
+    static const char HEAD[] = "{\"type\":\"InjectAgentMessage\",\"behavior\":\"queue\",\"message\":\"";
+    static const char TAIL[] = "\"}";
+    size_t n = sizeof(HEAD) - 1;
+    if (cap < n + sizeof(TAIL)) {
+        return 0;
+    }
+    memcpy(out, HEAD, n);
+    for (const char *p = msg; *p; p++) {
+        const bool esc = (*p == '"' || *p == '\\');
+        if (n + (esc ? 2 : 1) + sizeof(TAIL) > cap) {
+            return 0;
+        }
+        if ((unsigned char)*p < 0x20) {
+            out[n++] = ' ';
+            continue;
+        }
+        if (esc) {
+            out[n++] = '\\';
+        }
+        out[n++] = *p;
+    }
+    memcpy(out + n, TAIL, sizeof(TAIL));   /* includes the terminator */
+    return n + sizeof(TAIL) - 1;
+}
+
 static void set_state(dg_agent_state_t state)
 {
     s_ready = (state == DG_AGENT_READY);
@@ -1138,6 +1299,72 @@ static cJSON *function_args(const cJSON *fn)
     return cJSON_Parse(args_str->valuestring);
 }
 
+#if CONFIG_CLOCK
+/*
+ * The clock and alarm tools, answered in clock.c and alarms.c.
+ *
+ * Out of line on purpose. handle_function_call() is static and called once, so
+ * the compiler folds it into on_ws_event(), and everything it declares lands in
+ * the WebSocket task's 6 kB -- which is how send_settings() once boot-looped the
+ * board. This frame is a few pointers; the reply goes into PSRAM, because
+ * a listing of alarms can say more than the 128 bytes `content` holds; and the handlers
+ * live in other files, so none of their locals can be inlined back up here.
+ *
+ * True if `name` was one of these, answered.
+ */
+#define CLOCK_REPLY_LEN 512
+static bool __attribute__((noinline)) clock_tool(const char *name, const cJSON *fn,
+                                                  const char *id)
+{
+    enum { GET_TIME, SET_TZ, SET_ALARM, ALARMS } which;
+    if (strcmp(name, "get_time") == 0) {
+        which = GET_TIME;
+    } else if (strcmp(name, "set_clock") == 0) {
+        which = SET_TZ;
+    } else if (strcmp(name, "set_alarm") == 0) {
+        which = SET_ALARM;
+    } else if (strcmp(name, "alarms") == 0) {
+        which = ALARMS;
+    } else {
+        return false;
+    }
+
+    char *out = heap_caps_malloc(CLOCK_REPLY_LEN, MALLOC_CAP_SPIRAM);
+    if (out == NULL) {
+        send_function_response(id, name, "Out of memory. Say something went wrong.");
+        return true;
+    }
+    out[0] = '\0';
+    cJSON *args = function_args(fn);
+    /* One tool each for setting and for the rest; the arguments pick the verb. */
+    const bool timer = cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(args, "seconds"));
+    const cJSON *cancel = cJSON_GetObjectItemCaseSensitive(args, "cancel");
+    const bool cancelling = cJSON_IsString(cancel) && cancel->valuestring[0] != '\0';
+    switch (which) {
+    case GET_TIME:  clock_fn_get_time(out, CLOCK_REPLY_LEN); break;
+    case SET_TZ:    clock_fn_set_clock(args, out, CLOCK_REPLY_LEN); break;
+    case SET_ALARM:
+        if (timer) {
+            alarms_fn_set_timer(args, out, CLOCK_REPLY_LEN);
+        } else {
+            alarms_fn_set_alarm(args, out, CLOCK_REPLY_LEN);
+        }
+        break;
+    case ALARMS:
+        if (cancelling) {
+            alarms_fn_cancel(args, out, CLOCK_REPLY_LEN);
+        } else {
+            alarms_fn_list(out, CLOCK_REPLY_LEN);
+        }
+        break;
+    }
+    cJSON_Delete(args);
+    send_function_response(id, name, out);
+    free(out);
+    return true;
+}
+#endif
+
 static void handle_function_call(const cJSON *root)
 {
     const cJSON *functions = cJSON_GetObjectItemCaseSensitive(root, "functions");
@@ -1159,6 +1386,12 @@ static void handle_function_call(const cJSON *root)
         }
 
         char content[128];
+
+#if CONFIG_CLOCK
+        if (clock_tool(name->valuestring, fn, id->valuestring)) {
+            continue;
+        }
+#endif
 
         if (strcmp(name->valuestring, "reset_voice") == 0) {
             const voice_t *v = voices_default();
@@ -1613,6 +1846,73 @@ static void handle_function_call(const cJSON *root)
  * audio.output entirely is legal but leaves the format to the server's default,
  * which is not what a fixed-rate codec on the other end wants.
  */
+#if CONFIG_CLOCK
+/*
+ * The clock and alarm tool definitions, verbatim, as they go on the wire.
+ *
+ * Each is ONE cJSON node, a raw reference to this rodata, rather than the ten
+ * or so nodes and string copies the builder calls above make per tool. Every
+ * small cJSON allocation lands in internal RAM (SPIRAM_MALLOC_ALWAYSINTERNAL),
+ * and it lands at the moment a TLS handshake wants that RAM most. Descriptions
+ * are kept short for the same reason and for Settings' size -- see the 20 kB
+ * failure noted at HISTORY_REPLAY_BYTES.
+ *
+ * No enum of timezones in set_clock: a hundred names would add ~3 kB, and
+ * clock.c checks the name against tz_table.c anyway.
+ *
+ * "NEVER TIME" IN set_alarm IS THERE BECAUSE IT HAPPENED. With only "Timer: pass
+ * seconds", the model on the board turned "set a timer for one minute" into
+ * time "00:01" -- an alarm at 12:01 AM the next night -- and only made a timer
+ * when corrected. Spelling out what a duration looks like cost 60 bytes.
+ *
+ * FOUR TOOLS, NOT SIX, AND TERSE -- MEASURED. The first cut had a tool per verb
+ * and a sentence per parameter, 1,723 bytes, and with the prompt paragraph it
+ * took a resumed session's Settings from ~19.3 kB to 21,349 bytes on the board:
+ * past the 20 kB at which sessions flapped before (HISTORY_REPLAY_BYTES), and a
+ * sixth 4 kB TLS record. Timer and alarm share one tool, listing and cancelling
+ * another, and a parameter whose name says what it is carries no description.
+ */
+static const char *const CLOCK_TOOLS[] = {
+    "{\"name\":\"get_time\",\"description\":\"Current local time, weekday and date. "
+    "Use for any time or date question; never guess.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{}}}",
+
+    "{\"name\":\"set_clock\",\"description\":\"Set your timezone when they say where "
+    "they are, and/or 12 or 24-hour time.\",\"parameters\":{\"type\":\"object\","
+    "\"properties\":{\"zone\":{\"type\":\"string\",\"description\":\"IANA name, e.g. "
+    "America/Chicago\"},\"hours\":{\"type\":\"integer\"}}}}",
+
+    "{\"name\":\"set_alarm\",\"description\":\"A duration (in 10 minutes, a 1 minute "
+    "timer): pass seconds, never time. A clock time (at 7:30): pass time as 24-hour "
+    "HH:MM, and days: tomorrow, or to repeat daily, weekdays, weekends, mon,wed.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{\"seconds\":{\"type\":"
+    "\"integer\"},\"time\":{\"type\":\"string\"},\"days\":{\"type\":\"string\"},"
+    "\"label\":{\"type\":\"string\"}}}}",
+
+    "{\"name\":\"alarms\",\"description\":\"List pending alarms and timers. To cancel, "
+    "pass an id, a label, or all.\",\"parameters\":{\"type\":\"object\",\"properties\":"
+    "{\"cancel\":{\"type\":\"string\"}}}}",
+};
+
+/*
+ * A raw node that REFERENCES the string instead of copying it. cJSON has no
+ * constructor for that, but its printer copies a raw node's text verbatim and
+ * cJSON_Delete() skips freeing valuestring on anything flagged IsReference --
+ * the same flag cJSON_CreateStringReference() sets -- so this is the supported
+ * shape assembled by hand.
+ */
+static void add_raw_reference(cJSON *array, const char *json)
+{
+    cJSON *item = cJSON_CreateNull();
+    if (item == NULL) {
+        return;
+    }
+    item->type = cJSON_Raw | cJSON_IsReference;
+    item->valuestring = (char *)json;
+    cJSON_AddItemToArray(array, item);
+}
+#endif
+
 static esp_err_t send_settings(void)
 {
     cJSON *root = cJSON_CreateObject();
@@ -1674,13 +1974,18 @@ static esp_err_t send_settings(void)
      * few turns, and without this the model reads them as a conversation it is
      * joining rather than one it has been having.
      */
+#define NOTE_RESUME "You have already been talking with this person for a " \
+                    "few turns. What follows is that same conversation, not " \
+                    "a new one, so pick it up where it left off and do not " \
+                    "start over or greet them again."
+    /* Why this session exists at all when an alarm opened it: without it the
+     * model sees itself announce a timer and has no idea where that came from. */
+#define NOTE_ALARM  " This session was opened by an alarm or timer going off, " \
+                    "which you announce first. Then help with whatever they ask."
+    const bool alarm = announce_pending();
     agent_prompt_ctx_t pctx = {
-        .notes = (s_history_count > 0)
-                     ? "You have already been talking with this person for a "
-                       "few turns. What follows is that same conversation, not "
-                       "a new one, so pick it up where it left off and do not "
-                       "start over or greet them again."
-                     : NULL,
+        .notes = (s_history_count > 0) ? (alarm ? NOTE_RESUME NOTE_ALARM : NOTE_RESUME)
+                                       : (alarm ? NOTE_ALARM + 1 : NULL), /* +1: its leading space */
     };
     char *prompt = agent_prompt_build(&pctx);
     if (prompt != NULL) {
@@ -2045,6 +2350,12 @@ static esp_err_t send_settings(void)
     cJSON_AddObjectToObject(reset_params, "properties");
     cJSON_AddItemToArray(functions, reset_voice);
 
+#if CONFIG_CLOCK
+    for (size_t i = 0; i < sizeof(CLOCK_TOOLS) / sizeof(CLOCK_TOOLS[0]); i++) {
+        add_raw_reference(functions, CLOCK_TOOLS[i]);
+    }
+#endif
+
     cJSON *speak_provider = cJSON_AddObjectToObject(
         cJSON_AddObjectToObject(agent, "speak"), "provider");
     cJSON_AddStringToObject(speak_provider, "type", "deepgram");
@@ -2061,8 +2372,19 @@ static esp_err_t send_settings(void)
      * socket.
      */
     history_to_json(agent);
-    if (s_history_count == 0 && strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
-        cJSON_AddStringToObject(agent, "greeting", CONFIG_DEEPGRAM_AGENT_GREETING);
+    if (s_history_count == 0) {
+        /* An alarm's announcement IS the greeting of a fresh conversation --
+         * spoken once, on SettingsApplied, with nothing to race. With history
+         * there is no greeting and it goes as an inject instead. */
+        /* Static, not a local: this frame is the WebSocket task's, and the
+         * stack note above is about exactly this function growing. */
+        static char said[ANNOUNCE_MAX];
+        if (announce_take(said)) {
+            ESP_LOGI(TAG, "EVT announce as greeting: %s", said);
+            cJSON_AddStringToObject(agent, "greeting", said);
+        } else if (strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
+            cJSON_AddStringToObject(agent, "greeting", CONFIG_DEEPGRAM_AGENT_GREETING);
+        }
     }
 
     esp_err_t err = send_json(root, "Settings");
@@ -2103,6 +2425,11 @@ static void handle_json(const char *json, int len)
          * user asked to forget. */
         s_history_frozen = false;
         set_state(DG_AGENT_READY);
+        /* An alarm that opened this session and did not go out as the greeting
+         * goes out now. The keepalive task sends it; see s_announce. */
+        if (announce_pending() && s_keepalive_task != NULL) {
+            xTaskNotifyGive(s_keepalive_task);
+        }
 
     } else if (strcmp(t, "ConversationText") == 0) {
         const cJSON *role = cJSON_GetObjectItemCaseSensitive(root, "role");
@@ -2182,6 +2509,25 @@ static void handle_json(const char *json, int len)
 
     } else if (strcmp(t, "FunctionCallRequest") == 0) {
         handle_function_call(root);
+
+    } else if (strcmp(t, "InjectionRefused") == 0) {
+        /*
+         * The user was mid-turn. Put the announcement back and try again a
+         * moment later, a few times -- by timer, NOT on AgentAudioDone, which
+         * this stack almost never sends (see main.c). Past the last try it is
+         * dropped: the chime and the caption already said something happened.
+         */
+        if (s_inject_tries < INJECT_RETRIES && s_injected[0] != '\0') {
+            s_inject_tries++;
+            ESP_LOGW(TAG, "EVT announce refused, retry %d/%d", s_inject_tries, INJECT_RETRIES);
+            announce_put(s_injected);
+            if (s_inject_retry != NULL) {
+                esp_timer_stop(s_inject_retry);
+                esp_timer_start_once(s_inject_retry, INJECT_RETRY_MS * 1000ULL);
+            }
+        } else {
+            ESP_LOGW(TAG, "EVT announce refused, giving up");
+        }
 
     } else if (strcmp(t, "Error") == 0) {
         const cJSON *desc = cJSON_GetObjectItemCaseSensitive(root, "description");
@@ -2465,8 +2811,19 @@ static void keepalive_task(void *arg)
      * on the teardown path. */
     static const char KEEPALIVE[] = "{\"type\":\"KeepAlive\"}";
 
+    /* Built here, on a 3 kB stack, so not on it -- and in PSRAM, once, since
+     * internal RAM is the pool this board runs out of. Escaping can at most
+     * double the message; the rest is the fixed JSON around it. */
+    enum { INJECT_LEN = ANNOUNCE_MAX * 2 + 80 };
+    char *inject = NULL;
+
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(KEEPALIVE_PERIOD_MS));
+        /*
+         * A notification is an announcement to send (see s_announce); a timeout
+         * is the keepalive period, as it always was. Only the timeout sends a
+         * KeepAlive -- a wakeup for an inject is not evidence the link is idle.
+         */
+        const bool poked = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(KEEPALIVE_PERIOD_MS)) > 0;
         /*
          * Claimed before the readiness test, for the reason audio_send_task()
          * spells out at length: dg_agent_stop() clears s_ready and then waits on
@@ -2481,7 +2838,32 @@ static void keepalive_task(void *arg)
          * `continue` would skip past the lowering.
          */
         s_sending_ka = true;
-        if (s_ready && esp_websocket_client_is_connected(s_client)) {
+        static char msg[ANNOUNCE_MAX];
+        /* On demand, and before the take: if PSRAM cannot spare it now, the
+         * announcement stays queued for the next wake instead of being taken
+         * and lost. */
+        if (inject == NULL && announce_pending()) {
+            inject = heap_caps_malloc(INJECT_LEN, MALLOC_CAP_SPIRAM);
+        }
+        if (inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
+            announce_take(msg)) {
+            /*
+             * NOT GATED ON A QUIET UPLINK, unlike the KeepAlive below, and on
+             * purpose. In a live session the uplink is never quiet -- the mic
+             * streams continuously outside playback -- so that rule would hold
+             * an announcement forever. This carries the same risk every
+             * FunctionCallResponse already does: a TEXT send into a stalled
+             * uplink blocks in poll_write. Weighed and accepted, 2026-10-22;
+             * if "mic= frozen, rx=0" follows an announcement, this is the lead.
+             */
+            const size_t len = build_inject(msg, inject, INJECT_LEN);
+            if (len > 0) {
+                /* Kept for a retry; no log here, on this stack -- the server's
+                 * ConversationText echo, or InjectionRefused, is the record. */
+                memcpy(s_injected, msg, sizeof(s_injected));
+                esp_websocket_client_send_text(s_client, inject, (int)len, SEND_TIMEOUT);
+            }
+        } else if (!poked && s_ready && esp_websocket_client_is_connected(s_client)) {
             /*
              * WHEN this frame goes out matters more than whether it does, because it
              * is TEXT and transport_ws cannot drop it when the send queue is full --
@@ -2562,6 +2944,12 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
         .name = "test_bkstp",
     };
     esp_timer_create(&tbargs, &s_test_backstop);
+    /* The announcement's retry after InjectionRefused; see s_announce. */
+    const esp_timer_create_args_t iargs = {
+        .callback = inject_retry_cb,
+        .name = "inject_retry",
+    };
+    esp_timer_create(&iargs, &s_inject_retry);
 
     s_history_lock = xSemaphoreCreateMutex();
     s_arena = (s_history_lock != NULL)

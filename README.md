@@ -16,8 +16,8 @@ the session itself.
 </p>
 
 Talk to it and it answers. Ask it to change its voice, its name, its colour, or
-its face — or how much battery it has left — and it does: the agent has tools
-wired to the device's own hardware.
+its face — or how much battery it has left, what time it is, or to wake you at
+seven — and it does: the agent has tools wired to the device's own hardware.
 
 ## The hardware
 
@@ -104,6 +104,7 @@ board's AXP2101 fuel gauge and coloured to match the orb.
 
 | | |
 |---|---|
+| [docs/clock.md](docs/clock.md) | the clock, timezones, timers and alarms, and what happens when one rings |
 | [docs/architecture.md](docs/architecture.md) | the module map: what runs on which task, and the one rule the layout defends |
 | [docs/build.md](docs/build.md) | prerequisites, menuconfig, ports, and where every file lives |
 | [docs/wifi-setup.md](docs/wifi-setup.md) | every way to get credentials onto the device, and why it will not connect |
@@ -120,7 +121,7 @@ board's AXP2101 fuel gauge and coloured to match the orb.
 
 ## Host harnesses
 
-Four things run on a laptop with no board attached, and two of them are gates in
+Six things run on a laptop with no board attached, and three of them are gates in
 CI:
 
 ```bash
@@ -128,6 +129,8 @@ CI:
 ./host/prompt.sh     # prints the assembled system prompt, exactly as the device sends it
 ./host/store.sh      # cuts a flash write in half and checks the saved conversation survives it
 ./host/portal.sh     # opens the captive-portal page in a browser
+./host/alarms.sh     # walks the alarm clock across both DST nights, and checks every timezone row against tzdata
+./host/button.sh     # every way BOOT can be pressed while an alarm rings -- none of them may forget wi-fi
 ```
 
 See [host/README.md](host/README.md). The prompt itself is

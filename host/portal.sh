@@ -2,7 +2,7 @@
 # Open the captive-portal page in a browser, no device involved.
 #
 #   ./portal.sh              the populated state: three fake networks, no key stored
-#   ./portal.sh --key-set    the same, but with a key already in NVS
+#   ./portal.sh --key-set    the same, but with a key and a timezone already in NVS
 #   ./portal.sh --raw        the file untouched, so /scan really fails
 #
 # main/portal.src.html can be opened directly -- it is a plain file, that being the
@@ -17,10 +17,11 @@ set -e
 cd "$(dirname "$0")"
 
 KEY_SET=false
+TZ_SAVED="''"
 RAW=""
 for arg in "$@"; do
     case "$arg" in
-        --key-set) KEY_SET=true ;;
+        --key-set) KEY_SET=true; TZ_SAVED="'Europe/London'" ;;
         --raw)     RAW=1 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
@@ -39,7 +40,7 @@ else
 window.fetch = function (u) {
   if (String(u).indexOf('/scan') === 0) {
     return Promise.resolve({ json: function () {
-      return Promise.resolve({ key_set: $KEY_SET, nets: [
+      return Promise.resolve({ key_set: $KEY_SET, tz: $TZ_SAVED, nets: [
         { ssid: 'kitchen-2.4', rssi: -42, open: false },
         { ssid: 'a-very-long-network-name-to-check-wrapping', rssi: -58, open: false },
         { ssid: 'guest', rssi: -71, open: true } ] });

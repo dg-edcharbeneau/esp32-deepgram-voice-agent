@@ -24,6 +24,11 @@ idf_component_register(
         api_key.c
         history_store.c
         arc_text.c
+        clock.c
+        tz_table.c
+        alarms.c
+        alarm_sched.c
+        font_clock_72.c
     INCLUDE_DIRS .
     # Flash rodata, no RAM until something reads it. Editing any of these
     # rebuilds, so a page or prompt change is a normal edit-and-flash.
@@ -84,3 +89,10 @@ add_custom_command(
     VERBATIM)
 add_custom_target(portal_html DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/portal.html)
 add_dependencies(${COMPONENT_LIB} portal_html)
+
+# font_clock_72.c is lv_font_conv output, kept byte for byte as generated so it
+# can be regenerated without a diff to merge (the command is in its header).
+# It includes "lvgl/lvgl.h" unless told otherwise, and only LVGL's desktop build
+# tells it; this does, for that one file.
+set_source_files_properties(font_clock_72.c PROPERTIES
+    COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)
