@@ -4,6 +4,7 @@
 #include "iot_button.h"
 #include "button_gpio.h"
 
+#include "alarms.h"
 #include "audio_io.h"
 #include "boot_button.h"
 #include "session_ctl.h"
@@ -27,6 +28,42 @@ static const char *TAG = "boot_btn";
 
 static bool s_forgetting;
 
+/*
+ * A PRESS THAT STOPPED AN ALARM BELONGS TO THE ALARM, whatever it turns into.
+ *
+ * Dismissing on the click was not enough. A sleepy hand holds the button until
+ * the noise stops, and the hold is "forget wi-fi" at 3 s -- the chime never
+ * stopped, because no click fires while the button is down, and the device
+ * erased its credentials and rebooted into the portal. Two quick presses were
+ * a noise-suppression toggle and left the chime going.
+ *
+ * So the alarm is dismissed on the press itself, and every gesture that press
+ * (or a second one hard behind it) completes -- click, double click, hold -- is
+ * swallowed. The flag is cleared by the next press that is neither during a
+ * ring nor within SWALLOW_MS of the dismiss, which keeps an impatient second
+ * press from slipping through as half of a double click.
+ */
+#define SWALLOW_MS 1500
+static volatile bool s_swallow;
+static volatile uint32_t s_dismiss_ms;
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static void on_press_down(void *arg, void *usr_data)
+{
+    if (alarms_ringing()) {
+        ESP_LOGI(TAG, "EVT bootpress -- alarm dismissed");
+        alarms_dismiss();
+        s_dismiss_ms = now_ms();
+        s_swallow = true;
+    } else if (s_swallow && (now_ms() - s_dismiss_ms) >= SWALLOW_MS) {
+        s_swallow = false;
+    }
+}
+
 static void restart_cb(void *arg)
 {
     esp_restart();
@@ -41,7 +78,7 @@ static void restart_cb(void *arg)
  */
 static void on_forget_wifi(void *arg, void *usr_data)
 {
-    if (s_forgetting) {
+    if (s_forgetting || s_swallow) {
         return;
     }
     s_forgetting = true;
@@ -80,6 +117,9 @@ static void on_forget_wifi(void *arg, void *usr_data)
  */
 static void on_toggle_ns(void *arg, void *usr_data)
 {
+    if (s_swallow) {
+        return;
+    }
     if (!audio_io_ns_available()) {
         ESP_LOGW(TAG, "EVT bootdouble -- denoiser unavailable");
         ui_flash_status("noise reduction n/a", NS_NOTICE_MS);
@@ -107,6 +147,12 @@ static void on_click(void *arg, void *usr_data)
      *
      * Unconditionally a toggle, unlike the screen tap, which interrupts while the
      * agent is speaking. See the header for why the escape hatch stays simple. */
+    /* The one exception to "unconditionally a toggle": the press that stopped
+     * an alarm. See s_swallow -- starting a session over the chime would also
+     * open the microphone into the tone. */
+    if (s_swallow) {
+        return;
+    }
     ESP_LOGI(TAG, "EVT bootclick");
     session_ctl_request_toggle();
 }
@@ -153,6 +199,9 @@ esp_err_t boot_button_start(void)
                                          (void *)(intptr_t)NS_DOUBLE_WINDOW_MS));
 #endif
 
+    /* First, so a press during a ring is claimed before anything else sees it. */
+    ESP_ERROR_CHECK(iot_button_register_cb(btn, BUTTON_PRESS_DOWN, NULL,
+                                           on_press_down, NULL));
     button_event_args_t hold = { .long_press.press_time = FORGET_HOLD_MS };
     ESP_ERROR_CHECK(iot_button_register_cb(btn, BUTTON_LONG_PRESS_START, &hold,
                                            on_forget_wifi, NULL));

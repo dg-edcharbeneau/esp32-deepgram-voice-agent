@@ -15,6 +15,7 @@
 #include "lwip/sockets.h"
 
 #include "api_key.h"
+#include "clock.h"
 #include "wifi_creds.h"
 #include "wifi_prov.h"
 
@@ -258,7 +259,7 @@ static esp_err_t scan_handler(httpd_req_t *req)
     s_last_activity = xTaskGetTickCount();
 
     /* Worst case per entry: escaped 32-char SSID plus the rest of the object. */
-    size_t cap = 96 + s_scan_count * (WIFI_CREDS_SSID_LEN * 2 + 48);
+    size_t cap = 96 + 96 + s_scan_count * (WIFI_CREDS_SSID_LEN * 2 + 48);
     char *json = malloc(cap);
     if (json == NULL) {
         return httpd_resp_send_500(req);
@@ -279,9 +280,20 @@ static esp_err_t scan_handler(httpd_req_t *req)
     const size_t tail = sizeof("]}") - 1;
     const size_t lim = cap - tail;
 
+    /*
+     * The saved timezone rides on the same request, for the same reason the key
+     * flag does. Empty when none was ever saved, and the page then offers the
+     * phone's own zone instead -- the phone doing the setup is almost always in
+     * the room with the device.
+     */
+    char tz[48];
+    char tz_esc[sizeof(tz) * 2];
+    clock_tz_saved(tz, sizeof(tz));
+    json_escape(tz, tz_esc, sizeof(tz_esc));
+
     size_t n = 0;
-    n += snprintf(json + n, lim - n, "{\"key_set\":%s,\"nets\":[",
-                  api_key_is_stored() ? "true" : "false");
+    n += snprintf(json + n, lim - n, "{\"key_set\":%s,\"tz\":\"%s\",\"nets\":[",
+                  api_key_is_stored() ? "true" : "false", tz_esc);
     for (size_t i = 0; i < s_scan_count && n + 1 < lim; i++) {
         char esc[WIFI_CREDS_SSID_LEN * 2];
         json_escape(s_scan[i].ssid, esc, sizeof(esc));
@@ -343,12 +355,14 @@ static esp_err_t save_handler(httpd_req_t *req)
     char ssid[WIFI_CREDS_SSID_LEN] = {0};
     char pass[WIFI_CREDS_PASS_LEN] = {0};
     char key[DG_API_KEY_LEN] = {0};
+    char tz[48] = {0};
     if (!form_get(body, "ssid", ssid, sizeof(ssid)) || ssid[0] == '\0') {
         free(body);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no ssid");
     }
     form_get(body, "pass", pass, sizeof(pass));
     form_get(body, "key", key, sizeof(key));
+    form_get(body, "tz", tz, sizeof(tz));
     /* Nothing else needs the raw body, and it is the only place the key and the
      * password sit together. */
     memset(body, 0, BODY_MAX + 1);
@@ -382,6 +396,17 @@ static esp_err_t save_handler(httpd_req_t *req)
     if (key[0] != '\0' && api_key_save(key) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "the network saved but the key did not");
+    }
+
+    /*
+     * BLANK MEANS KEEP, like the key -- and a zone the device does not know is
+     * skipped rather than refused. The page reads any answer as "saved", and the
+     * zone is the one field here that can be put right later by voice; failing
+     * the whole save over it would strand someone on the setup network because
+     * their phone reported America/Indiana/Knox.
+     */
+    if (tz[0] != '\0' && !clock_save_tz(tz)) {
+        ESP_LOGW(TAG, "timezone \"%s\" not recognised; not saved", tz);
     }
 
     httpd_resp_set_type(req, "text/plain");

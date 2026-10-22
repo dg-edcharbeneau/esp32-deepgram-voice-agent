@@ -22,6 +22,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A clock, timers and alarms.** The agent can say the time and the date, set
+  its timezone, and set timers and one-shot or weekly alarms. Alarms go off with
+  nobody talking to the device, and the panel shows a large clock while it
+  sleeps. Four tools: `get_time`, `set_clock`, `set_alarm`, `alarms`. All of it
+  is `CONFIG_CLOCK`, on by default. See [docs/clock.md](docs/clock.md).
+
+  **Time** comes from SNTP. Without it the device says it does not know the
+  time, rather than inventing 1970. **This board has no RTC**, though its board
+  package's comment lists one; a bus scan proved it. A PCF85063 driver is kept
+  behind `CONFIG_CLOCK_RTC`, default off. The TLM line gains `clk=` (0 none,
+  1 RTC, 2 SNTP) and `alm=` (pending count).
+
+  **12 or 24-hour** follows the timezone (12-hour across most of the Americas,
+  Australia, India and a few more) until the user says otherwise by voice, and
+  that choice is saved. The sleep clock shows `8:52` with a small `PM` under
+  it, right-aligned.
+
+  **Timezones** are IANA names, set by voice or in a new setup-portal field
+  that is filled in from the phone. A 130-row table maps them to the POSIX rules
+  newlib needs. `host/alarms.sh` checks every row against tzdata across a full
+  year, and its first run caught three Canadian zones that tzdata 2026e moves to
+  permanent summer time on 1 Nov 2026.
+
+  **When one rings,** a locally synthesised chime plays first, so neither the
+  network nor a session is needed for it. The chime is generated inside the
+  playback task rather than queued, because the ring has exactly one writer.
+  After `CONFIG_ALARM_CHIME_S`, or a tap anywhere, the chime stops and the
+  speaker drains. Only then does a session open, so the echo canceller never
+  warms up on a tone. The agent then says what it was: as the greeting of a
+  fresh conversation, or as an `InjectAgentMessage` (`behavior: queue`) sent
+  from the keepalive task, retried on `InjectionRefused`.
+  `session_ctl_request_start_soon()` makes sure an alarm landing during a stop
+  or the cooldown is late rather than lost.
+
+  **Only definitions reach flash.** A weekly alarm's next time is recomputed,
+  never stored as truth, so it never writes NVS. Daylight saving is handled
+  explicitly: a spring-forward 02:30 rings at 03:00, and a fall-back 01:30 rings
+  once.
+
+  **Cost:** +51 kB flash (including a 72 px digits-only font of about 15 kB) and
+  +864 B of static internal RAM. The alarm table and its copies live in PSRAM.
+  `Settings` grows by 1,049 bytes (19,290 to 20,339 with history replayed): four
+  tools as raw cJSON nodes, and one prompt sentence. A first cut with six tools
+  measured 21,349, past the 20 kB at which sessions flapped before, and was cut.
+  Ten fresh-boot sessions went live; one dipped to 1,728 B of DMA-capable
+  memory, so the margin is thin.
+
 - **Microphone noise suppression, off by default and not yet measured on the
   device.** The canceller removes the device's own speaker; nothing removed the
   *room*, so fans, HVAC and traffic went up the wire to Deepgram at full level.

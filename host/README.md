@@ -1,8 +1,9 @@
 # Host harnesses
 
-Four things that run on a laptop instead of the board: a geometry parity check,
-a dump of the assembled system prompt, a preview of the captive-portal page, and
-a power-loss test for the conversation store.
+Six things that run on a laptop instead of the board: a geometry parity check,
+a dump of the assembled system prompt, a preview of the captive-portal page, a
+power-loss test for the conversation store, the alarm clock's arithmetic, and
+what the BOOT button does while an alarm rings.
 
 ## Geometry parity
 
@@ -124,6 +125,54 @@ be testing the cache.
 Not covered: the byte arena in `dg_agent.c`, which is not separable from the
 WebSocket client. Its eviction and its bounds check are exercised by the reboot
 test in [docs/persistence.md](../docs/persistence.md).
+
+## Alarms and timezones
+
+    ./alarms.sh
+
+Compiles `main/alarm_sched.c` and `main/tz_table.c` as they are. Both are plain C
+over libc's time functions, so no stubs are needed. It checks three things:
+
+- **Next-occurrence arithmetic** across both daylight saving nights in Chicago
+  and London. Each zone runs twice, once by IANA name through the laptop's
+  zone database and once as the POSIX rule newlib gets on the device. A
+  spring-forward 02:30 must ring at 03:00, and a fall-back 01:30 must ring once.
+  Also the week and the year wrapping.
+- **The miss window and the parsers** the agent's tools depend on (`07:30`,
+  `weekdays`, `mon,wed`), including refusing a half-understood list of days.
+- **Every row of the timezone table** against tzdata, four samples a day for a
+  year from November 2026. A rule typed wrong fails here by name, not on a
+  device on the night the clocks change. Its first run caught three Canadian
+  zones written with rules that tzdata 2026e retires on 1 Nov 2026. See
+  [docs/clock.md](../docs/clock.md).
+
+Expectations are written as UTC instants, so the test checks the calendar
+rather than the library it is running on.
+
+## The BOOT button during an alarm
+
+    ./button.sh
+
+Compiles `main/boot_button.c` against fakes in `button_stubs/` and fires press
+sequences in the order `espressif/button` emits them. The checks:
+- While an alarm rings, the press itself dismisses it.
+- A click, a double click or a 5-second hold that press turns into does nothing
+  else: no session toggle, no noise-reduction toggle, and above all no
+  `wifi_creds_erase()`.
+- A second press inside the 1.5 s window is still swallowed.
+- Afterwards, and with nothing ringing, every gesture means what it always did,
+  including the 3-second hold that forgets Wi-Fi.
+
+It exists because the first version dismissed only on a click, and a sleepy hand
+holding BOOT to silence the chime erased the saved network instead. The test
+fails on that version, which was checked by putting the bug back. It proves the
+decisions; the component's real event timing still takes one press on the
+board.
+
+The fake `esp_log.h` includes `sdkconfig.h` because the real one does, and
+`boot_button.c` depends on that for `CONFIG_MIC_NS_ENABLE`. Without it the
+double click compiles out, and every double-click check passes on code that
+isn't there.
 
 ## Captive-portal preview
 

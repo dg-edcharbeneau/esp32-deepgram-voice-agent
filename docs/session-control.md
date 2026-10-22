@@ -270,6 +270,17 @@ Forgetting a conversation is the one thing on this device that cannot be undone.
 Stopped is also the one state where the gesture costs nothing: there is no
 session to recover, so a hold there already did nothing a tap could not do.
 
+### When an alarm is ringing
+
+While an alarm chimes, **any** press on the panel dismisses it, not just one on
+the button. So does a BOOT click, the one exception to "the button always
+toggles". The press is swallowed either way: it cannot also start or stop a
+session, interrupt, or offer to forget. A chime makes
+`audio_io_playback_active()` true, so without this branch a tap would read as
+an interrupt and a hold as an offer to forget. ui.c sends `UI_DISMISS` on the
+press and clears the button gate, and `on_gesture()` checks for a ringing alarm
+before anything else. See [the clock](clock.md#when-it-rings).
+
 ## Stopping when nobody is talking
 
 The device uplinks 16 kHz mono for as long as a session is open — roughly

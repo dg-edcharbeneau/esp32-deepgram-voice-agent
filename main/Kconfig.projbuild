@@ -846,4 +846,72 @@ menu "Deepgram Agent Device"
             -80 dBm is roughly where a 2.4 GHz link starts retrying enough to
             matter to a 16 kHz stream. Raise it toward -70 to be warned earlier.
 
+    config CLOCK
+        bool "Clock, timers and alarms"
+        default y
+        help
+            Wall-clock time from SNTP (this board has no RTC, so a reboot with
+            no network has no time until it reconnects); a timezone set by
+            voice or in the setup portal, and 12 or 24-hour time; four agent
+            tools (get_time, set_clock, set_alarm, alarms); timers and alarms
+            that chime, wake the panel and then have the agent say what they
+            were; and a large digital clock on the panel while it sleeps.
+
+            Off removes all of it, tools included -- a tool that can only ever
+            answer "no clock" is worse than no tool.
+
+    config CLOCK_RTC
+        bool "Use a PCF85063 RTC at 0x51"
+        depends on CLOCK
+        default n
+        help
+            Read the RTC at boot so the clock is right before Wi-Fi is, and
+            write every SNTP sync back to it.
+
+            OFF BY DEFAULT BECAUSE THIS BOARD HAS NONE. The board package's
+            comment lists an RTC on the shared bus, but a scan of the
+            ESP32-S3-Touch-AMOLED-1.75C finds 0x18 (ES8311), 0x34 (AXP2101),
+            0x40 (ES7210), 0x5A (touch) and 0x6B (QMI8658 IMU) -- nothing at
+            0x51. Kept for a board that does carry one; it probes first, so
+            turning it on where nothing answers costs one log line.
+
+    config CLOCK_NTP_SERVER
+        string "SNTP server"
+        depends on CLOCK
+        default "pool.ntp.org"
+        help
+            Queried once the station has an address, then on lwIP's own
+            schedule (CONFIG_LWIP_SNTP_UPDATE_DELAY, an hour by default).
+
+    config CLOCK_DEFAULT_TZ
+        string "Timezone until one is set"
+        depends on CLOCK
+        default "UTC"
+        help
+            An IANA name from main/tz_table.c, or a POSIX TZ rule. Used only
+            until the user sets a zone by voice or in the portal; that choice
+            is saved and wins from then on.
+
+    config ALARM_CHIME_S
+        int "Seconds an alarm chimes before the agent announces it"
+        depends on CLOCK
+        default 8
+        range 2 60
+        help
+            The chime is local and needs no network, so it is what actually
+            gets someone's attention; the session that announces the alarm
+            opens only once it stops, because the microphone must not hear it.
+            A tap anywhere, or the BOOT button, stops it early.
+
+    config CLOCK_TEST_TIMER_S
+        int "Bench aid: start a timer this many seconds after boot (0 = off)"
+        depends on CLOCK
+        default 0
+        range 0 3600
+        help
+            BRING-UP TOOL. Sets an unlabelled-but-"test" timer at boot, so the
+            whole firing path -- chime, drain, session start, announcement --
+            runs with nobody speaking to the device. Leave it at 0 in anything
+            that ships.
+
 endmenu

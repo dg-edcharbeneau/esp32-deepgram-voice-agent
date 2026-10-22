@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
@@ -136,6 +137,20 @@ static volatile bool s_play_muted;
  * recovers.
  */
 static volatile bool s_play_gap;
+
+/*
+ * The alarm chime, which the drain task SYNTHESISES rather than anyone queueing.
+ *
+ * audio_io_play() and the ring have exactly one writer, the WebSocket task, and
+ * the carry and the queue stamp above are only correct because of it. A second
+ * producer pushing tone into the ring would interleave with the greeting the
+ * moment a session came up mid-ring -- the white-noise failure the carry exists
+ * to prevent. So the chime never enters the ring: when this is set and the ring
+ * is EMPTY, the drain task fills its own buffer with tone and writes that. Agent
+ * audio always wins, the codec write paces the tone in real time, and stopping
+ * is a store -- there is nothing queued to flush.
+ */
+static volatile bool s_chime_on;
 
 #if CONFIG_AEC_ENABLE
 /*
@@ -476,6 +491,63 @@ static bool s_in_carry_valid;
 
 /* ---------------- playback ---------------- */
 
+/*
+ * One cycle of the chime: a high note, a lower one, then a rest long enough that
+ * it reads as a call rather than a tone. Two notes a fifth-ish apart are what
+ * people already hear as "something finished"; a single beep reads as an error.
+ */
+#define CHIME_NOTE1_HZ  880.0f
+#define CHIME_NOTE2_HZ  660.0f
+#define CHIME_NOTE1_MS  160
+#define CHIME_NOTE2_MS  320
+#define CHIME_CYCLE_MS  1100
+/*
+ * Peak level, as a fraction of full scale. Well above speech, which measures
+ * about 0.31 RMS at full volume on this board, so an alarm is still heard at a
+ * volume someone turned down for conversation -- and short of 1.0, so the decay
+ * never lands on a clipped edge. Volume itself is left alone: setting it writes
+ * NVS, and an alarm has no business changing the user's level.
+ */
+#define CHIME_PEAK      0.7f
+
+/*
+ * Fill `out` with the next `n` samples of the chime, carrying the position in
+ * `*pos` across calls so chunk boundaries are seamless. Each note is a sine with
+ * a 5 ms attack and a linear decay to silence -- an envelope that ends at zero is
+ * what stops it clicking where the note ends.
+ */
+static void chime_fill(int16_t *out, size_t n, uint32_t *pos)
+{
+    const uint32_t rate = (uint32_t)s_rate;
+    const uint32_t n1 = rate * CHIME_NOTE1_MS / 1000;
+    const uint32_t n2 = rate * CHIME_NOTE2_MS / 1000;
+    const uint32_t cycle = rate * CHIME_CYCLE_MS / 1000;
+    const uint32_t attack = rate * 5 / 1000;
+
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t p = *pos;
+        float v = 0.0f;
+        uint32_t k = 0, len = 0;
+        float hz = 0.0f;
+        if (p < n1) {
+            k = p;
+            len = n1;
+            hz = CHIME_NOTE1_HZ;
+        } else if (p < n1 + n2) {
+            k = p - n1;
+            len = n2;
+            hz = CHIME_NOTE2_HZ;
+        }
+        if (len > 0) {
+            const float env = (k < attack) ? (float)k / (float)attack
+                                           : (float)(len - k) / (float)(len - attack);
+            v = CHIME_PEAK * env * sinf(2.0f * (float)M_PI * hz * (float)k / (float)rate);
+        }
+        out[i] = (int16_t)(v * 32767.0f);
+        *pos = (p + 1 >= cycle) ? 0 : p + 1;
+    }
+}
+
 static void playback_task(void *arg)
 {
     /* Mono in, stereo out: the codec is open with two channels, so every
@@ -504,6 +576,8 @@ static void playback_task(void *arg)
     uint8_t *mono_bytes = (uint8_t *)mono;
     uint8_t carry = 0;
     bool carry_valid = false;
+    uint32_t chime_pos = 0;
+    bool chiming = false;
 
     while (1) {
         /* Lead with the half sample left over from last time, if any. */
@@ -513,9 +587,50 @@ static void playback_task(void *arg)
             off = 1;
         }
 
+        /* No wait while chiming: the tone is generated the instant the ring is
+         * found empty, and the codec write below is what paces the loop. */
+        const bool chime = s_chime_on;
         size_t got = xStreamBufferReceive(s_ring, mono_bytes + off, CHUNK_MONO - off,
-                                         pdMS_TO_TICKS(DRAIN_WAIT_MS));
+                                         chime ? 0 : pdMS_TO_TICKS(DRAIN_WAIT_MS));
         size_t total = off + got;
+
+        if (chime != chiming) {
+            /* Every ring starts on the first note, not wherever the last stopped. */
+            chiming = chime;
+            chime_pos = 0;
+        }
+        /*
+         * got, not total: the ring being empty is the condition. A half sample
+         * held over from an odd-length reply makes total 1 forever, and testing
+         * that would never chime and spin on a zero-timeout receive instead. The
+         * carry byte is left exactly where it is -- `carry` still holds it, and
+         * the next reply picks it up.
+         */
+        if (chime && got == 0 && !s_flush_pending) {
+            /* Half a chunk, 32 ms at 16 kHz: short enough that a reply arriving
+             * mid-ring takes over within a frame or two. */
+            const size_t samples = CHUNK_MONO / sizeof(int16_t) / 2;
+            chime_fill(mono, samples, &chime_pos);
+            if (s_play_tap != NULL) {
+                s_play_tap(mono, samples);
+            }
+            for (size_t i = 0; i < samples; i++) {
+#if CONFIG_AEC_ENABLE
+                const codec_sample_t v = (int32_t)mono[i] << 16;
+#else
+                const codec_sample_t v = mono[i];
+#endif
+                stereo[2 * i] = v;
+                stereo[2 * i + 1] = v;
+            }
+            int err = esp_codec_dev_write(s_spk, stereo,
+                                          (int)(samples * 2 * sizeof(codec_sample_t)));
+            if (err != ESP_CODEC_DEV_OK) {
+                ESP_LOGW(TAG, "esp_codec_dev_write failed: %d", err);
+            }
+            s_play_write_ms = now_ms();
+            continue;
+        }
 
         if (s_flush_pending) {
             /* Barge-in. Throw away what we just read plus anything still
@@ -1692,6 +1807,21 @@ void audio_io_note_stream_gap(void)
      * the stitch. Safe from any task -- one bool store, and the producer is the
      * only reader. */
     s_play_gap = true;
+}
+
+void audio_io_chime_start(void)
+{
+    s_chime_on = true;
+}
+
+void audio_io_chime_stop(void)
+{
+    s_chime_on = false;
+}
+
+bool audio_io_chime_active(void)
+{
+    return s_chime_on;
 }
 
 void audio_io_mute_playback(bool muted)
