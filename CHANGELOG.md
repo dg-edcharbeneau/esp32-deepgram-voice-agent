@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-23
+
+Experimental pre-release.
+
 ### Fixed
 
 - **Barge-in at volume 70 and above.** Talking over the agent had stopped
@@ -52,6 +56,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   calls it a win. See [docs/audio-path.md](docs/audio-path.md).
 
 ### Added
+
+- **Mic gain by voice (experimental).** "Set your microphone gain to 21" changes
+  the ES7210's gain at once, 6 to 30 dB in its 3 dB steps, and saves it across
+  resets. The uplink gate rescales with it so it keeps meaning the same loudness
+  (200 at 18 dB, 283 at 21, 399 at 24), and the echo-reference lane is put back
+  to `CONFIG_AEC_REF_GAIN_DB` after every change. For re-measuring the gain on a
+  new board or in a new room; 18 dB is the measured value to come back to.
+  `CONFIG_MIC_GAIN_TOOL`, on; turning it off ignores the saved gain. About 190
+  bytes of Settings. Not yet exercised by voice on the board.
 
 - **`CONFIG_AUDIO_RECORD`, a recording of what the device heard and sent.**
   Debug only, off by default. Each session's first 60 s go into PSRAM -- the raw

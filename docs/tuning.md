@@ -38,7 +38,7 @@ The boot line reports both: `codecs open: 16000 Hz, 16-bit, 2 ch | volume 100
 
 | Option | Default | When to change it |
 |---|---|---|
-| `CONFIG_MIC_IN_GAIN` | 18 dB | **not upward**: at 24 dB the agent's echo clips the mic and barge-in fails, at 30 dB it hears itself. Move `CONFIG_AEC_UPLINK_VAD_PEAK` with it |
+| `CONFIG_MIC_IN_GAIN` | 18 dB | **not upward**: at 24 dB the agent's echo clips the mic and barge-in fails, at 30 dB it hears itself. Move `CONFIG_AEC_UPLINK_VAD_PEAK` with it. To try another value without a rebuild, say "set your microphone gain to N" (`CONFIG_MIC_GAIN_TOOL`), which moves the gate for you |
 | `CONFIG_AUDIO_OUT_VOLUME` | 70 | speaker too quiet, or clipping at the top of the range |
 | `CONFIG_MIC_LEVEL_LOG` | on | turn off once the mic is trusted |
 | `CONFIG_HEAP_PROBE` | off | chasing an allocation failure — names the size **and caps** that failed, which the `TLM` line cannot. This is what found the fault behind the v0.7.0 session drops; turn it on before touching any memory knob |

@@ -1620,6 +1620,33 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+#if CONFIG_MIC_GAIN_TOOL
+        if (strcmp(name->valuestring, "set_mic_gain") == 0) {
+            int db = -1;
+            cJSON *gargs = function_args(fn);
+            if (gargs != NULL) {
+                const cJSON *d = cJSON_GetObjectItemCaseSensitive(gargs, "db");
+                if (cJSON_IsNumber(d)) {
+                    db = d->valueint;
+                }
+                cJSON_Delete(gargs);
+            }
+            if (db < 0) {
+                snprintf(content, sizeof(content),
+                         "No gain was given. It is %d dB now; ask for 6 to 30.",
+                         audio_io_get_mic_gain());
+            } else {
+                /* Rounded to the codec's 3 dB steps, so say where it landed. */
+                int now = audio_io_set_mic_gain(db);
+                ESP_LOGI(TAG, "EVT setmicgain req=%d -> %d", db, now);
+                snprintf(content, sizeof(content),
+                         "Microphone gain is now %d dB. Say just that.", now);
+            }
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+#endif
+
 #if CONFIG_BATTERY
         if (strcmp(name->valuestring, "get_battery") == 0) {
             battery_status_t bat;
@@ -2050,6 +2077,14 @@ static esp_err_t send_settings(void)
     cJSON *srequired = cJSON_AddArrayToObject(sparams, "required");
     cJSON_AddItemToArray(srequired, cJSON_CreateString("level"));
     cJSON_AddItemToArray(functions, set_volume);
+
+#if CONFIG_MIC_GAIN_TOOL
+    /* Bench tuning only, so terse: every byte here is Settings budget. */
+    cJSON_AddItemToArray(functions, cJSON_CreateRaw(
+        "{\"name\":\"set_mic_gain\",\"description\":\"Set your microphone gain in dB, "
+        "6 to 30, for 'set your mic gain to 21'.\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"db\":{\"type\":\"integer\"}},\"required\":[\"db\"]}}"));
+#endif
 
 #if CONFIG_BATTERY
     /*

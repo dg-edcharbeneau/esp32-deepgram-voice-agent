@@ -376,6 +376,29 @@ static bool s_volume_from_nvs;
 #define NVS_NAMESPACE  "dgagent"
 #define NVS_KEY_VOLUME "out_volume"
 #define NVS_KEY_NS     "mic_ns"
+#define NVS_KEY_MICGAIN "mic_gain"
+
+/*
+ * MIC GAIN AT RUNTIME (CONFIG_MIC_GAIN_TOOL), for tuning on the bench by voice.
+ *
+ * The capture task owns every microphone codec operation -- park, reopen, gain
+ * -- so a request is a stored number it applies on its next block, never a
+ * codec call from the WebSocket task. Applying is two calls in a fixed order:
+ * the device-wide gain, which lands on all four ES7210 inputs, then the echo
+ * reference lane put back to CONFIG_AEC_REF_GAIN_DB, exactly as init and the
+ * wake path do it -- skip the second and the canceller's reference clips.
+ *
+ * The uplink gate follows the gain. CONFIG_AEC_UPLINK_VAD_PEAK is the threshold
+ * at CONFIG_MIC_IN_GAIN, and a sample threshold has to scale with the gain to
+ * mean the same loudness: 200 at 18 dB is 283 at 21 and 399 at 24. Without that,
+ * changing the gain would also silently change how hard it is to interrupt.
+ */
+static volatile int s_mic_gain = CONFIG_MIC_IN_GAIN;       /* in force on the codec */
+static volatile int s_mic_gain_want = CONFIG_MIC_IN_GAIN;  /* asked for */
+#if CONFIG_AEC_UPLINK_VAD
+static volatile int s_vad_peak = CONFIG_AEC_UPLINK_VAD_PEAK;
+#endif
+static void mic_gain_apply(int gain_db);
 
 #if CONFIG_MIC_NS_ENABLE
 /* A Kconfig bool is UNDEFINED when off rather than 0, so it cannot be read in a
@@ -778,7 +801,7 @@ static void capture_task(void *arg)
         }
         if (!mic_open) {
             /* Gain before open, mirroring audio_io_init()'s order. */
-            esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
+            esp_codec_dev_set_in_gain(s_mic, (float)s_mic_gain);
             /*
              * ONE UPSTREAM LOG LINE, SILENCED FOR THE LENGTH OF ONE CALL.
              *
@@ -831,6 +854,12 @@ static void capture_task(void *arg)
             ESP_LOGI(TAG, "microphone resumed");
         }
 #endif
+        /* A gain asked for by voice, applied here because this task owns the
+         * microphone codec. Rare, so the log line is affordable. */
+        if (s_mic_gain_want != s_mic_gain) {
+            mic_gain_apply(s_mic_gain_want);
+            ESP_LOGI(TAG, "EVT micgain %d dB, gate %d", s_mic_gain, audio_io_get_vad_peak());
+        }
         int err = esp_codec_dev_read(s_mic, stereo, (int)stereo_bytes);
         if (err != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "esp_codec_dev_read failed: %d", err);
@@ -1111,7 +1140,7 @@ static void capture_task(void *arg)
                     vad_peak = a;
                 }
             }
-            if (vad_peak >= CONFIG_AEC_UPLINK_VAD_PEAK) {
+            if (vad_peak >= s_vad_peak) {
                 s_vad_hold = VAD_HANGOVER_BLOCKS;
             } else if (s_vad_hold > 0) {
                 /* Inside the hangover: still speech as far as the uplink is
@@ -1375,6 +1404,87 @@ static void volume_save(int level)
     }
 }
 
+static int vad_peak_for(int gain_db)
+{
+#if CONFIG_AEC_UPLINK_VAD
+    return (int)lroundf((float)CONFIG_AEC_UPLINK_VAD_PEAK *
+                        powf(10.0f, (float)(gain_db - CONFIG_MIC_IN_GAIN) / 20.0f));
+#else
+    (void)gain_db;
+    return 0;
+#endif
+}
+
+/* The saved gain when the tool is built in, else the Kconfig one. A saved value
+ * is ignored without the tool, so turning it off always means the default. */
+static int mic_gain_load(void)
+{
+#if CONFIG_MIC_GAIN_TOOL
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        uint8_t saved = 0;
+        const esp_err_t err = nvs_get_u8(h, NVS_KEY_MICGAIN, &saved);
+        nvs_close(h);
+        if (err == ESP_OK && saved >= 6 && saved <= 30) {
+            return saved;
+        }
+    }
+#endif
+    return CONFIG_MIC_IN_GAIN;
+}
+
+/* Capture task only (and init, before it exists). */
+static void mic_gain_apply(int gain_db)
+{
+    esp_codec_dev_set_in_gain(s_mic, (float)gain_db);
+#if CONFIG_AEC_ENABLE
+    esp_codec_dev_set_in_channel_gain(s_mic, AEC_REF_INPUT_MASK, (float)CONFIG_AEC_REF_GAIN_DB);
+#endif
+    s_mic_gain = gain_db;
+#if CONFIG_AEC_UPLINK_VAD
+    s_vad_peak = vad_peak_for(gain_db);
+#endif
+}
+
+int audio_io_set_mic_gain(int requested_db)
+{
+    /* The ES7210's PGA steps in 3 dB to 30 (es7210.c get_db()), so round to a
+     * step. Below 6 a voice is lost; 30 already made the device hear itself. */
+    int g = ((requested_db + 1) / 3) * 3;
+    if (g < 6) g = 6;
+    if (g > 30) g = 30;
+    s_mic_gain_want = g;
+#if CONFIG_MIC_GAIN_TOOL
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_MICGAIN, (uint8_t)g);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not persist mic gain: %s", esp_err_to_name(err));
+    }
+#endif
+    return g;
+}
+
+int audio_io_get_mic_gain(void)
+{
+    return s_mic_gain;
+}
+
+int audio_io_get_vad_peak(void)
+{
+#if CONFIG_AEC_UPLINK_VAD
+    return s_vad_peak;
+#else
+    return 0;
+#endif
+}
+
 int audio_io_get_volume(void)
 {
     return s_volume;
@@ -1500,7 +1610,11 @@ esp_err_t audio_io_init(int sample_rate)
      * to exist before a level can be applied at all. */
     s_volume = volume_load();
     esp_codec_dev_set_out_vol(s_spk, s_volume);
-    esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
+    s_mic_gain = s_mic_gain_want = mic_gain_load();
+#if CONFIG_AEC_UPLINK_VAD
+    s_vad_peak = vad_peak_for(s_mic_gain);
+#endif
+    esp_codec_dev_set_in_gain(s_mic, (float)s_mic_gain);
 
     int err = esp_codec_dev_open(s_spk, &fs);
     if (err != ESP_CODEC_DEV_OK) {
@@ -1657,7 +1771,7 @@ esp_err_t audio_io_init(int sample_rate)
                   "(range %d dB, gain +%d dB), mic gain %d dB",
              sample_rate, CODEC_BITS, CODEC_CHANNELS, s_volume,
              s_volume_from_nvs ? " (saved)" : " (default)", asked_db,
-             CONFIG_AUDIO_OUT_RANGE_DB, CONFIG_AUDIO_OUT_EXTRA_GAIN_DB, CONFIG_MIC_IN_GAIN);
+             CONFIG_AUDIO_OUT_RANGE_DB, CONFIG_AUDIO_OUT_EXTRA_GAIN_DB, s_mic_gain);
     return ESP_OK;
 }
 

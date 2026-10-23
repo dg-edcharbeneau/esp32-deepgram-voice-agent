@@ -242,6 +242,21 @@ menu "Deepgram Agent Device"
             never listens while it plays. Lowering this needs AEC_UPLINK_VAD_PEAK
             lowered with it: see there.
 
+    config MIC_GAIN_TOOL
+        bool "Let the agent change the mic gain by voice (experimental)"
+        default y
+        help
+            Adds a set_mic_gain tool: "set your microphone gain to 21". The gain
+            applies at once, is saved, and survives a reset; the uplink gate
+            (AEC_UPLINK_VAD_PEAK) is rescaled with it so it keeps meaning the same
+            loudness. 6 to 30 dB in the ES7210's 3 dB steps.
+
+            Experimental, and on so a released image can be tuned without a
+            rebuild. MIC_IN_GAIN is a measured value, not a taste: this is for
+            re-measuring it on a new board or in a new room, and 18 dB is where
+            to come back to. Turning the option off ignores any saved gain and
+            goes back to MIC_IN_GAIN. It costs about 190 bytes of Settings.
+
     config MIC_LEVEL_LOG
         bool "Log microphone peak level every 3 s"
         default y

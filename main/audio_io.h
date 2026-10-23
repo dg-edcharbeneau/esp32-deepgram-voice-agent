@@ -239,6 +239,17 @@ int audio_io_adjust_volume(int delta);   /* relative; returns the resulting leve
 /* True while agent audio is playing or has only just stopped. */
 bool audio_io_playback_active(void);
 
+/*
+ * Microphone gain at runtime (CONFIG_MIC_GAIN_TOOL). set() rounds to the
+ * ES7210's 3 dB steps within 6..30, saves it, and returns what will apply; the
+ * capture task applies it on its next block, with the echo-reference lane put
+ * back and the uplink gate rescaled to match. get_vad_peak() is the gate in
+ * force, which is CONFIG_AEC_UPLINK_VAD_PEAK only at CONFIG_MIC_IN_GAIN.
+ */
+int audio_io_set_mic_gain(int requested_db);
+int audio_io_get_mic_gain(void);
+int audio_io_get_vad_peak(void);
+
 void audio_io_stats(uint32_t *played, uint32_t *dropped, uint32_t *captured);
 
 /*
