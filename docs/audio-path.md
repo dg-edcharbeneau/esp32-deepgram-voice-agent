@@ -449,7 +449,7 @@ was sent) split the failure in two:
   is Deepgram-side, and the recording reproduces it.
 
 What fixed the device half, measured: `CONFIG_MIC_IN_GAIN` 24 -> 18 dB (no
-clipping; residual echo under 100), `CONFIG_AEC_UPLINK_VAD_PEAK` 400 -> 200 (the
+clipping; residual echo under 100 in quiet passages), `CONFIG_AEC_UPLINK_VAD_PEAK` 400 -> 200 (the
 same threshold at the lower gain -- left at 400 it chopped a talking-over voice
 into fragments, and interruptions only landed in the agent's pauses), with noise
 suppression on. 30 dB was tried and is worse than 24: the device heard itself read
@@ -458,4 +458,15 @@ the time and answered it.
 The language model was a separate problem. After a working barge-in on "okay",
 gpt-4o-mini picked the story back up; a prompt rule against it was ignored.
 gpt-5.4-mini stopped and stayed stopped, and is the model now.
+
+**Ducking was tried and does not work here, and neither would a local barge-in.**
+The idea was to turn the agent down (-12 dB) the moment the post-cancellation
+signal showed someone talking over it, so the canceller had less echo to fight
+during double-talk. It fired on the agent's own voice: 4 times in one reply and 12
+in another, with nobody talking, and the agent's volume pumped up and down.
+Residual echo is under 100 in quiet passages but crosses 400 in loud ones, and a
+voice over the agent lands in the same range -- there is no threshold on this
+signal that separates the two, so the device cannot make that call by itself.
+Muting the agent on it ("local barge-in") would cut the agent off instead of
+fading it. The decision has to stay with Deepgram, which hears the whole signal.
 

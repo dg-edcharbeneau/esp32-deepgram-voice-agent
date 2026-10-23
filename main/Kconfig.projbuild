@@ -234,7 +234,9 @@ menu "Deepgram Agent Device"
               30 dB  31% of mic blocks clipped during replies, the canceller let
                      the echo through, and the device heard itself read the time
                      and answered it.
-              18 dB  no clipping; residual echo under 100; interruptions
+              18 dB  no clipping; residual echo under 100 in quiet passages
+                     (it crosses 400 in loud ones -- see AEC_UPLINK_VAD_PEAK);
+                     interruptions
                      detected reliably.
             spec_analyzer_radial uses 24 dB, which is right for a device that
             never listens while it plays. Lowering this needs AEC_UPLINK_VAD_PEAK
@@ -400,8 +402,17 @@ menu "Deepgram Agent Device"
             200 is that same threshold at 18 dB. Measured 2026-10-22: left at 400
             after the gain came down, the gate cut a talking-over voice into
             fragments and interruptions only landed in the agent's pauses; at
-            200 it passed every block of them, with residual echo still under
-            100. Change one, change the other.
+            200 it passed every block of them. Change one, change the other.
+
+            The gate is NOT an echo detector, and must not be used as one.
+            Residual echo stays under 100 in the agent's quiet passages but
+            regularly crosses 400 in its loud ones -- so at 200 the uplink is
+            open for most of a reply (about 86% measured), which is what lets an
+            interruption through, and costs only bandwidth. A device-side
+            decision on this signal does not hold up: ducking the agent on it
+            (tried 2026-10-23, -12 dB after two blocks over 400) fired 16 times
+            across two replies with nobody talking and pumped the agent's
+            volume up and down.
 
             Too low and the reply burst keeps the uplink open and the link dies
             as before; too high and quiet interruptions are ignored. Retune from

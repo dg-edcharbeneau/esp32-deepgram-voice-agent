@@ -25,8 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     400, the gate cut a talking-over voice into fragments and interruptions only
     landed in the agent's pauses.
 
-  Measured on the board at volume 70: no clipping, residual echo under 100,
-  interruptions detected reliably, best with noise suppression on (the default).
+  Measured on the board at volume 70: no clipping, residual echo under 100 in
+  the agent's quiet passages, interruptions detected reliably, best with noise suppression on (the default).
   One half remains Deepgram-side: in session
   `01a165b8-6a6f-7180-96d0-c5210810b4a2` Flux STT finds a turn in the replayed
   uplink at ~22.7 s where the live agent did not barge in. See
