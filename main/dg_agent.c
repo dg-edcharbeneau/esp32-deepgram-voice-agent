@@ -247,6 +247,11 @@ static volatile bool s_test_pending;
  * mid-turn: try again once they have probably finished, a few times. */
 #define INJECT_RETRY_MS  2000
 #define INJECT_RETRIES   4
+/* The current session's request_id and when its Welcome arrived. WebSocket task
+ * writes; readers (the audio recorder) only look after a session has ended. */
+static char s_request_id[48];
+static volatile int64_t s_welcome_us;
+
 static portMUX_TYPE s_announce_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_announce[ANNOUNCE_MAX];
 static uint32_t s_announce_ms;       /* 0 when the slot is empty */
@@ -1615,6 +1620,33 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+#if CONFIG_MIC_GAIN_TOOL
+        if (strcmp(name->valuestring, "set_mic_gain") == 0) {
+            int db = -1;
+            cJSON *gargs = function_args(fn);
+            if (gargs != NULL) {
+                const cJSON *d = cJSON_GetObjectItemCaseSensitive(gargs, "db");
+                if (cJSON_IsNumber(d)) {
+                    db = d->valueint;
+                }
+                cJSON_Delete(gargs);
+            }
+            if (db < 0) {
+                snprintf(content, sizeof(content),
+                         "No gain was given. It is %d dB now; ask for 6 to 30.",
+                         audio_io_get_mic_gain());
+            } else {
+                /* Rounded to the codec's 3 dB steps, so say where it landed. */
+                int now = audio_io_set_mic_gain(db);
+                ESP_LOGI(TAG, "EVT setmicgain req=%d -> %d", db, now);
+                snprintf(content, sizeof(content),
+                         "Microphone gain is now %d dB. Say just that.", now);
+            }
+            send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+#endif
+
 #if CONFIG_BATTERY
         if (strcmp(name->valuestring, "get_battery") == 0) {
             battery_status_t bat;
@@ -1963,7 +1995,7 @@ static esp_err_t send_settings(void)
     cJSON *think = cJSON_AddObjectToObject(agent, "think");
     cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
     cJSON_AddStringToObject(think_provider, "type", "open_ai");
-    cJSON_AddStringToObject(think_provider, "model", "gpt-4o-mini");
+    cJSON_AddStringToObject(think_provider, "model", "gpt-5.4-mini");
 
     /*
      * The persona, assembled from the blocks in main/prompt. Built in PSRAM and freed
@@ -2045,6 +2077,14 @@ static esp_err_t send_settings(void)
     cJSON *srequired = cJSON_AddArrayToObject(sparams, "required");
     cJSON_AddItemToArray(srequired, cJSON_CreateString("level"));
     cJSON_AddItemToArray(functions, set_volume);
+
+#if CONFIG_MIC_GAIN_TOOL
+    /* Bench tuning only, so terse: every byte here is Settings budget. */
+    cJSON_AddItemToArray(functions, cJSON_CreateRaw(
+        "{\"name\":\"set_mic_gain\",\"description\":\"Set your microphone gain in dB, "
+        "6 to 30, for 'set your mic gain to 21'.\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"db\":{\"type\":\"integer\"}},\"required\":[\"db\"]}}"));
+#endif
 
 #if CONFIG_BATTERY
     /*
@@ -2414,6 +2454,11 @@ static void handle_json(const char *json, int len)
         /* Worth logging: this id is what Deepgram support asks for. */
         ESP_LOGI(TAG, "Welcome, request_id=%s",
                  cJSON_IsString(rid) ? rid->valuestring : "?");
+        /* Kept as well, so a recording of this session can name it and say where
+         * "seconds into call" -- the server logs' clock -- starts. */
+        strlcpy(s_request_id, cJSON_IsString(rid) ? rid->valuestring : "?",
+                sizeof(s_request_id));
+        s_welcome_us = esp_timer_get_time();
 
     } else if (strcmp(t, "SettingsApplied") == 0) {
         static uint32_t sessions;
@@ -3248,6 +3293,14 @@ esp_err_t dg_agent_stop(void)
 
     ESP_LOGI(TAG, "session stopped");
     return ESP_OK;
+}
+
+const char *dg_agent_request_id(int64_t *welcome_us)
+{
+    if (welcome_us != NULL) {
+        *welcome_us = s_welcome_us;
+    }
+    return s_request_id[0] ? s_request_id : "?";
 }
 
 bool dg_agent_is_ready(void)

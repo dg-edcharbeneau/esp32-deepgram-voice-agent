@@ -385,9 +385,9 @@ The feature ships; these are the threads left, in the order I would pull them.
   property of aggressive suppression rather than of that one library, and one
   esp-sr run hinted at it ("A quick brown fox **jumped**"). A single utterance,
   so not conclusive — which is exactly why it is worth a deliberate run.
-- **`CONFIG_AEC_UPLINK_VAD_PEAK` has not been re-tuned for a denoised signal.**
-  Moving NS below the VAD restored barge-in to baseline, so nothing is broken,
-  but the threshold is still the one chosen for the undenoised floor.
+- **`CONFIG_AEC_UPLINK_VAD_PEAK` was re-tuned in October, for the gain, not the
+  denoiser.** See "Barge-in at volume 70" below; the October runs passed with
+  noise suppression on and off alike, and caught interruptions more readily on.
 - **Long-run heap behaviour.** Every capture started from a boot-fresh heap. A
   board twenty minutes into use fragments further — `intmax` has been recorded
   dipping to 6,144 over ~22 minutes against the 25,600 measured here.
@@ -427,3 +427,46 @@ default. This is the order `bsp_extra` uses.
 ---
 
 [Back to the README](../README.md)
+
+## Barge-in at volume 70, October 2026
+
+Barge-in stopped working at volume 70 and above (50 still worked) with nothing
+changed on the device. The firmware was ruled out on the board, not on paper:
+0.7.0 and `85f3518` -- the 30 August build whose commit records "barge-in fires"
+at 70 and 100 -- both failed the same way, on the same settings, with echo levels
+at the microphone matching August's. Whatever moved is outside this repo.
+
+A recording of each session (`CONFIG_AUDIO_RECORD`: the raw mic and exactly what
+was sent) split the failure in two:
+
+- **At 24 dB the interruption never left the device intact.** The echo plus a
+  voice over it pinned the mic at 32,768, and the canceller cannot subtract what
+  clipped. Replaying the recorded uplink into Flux STT on its own
+  (`host/flux_replay.py`) found no turn at those moments either.
+- **At 18 dB it does, and the agent sometimes still does not act.** Session
+  `01a165b8-6a6f-7180-96d0-c5210810b4a2`: Flux STT finds a StartOfTurn at about
+  22.7 s in the replayed uplink; the live agent did not barge in there. That half
+  is Deepgram-side, and the recording reproduces it.
+
+What fixed the device half, measured: `CONFIG_MIC_IN_GAIN` 24 -> 18 dB (no
+clipping; residual echo under 100 in quiet passages), `CONFIG_AEC_UPLINK_VAD_PEAK` 400 -> 200 (the
+same threshold at the lower gain -- left at 400 it chopped a talking-over voice
+into fragments, and interruptions only landed in the agent's pauses), with noise
+suppression on. 30 dB was tried and is worse than 24: the device heard itself read
+the time and answered it.
+
+The language model was a separate problem. After a working barge-in on "okay",
+gpt-4o-mini picked the story back up; a prompt rule against it was ignored.
+gpt-5.4-mini stopped and stayed stopped, and is the model now.
+
+**Ducking was tried and does not work here, and neither would a local barge-in.**
+The idea was to turn the agent down (-12 dB) the moment the post-cancellation
+signal showed someone talking over it, so the canceller had less echo to fight
+during double-talk. It fired on the agent's own voice: 4 times in one reply and 12
+in another, with nobody talking, and the agent's volume pumped up and down.
+Residual echo is under 100 in quiet passages but crosses 400 in loud ones, and a
+voice over the agent lands in the same range -- there is no threshold on this
+signal that separates the two, so the device cannot make that call by itself.
+Muting the agent on it ("local barge-in") would cut the agent off instead of
+fading it. The decision has to stay with Deepgram, which hears the whole signal.
+

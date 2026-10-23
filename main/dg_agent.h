@@ -156,6 +156,13 @@ void dg_agent_suppress_state_events(bool suppress);
 bool dg_agent_is_ready(void);
 
 /*
+ * The latest session's request_id -- the key to Deepgram's server-side logs --
+ * and, through `welcome_us`, the esp_timer time its Welcome arrived, which is
+ * where the server's "seconds into call" counts from. "?" before the first.
+ */
+const char *dg_agent_request_id(int64_t *welcome_us);
+
+/*
  * Frames the uplink queue had to drop because the socket could not keep up,
  * cumulative since boot.
  *

@@ -85,6 +85,29 @@ menu "Deepgram Agent Device"
             How long silence may run before a turn is force-ended. 0 omits the
             field and uses the server default.
 
+    config AUDIO_RECORD
+        bool "Record each session's microphone audio for debugging"
+        depends on AEC_ENABLE
+        default n
+        help
+            DEBUG ONLY. Records the first AUDIO_RECORD_SECONDS of every session
+            into PSRAM -- two channels, the raw microphone before echo
+            cancellation and exactly what was sent to Deepgram -- and prints it
+            to the console as base64 once the session ends.
+            host/rec2wav.py turns a capture of that log into a WAV labelled
+            with the session's request_id, aligned to the server's
+            "seconds into call".
+
+            Costs ~2 kB x 2 of PSRAM per second recorded, a memcpy per 64 ms
+            block on the capture task, and a few seconds of console traffic
+            after each session. It records the room: do not leave it on.
+
+    config AUDIO_RECORD_SECONDS
+        int "Seconds of each session to record"
+        depends on AUDIO_RECORD
+        default 60
+        range 5 120
+
     config DEEPGRAM_LOG_WIRE_JSON
         bool "Log every JSON message sent to Deepgram"
         default n
@@ -195,11 +218,44 @@ menu "Deepgram Agent Device"
 
     config MIC_IN_GAIN
         int "Microphone ADC gain (dB)"
-        default 24
+        default 18
         range 0 48
         help
-            spec_analyzer_radial uses 24 dB on this board. Raise it if mic peaks
-            stay near zero while you are speaking.
+            18 dB, measured, and NOT higher: the gain is what decides whether the
+            agent's own voice clips the microphone, and a clipped echo cannot be
+            cancelled.
+
+            Measured 2026-10-22 at volume 70, with a recording of the raw mic and
+            of exactly what went to Deepgram (CONFIG_AUDIO_RECORD):
+              24 dB  the echo plus a voice over it pinned the mic at 32,768. Barge-in
+                     failed, and replaying the uplink into Flux STT on its own
+                     found no turn either -- the interruption never left the
+                     device intact.
+              30 dB  31% of mic blocks clipped during replies, the canceller let
+                     the echo through, and the device heard itself read the time
+                     and answered it.
+              18 dB  no clipping; residual echo under 100 in quiet passages
+                     (it crosses 400 in loud ones -- see AEC_UPLINK_VAD_PEAK);
+                     interruptions
+                     detected reliably.
+            spec_analyzer_radial uses 24 dB, which is right for a device that
+            never listens while it plays. Lowering this needs AEC_UPLINK_VAD_PEAK
+            lowered with it: see there.
+
+    config MIC_GAIN_TOOL
+        bool "Let the agent change the mic gain by voice (experimental)"
+        default y
+        help
+            Adds a set_mic_gain tool: "set your microphone gain to 21". The gain
+            applies at once, is saved, and survives a reset; the uplink gate
+            (AEC_UPLINK_VAD_PEAK) is rescaled with it so it keeps meaning the same
+            loudness. 6 to 30 dB in the ES7210's 3 dB steps.
+
+            Experimental, and on so a released image can be tuned without a
+            rebuild. MIC_IN_GAIN is a measured value, not a taste: this is for
+            re-measuring it on a new board or in a new room, and 18 dB is where
+            to come back to. Turning the option off ignores any saved gain and
+            goes back to MIC_IN_GAIN. It costs about 190 bytes of Settings.
 
     config MIC_LEVEL_LOG
         bool "Log microphone peak level every 3 s"
@@ -348,18 +404,30 @@ menu "Deepgram Agent Device"
 
     config AEC_UPLINK_VAD_PEAK
         int "Post-AEC peak that counts as speech during playback"
-        default 400
+        default 200
         range 50 8000
         depends on AEC_UPLINK_VAD
         help
             Peak absolute sample, measured AFTER cancellation, above which a
             block is treated as somebody talking rather than as residual echo.
 
-            Measured on this board at volume 70, from the "mic peak ... out="
-            log: with nobody talking over the agent, post-AEC peaks ran 5-40 and
-            touched 263 at worst; talking over it produced 533, 1349 and 1607.
-            400 sits in that gap, nearer the noise than the speech so a quiet
-            barge-in still opens the link.
+            IT SCALES WITH MIC_IN_GAIN. It is a sample value, so the same voice
+            reads half as large at 6 dB less gain. 400 was chosen at 24 dB --
+            residual echo 5-40, someone talking over the agent 533-1607 -- and
+            200 is that same threshold at 18 dB. Measured 2026-10-22: left at 400
+            after the gain came down, the gate cut a talking-over voice into
+            fragments and interruptions only landed in the agent's pauses; at
+            200 it passed every block of them. Change one, change the other.
+
+            The gate is NOT an echo detector, and must not be used as one.
+            Residual echo stays under 100 in the agent's quiet passages but
+            regularly crosses 400 in its loud ones -- so at 200 the uplink is
+            open for most of a reply (about 86% measured), which is what lets an
+            interruption through, and costs only bandwidth. A device-side
+            decision on this signal does not hold up: ducking the agent on it
+            (tried 2026-10-23, -12 dB after two blocks over 400) fired 16 times
+            across two replies with nobody talking and pumped the agent's
+            volume up and down.
 
             Too low and the reply burst keeps the uplink open and the link dies
             as before; too high and quiet interruptions are ignored. Retune from

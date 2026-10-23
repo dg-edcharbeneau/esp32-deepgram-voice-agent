@@ -174,6 +174,30 @@ The fake `esp_log.h` includes `sdkconfig.h` because the real one does, and
 double click compiles out, and every double-click check passes on code that
 isn't there.
 
+## Recording a session, and replaying it into Flux
+
+Two tools for the audio path, both working from a build with
+`CONFIG_AUDIO_RECORD=y`, which prints each session's first 60 s to the console
+when the session ends.
+
+    host/rec2wav.py capture.log [out.wav]
+    host/flux_replay.py sent.wav [offset_s]
+
+`rec2wav.py` rebuilds a two-channel WAV from a captured serial log -- left the
+raw microphone before echo cancellation, right exactly what was sent to Deepgram,
+silence where the uplink VAD held a block back -- and prints a per-second
+timeline on the server's "seconds into call" clock, with the session's
+request_id. Lines are numbered on the device, so a block lost on the serial link
+is reported and written as silence rather than closing up the timeline.
+
+`flux_replay.py` streams a 16 kHz mono WAV -- the "sent" channel -- into Flux STT
+in real time and prints every turn event. It answers the one question the device
+cannot: given exactly this audio, does Flux find a turn here? It needs the
+`websockets` package and `DEEPGRAM_API_KEY` in the environment, and bills the
+replayed audio to that key. In October it showed a 24 dB uplink with no
+detectable interruption in it, and an 18 dB one where Flux found a turn the live
+agent had not acted on.
+
 ## Captive-portal preview
 
 Opens `main/portal.src.html` in a browser, so a wording or layout change costs a

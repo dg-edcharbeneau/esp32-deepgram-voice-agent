@@ -29,6 +29,17 @@ from the `Settings` message entirely — so there is no session reload, no histo
 replay and no gap. The confirmation sentence is itself spoken at the new level,
 which is the feedback.
 
+### The microphone gain, for tuning (experimental)
+
+`set_mic_gain` takes a `db`: "set your microphone gain to 21". It is a bench tool
+behind `CONFIG_MIC_GAIN_TOOL`, for re-measuring `CONFIG_MIC_IN_GAIN` without a
+rebuild. `audio_io_set_mic_gain()` rounds to the ES7210's 3 dB steps within
+6..30, saves it, and leaves the codec call to the capture task, which owns the
+microphone. That task sets the device-wide gain, puts the echo-reference lane
+back to `CONFIG_AEC_REF_GAIN_DB`, and rescales the uplink gate so it keeps
+meaning the same loudness; the log line is `EVT micgain 21 dB, gate 283`. 18 dB
+is the measured value -- see [tuning.md](tuning.md).
+
 ### Scale — and why the stock curve had to go
 
 `esp_codec_dev`'s default curve maps 0-100 onto **-50..0 dB**. On this speaker

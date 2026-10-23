@@ -358,6 +358,7 @@ one, Deepgram would call a web service instead of asking the device:
 | --- | --- | --- |
 | `adjust_volume` | One ES8311 register write, effective on the next sample | always |
 | `set_volume` | Same write, absolute rather than relative; both go through `audio_io_set_volume()` | always |
+| `set_mic_gain` | `audio_io_set_mic_gain()` saves it; the capture task applies it with the reference lane and the gate rescaled. Experimental | `CONFIG_MIC_GAIN_TOOL` |
 | `get_battery` | Reads only. Copies `battery.c`'s last sample and describes it | `CONFIG_BATTERY` |
 | `set_face` | `ui_set_face()` — the frame timer picks it up | always |
 | `set_color` | `ui_set_orb_color()` — same handoff; orb only | always |
