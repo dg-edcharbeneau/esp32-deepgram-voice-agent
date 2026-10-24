@@ -946,6 +946,18 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(wait_ms));
         wait_ms = CONFIG_UI_TELEMETRY_MS;
 
+#if CONFIG_UI_SCREENSHOT_TOUR
+        /* Bench build: walk the display test once, 10 s after boot, capturing
+         * each step over serial (ui.c drives it from there). The same entry the
+         * voice command uses, so the session is stopped and the mic monitored. */
+        static bool toured;
+        if (!toured && now_ms() > 10000) {
+            toured = true;
+            ESP_LOGI(TAG, "EVT shot tour start");
+            enter_display_test();
+        }
+#endif
+
         /*
          * Hand over once the speaker is actually done, so the announcement is
          * not cut off. Polled here rather than in a task of its own, at a
@@ -1322,7 +1334,7 @@ void app_main(void)
                  " heap=%" PRIu32 " int=%u intmax=%u dma=%u dmamax=%u"
                  " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
-                 " rssi=%d bars=%d ch=%d clk=%d alm=%d",
+                 " rssi=%d bars=%d ch=%d clk=%d alm=%d panel=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1378,6 +1390,6 @@ void app_main(void)
                  sig_ok ? (int)sig.bars : -1,
                  sig_ok ? (int)sig.channel : -1,
                  /* Where the wall clock came from: 0 none yet, 1 RTC, 2 SNTP. */
-                 (int)clock_source(), alarms_count());
+                 (int)clock_source(), alarms_count(), t.panel);
     }
 }

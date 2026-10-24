@@ -98,6 +98,13 @@ void session_ctl_request_start_soon(void);
 void session_ctl_request_ns_save(void);
 #endif
 
+/*
+ * "Save the volume and mic gain to flash when you get a moment" -- whatever the
+ * touch panel changed with audio_io's _live() setters. Same reason and same
+ * mechanism as the denoiser's save above. Safe from any task.
+ */
+void session_ctl_request_settings_save(void);
+
 void session_ctl_repaint_idle_status(void);
 
 /*

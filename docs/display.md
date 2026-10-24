@@ -263,6 +263,60 @@ frame it wakes the panel. The digits step a few pixels each minute, because a
 static picture held for hours marks an AMOLED. The details are in
 [the clock page](clock.md#the-sleep-clock).
 
+### The touch panel
+
+**Swipe down from the top edge** and a panel of settings covers the face. Swipe
+sideways for the next page, swipe up to close it; it also closes itself 8 s
+after the last touch, and gives way to a ringing alarm, the setup QR code and
+the display test. The conversation carries on underneath: the agent keeps
+talking and the microphone keeps listening.
+
+| page | controls | the same as |
+|---|---|---|
+| Sound | mic gain (left) and volume (right) as linked pairs: + above, - below, and between them a bridge showing the value as a level meter, its number and its name; the button that cannot go further turns dark at a limit | `set_mic_gain`, `set_volume` |
+| Colour | the 13 orb colours on a clock face, 11 + "+2"; the one in force is ringed and named | `set_color` |
+| Toggles | noise reduction on/off; 12-hour/24-hour | BOOT double click; `set_clock {hours}` |
+| Timers & alarms | the soonest first, one at a time, ‹ › for the rest; Cancel takes two taps | the `alarms` tool |
+
+Nothing here is new behaviour -- every control calls what the voice tool or BOOT
+already did, through `main/controls.c`. Two rules come with that:
+
+- **No flash writes on the LVGL task.** A commit runs with the cache off and
+  stalls the audio path. Volume and mic gain apply on the press and are saved
+  by session_ctl's worker 2 s after the last one (`EVT settings saved`), so a
+  run of presses costs one write; noise reduction and the clock format already
+  deferred their saves.
+- **The agent is never told.** None of these is in Settings, so there is no
+  reload and no gap -- unlike the name and the voice, which stay voice-only for
+  exactly that reason.
+
+The look follows a reference sheet: buttons fill a disc inset 34 px from the
+edge, split by 36 px gaps, every corner rounded to 8 px; primary white,
+secondary `#1F2229`, pressed `#C8CCD4`, disabled `#16181D`. The sound page's
+bridge is 76 px tall, `#4E5462` for the level and `#2B2E37` for the rest, and is
+a readout only -- a tap on it does nothing. Volume's meter reads out of 100, like
+its number; mic gain's spans 6-30 dB. Colours are rounded, not truncated, to
+RGB565: truncating takes more off red and blue than green and turned those
+neutral greys green on the panel.
+
+**Painted, not built from widgets.** LVGL has no shape for a segment of a
+circle, and its widgets allocate mask buffers from internal RAM while they draw.
+So the shapes are signed distance functions in `main/panel_geom.c`, which also
+do the hit testing -- what is drawn is exactly what can be touched -- and
+`main/ui_panel.c` paints straight into the face's PSRAM canvas; the sound page's
+side-by-side halves reuse the top half's mask transposed. Evaluating them
+per pixel took 812 ms for the sound page on the board, where the LVGL task
+shares a core with the echo canceller; the four quarters are one shape mirrored
+and the halves another, so each is rasterised once at boot into a coverage mask
+(108 kB PSRAM, ~80 ms on a background task) and a paint is a lookup: 10-60 ms,
+and only when something changed. Text and the stroked icons go through an LVGL
+layer, in Montserrat at 18, 28 and 40 px (`font_panel_*.c`, generated). With
+the panel open the largest internal block held at 23,552 throughout, the same as
+closed. `host/panel.sh` checks the geometry, including that the tile and mirror
+shortcuts the painter takes are exact; `CONFIG_UI_PANEL_SELFTEST` drives every
+control on the board for the log -- the sound page at its limits included -- and
+prints every repaint as a screen capture for `host/shot2png.py`.
+
 ### Telemetry
 
 One machine-parseable line per second, plus `EVT` lines on every transition:
@@ -276,7 +330,8 @@ EVT beh IDLE->SPEAKING after=4.20s
 ```
 
 `clk=` is where the wall clock came from (0 none yet, 1 RTC, 2 SNTP), and `alm=`
-how many timers and alarms are pending; see [the clock](clock.md).
+how many timers and alarms are pending; see [the clock](clock.md). `panel=` is
+the touch panel's page, or -1 while it is closed.
 
 `bat=`, `rssi=`, `bars=` and `ch=` are **-1 when there is no reading** -- no
 association, or no sample yet. Zero would be a lie in both cases: 0% and 0 dBm
@@ -321,6 +376,34 @@ spectrum. On the orb those two are already states — `idle` is step 0, and
 `stopped` is what `resolve_behaviour()` turns into `DISCONNECTED` at step 7 — so
 separate steps would only add poses identical to plain `listening`.
 `press_active` needs no step either; every tap shows it on the way past.
+
+**Capturing it as images.** `CONFIG_UI_SCREENSHOT_TOUR` (bench only) runs the
+test on its own 10 s after boot and prints three captures of each step over
+serial -- 1.5, 2.5 and 3.5 s in, so the animated states are seen at three points
+of their motion -- run-length encoded, about 0.25 s a frame. Then
+
+```
+host/shot2png.py capture.log OUTDIR
+```
+
+writes a PNG per capture and `contact.png`, one row per state. The set in
+[images/orb-states/](images/orb-states/) was taken that way on 2026-10-24, in a
+quiet room -- which is why `listening` and `speaking` are dim; one
+`initializing` frame lost lines on the link and is missing. It captures the
+face's canvas, so LVGL labels on top of it -- the step's name, the status word
+-- are not in the images, and the mic-driven states show the room as it was. A
+capture with a line lost on the link is reported and skipped, not written
+wrong.
+
+**Seeing it move.** The captures are stills at panel resolution, three to a
+state, so they cannot show motion. The
+[orb page](https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/orb.html)
+on the project site runs the face live instead, on `orb_geometry.c` compiled
+unchanged to WebAssembly: every state, the 280 ms transitions between them,
+simulated speech driving `listening` and `speaking`, the thirteen colours, and
+slow motion. It is `docs/orb.html`, built from `host/orb_web.html` by
+`host/orb_web.sh` (needs Emscripten); rebuild and commit it after changing the
+geometry, or the page shows the old maths.
 
 The trigger is the fragile part, and deliberately loose. The phrase has to
 survive speech-to-text — it can arrive merged, hyphenated, or with `B A` on the

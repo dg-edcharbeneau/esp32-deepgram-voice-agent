@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A touch panel for settings that were voice-only.** Swipe down from the top
+  edge: four pages, swiped sideways -- Sound (mic gain and volume as linked +/-
+  pairs with a level meter between them), Colour
+  (the 13 orb colours on a clock face), Toggles (noise reduction, 12/24-hour)
+  and Timers & alarms (the soonest first, cancel in two taps). Nothing is new
+  behaviour: each control calls what the voice tool or the BOOT button already
+  did, and the agent needs no reload. The session carries on underneath; the
+  panel closes on a swipe up, 8 s untouched, or for an alarm. The drag must
+  start on the top edge, so it can never touch the centre button. Volume and
+  mic gain apply at once and are saved 2 s after the last press, off the LVGL
+  task. Painted into the face's canvas from precomputed shape masks rather than
+  LVGL widgets: 10-60 ms a repaint, and no change to internal RAM measured on
+  the board. `host/panel.sh` checks the geometry; `CONFIG_UI_PANEL_SELFTEST`
+  (bench only) drives every control for the log. `panel=` joins the TLM line.
+- **Screen captures of every orb state.** `CONFIG_UI_SCREENSHOT_TOUR` (bench
+  only) runs the display test on its own and prints three captures per step
+  over serial; `host/shot2png.py` turns the log into PNGs and a contact sheet.
+
 ## [0.8.0] - 2026-10-23
 
 Experimental pre-release.

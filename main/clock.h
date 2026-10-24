@@ -87,6 +87,11 @@ uint32_t clock_tz_generation(void);
  */
 bool clock_12h(void);
 
+/* The same override set_clock {hours} makes, without a tool call: for the touch
+ * panel. Takes effect on the next clock_tick(), which also saves it. Safe from
+ * any task. */
+void clock_set_12h(bool h12);
+
 /* The zone as the user named it, for the tools and the portal. */
 void clock_tz_name(char *out, size_t cap);
 

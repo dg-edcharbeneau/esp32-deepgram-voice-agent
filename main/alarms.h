@@ -37,6 +37,8 @@
 
 #include "cJSON.h"
 
+#include "alarm_sched.h"
+
 /* Load the saved table. Call after nvs_flash_init(). No-op when CONFIG_CLOCK is
  * off. Nothing is scheduled until alarms_tick() first sees a valid clock. */
 void alarms_init(void);
@@ -58,6 +60,27 @@ int alarms_count(void);
 /* The soonest pending alarm's instant, or false if there is none with a known
  * wall-clock time. For the face. */
 bool alarms_next(int64_t *epoch);
+
+/*
+ * One pending entry as the touch panel shows it, already formatted: the panel
+ * draws strings and does no calendar arithmetic of its own.
+ */
+typedef struct {
+    uint8_t id;
+    bool timer;
+    int64_t secs_left;           /* timers only; counted from the snapshot */
+    char time[12];               /* alarms: "7:30 AM" / "07:30", per clock_12h() */
+    char when[28];               /* alarms: "today", "tomorrow", "weekdays", ... */
+    char label[ALARM_LABEL_MAX];
+} alarm_view_t;
+
+/* Up to `max` pending entries, soonest first. Returns how many. Safe from any
+ * task; holds the table's lock for a copy. */
+int alarms_snapshot(alarm_view_t *out, int max);
+
+/* Cancel one entry by id, as the alarms tool does. True if it existed. The
+ * table is saved by the next alarms_tick(), not here. Safe from any task. */
+bool alarms_cancel_id(uint8_t id);
 
 /*
  * Agent tools. Each writes a phrasing instruction for the model into `out`.

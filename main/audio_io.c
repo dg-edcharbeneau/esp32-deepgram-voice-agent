@@ -353,6 +353,8 @@ static inline uint32_t now_ms(void)
 }
 static int s_volume;
 static bool s_volume_from_nvs;
+/* Set by audio_io_set_volume_live(), cleared once the level is in flash. */
+static volatile bool s_volume_dirty;
 
 /*
  * Volume limits.
@@ -369,8 +371,10 @@ static bool s_volume_from_nvs;
  * build-time knob for that, and it lifts the whole scale so this range
  * inherits it.
  */
-#define VOLUME_MIN 20
-#define VOLUME_MAX 100
+#define VOLUME_MIN AUDIO_VOLUME_MIN
+#define VOLUME_MAX AUDIO_VOLUME_MAX
+#define MIC_GAIN_MIN_DB AUDIO_MIC_GAIN_MIN_DB
+#define MIC_GAIN_MAX_DB AUDIO_MIC_GAIN_MAX_DB
 
 /* Shared with the saved voice; see voices.c. */
 #define NVS_NAMESPACE  "dgagent"
@@ -395,10 +399,14 @@ static bool s_volume_from_nvs;
  */
 static volatile int s_mic_gain = CONFIG_MIC_IN_GAIN;       /* in force on the codec */
 static volatile int s_mic_gain_want = CONFIG_MIC_IN_GAIN;  /* asked for */
+/* Changed by a _live() setter and not yet in flash; audio_io_settings_persist()
+ * clears them. Volume's lives with the volume below. */
+static volatile bool s_mic_gain_dirty;
 #if CONFIG_AEC_UPLINK_VAD
 static volatile int s_vad_peak = CONFIG_AEC_UPLINK_VAD_PEAK;
 #endif
 static void mic_gain_apply(int gain_db);
+static void mic_gain_save(int g);
 
 #if CONFIG_MIC_NS_ENABLE
 /* A Kconfig bool is UNDEFINED when off rather than 0, so it cannot be read in a
@@ -452,16 +460,15 @@ static bool ns_load(void)
  * that a caller on a button or timer callback cannot stall the audio path with
  * a cache-off flash erase.
  *
- * The test-then-set is not atomic. That is safe only because exactly one task
- * calls this (iot_button's); if a second caller ever appears, this needs a lock
- * or an atomic exchange.
+ * Two callers now -- iot_button's task and the touch panel on the LVGL task --
+ * so the test-and-set is one atomic exchange: two presses racing each other
+ * cannot both see the old value and both log a change.
  */
 void audio_io_ns_set(bool enabled)
 {
-    if (s_ns_run == enabled) {
+    if (__atomic_exchange_n(&s_ns_run, enabled, __ATOMIC_SEQ_CST) == enabled) {
         return;
     }
-    s_ns_run = enabled;
     ESP_LOGI(TAG, "noise suppression %s%s", enabled ? "ON" : "OFF",
              s_ns_on ? "" : " (engine unavailable -- preference only)");
 }
@@ -1425,7 +1432,7 @@ static int mic_gain_load(void)
         uint8_t saved = 0;
         const esp_err_t err = nvs_get_u8(h, NVS_KEY_MICGAIN, &saved);
         nvs_close(h);
-        if (err == ESP_OK && saved >= 6 && saved <= 30) {
+        if (err == ESP_OK && saved >= MIC_GAIN_MIN_DB && saved <= MIC_GAIN_MAX_DB) {
             return saved;
         }
     }
@@ -1446,14 +1453,31 @@ static void mic_gain_apply(int gain_db)
 #endif
 }
 
-int audio_io_set_mic_gain(int requested_db)
+int audio_io_set_mic_gain_live(int requested_db)
 {
     /* The ES7210's PGA steps in 3 dB to 30 (es7210.c get_db()), so round to a
      * step. Below 6 a voice is lost; 30 already made the device hear itself. */
     int g = ((requested_db + 1) / 3) * 3;
-    if (g < 6) g = 6;
-    if (g > 30) g = 30;
-    s_mic_gain_want = g;
+    if (g < MIC_GAIN_MIN_DB) g = MIC_GAIN_MIN_DB;
+    if (g > MIC_GAIN_MAX_DB) g = MIC_GAIN_MAX_DB;
+    if (g != s_mic_gain_want) {
+        s_mic_gain_want = g;
+        s_mic_gain_dirty = true;
+    }
+    return g;
+}
+
+int audio_io_set_mic_gain(int requested_db)
+{
+    const int g = audio_io_set_mic_gain_live(requested_db);
+    mic_gain_save(g);
+    return g;
+}
+
+/* Blocking: a flash write. Never from the LVGL or audio tasks. */
+static void mic_gain_save(int g)
+{
+    s_mic_gain_dirty = false;
 #if CONFIG_MIC_GAIN_TOOL
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
@@ -1467,13 +1491,16 @@ int audio_io_set_mic_gain(int requested_db)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "could not persist mic gain: %s", esp_err_to_name(err));
     }
+#else
+    (void)g;
 #endif
-    return g;
 }
 
+/* What the capture task has been asked for, which a control showing the level
+ * wants: the applied value lags it by up to one block. */
 int audio_io_get_mic_gain(void)
 {
-    return s_mic_gain;
+    return s_mic_gain_want;
 }
 
 int audio_io_get_vad_peak(void)
@@ -1490,11 +1517,16 @@ int audio_io_get_volume(void)
     return s_volume;
 }
 
-int audio_io_set_volume(int requested)
+/*
+ * The register write without the flash write, for a control pressed several
+ * times in a row: each press is heard at once, and audio_io_settings_persist()
+ * saves the level where it came to rest, once, from a task that may block.
+ */
+int audio_io_set_volume_live(int requested)
 {
     int level = volume_clamp(requested);
     if (level == s_volume) {
-        return s_volume;   /* already at the stop; no register write, no flash */
+        return s_volume;   /* already at the stop; no register write */
     }
 
     int err = esp_codec_dev_set_out_vol(s_spk, level);
@@ -1505,9 +1537,35 @@ int audio_io_set_volume(int requested)
     }
 
     s_volume = level;
-    volume_save(level);
+    s_volume_dirty = true;
     ESP_LOGI(TAG, "volume %d", level);
     return level;
+}
+
+int audio_io_set_volume(int requested)
+{
+    const int before = s_volume;
+    const int level = audio_io_set_volume_live(requested);
+    if (level != before) {
+        s_volume_dirty = false;
+        volume_save(level);
+    }
+    return level;
+}
+
+void audio_io_settings_persist(void)
+{
+    const bool vol = s_volume_dirty, mic = s_mic_gain_dirty;
+    if (vol) {
+        s_volume_dirty = false;
+        volume_save(s_volume);
+    }
+    if (mic) {
+        mic_gain_save(s_mic_gain_want);
+    }
+    if (vol || mic) {
+        ESP_LOGI(TAG, "EVT settings saved%s%s", vol ? " volume" : "", mic ? " micgain" : "");
+    }
 }
 
 int audio_io_adjust_volume(int delta)

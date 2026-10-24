@@ -325,6 +325,9 @@ typedef struct {
      * cannot log it itself -- that blocks the LVGL task on the console.
      */
     bool face_changed;
+
+    /* The touch panel's page, or -1 while it is closed. */
+    int panel;
 } ui_telemetry_t;
 
 /*

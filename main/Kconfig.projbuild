@@ -634,6 +634,38 @@ menu "Deepgram Agent Device"
             log volume for long unattended runs; note that a window shorter than a
             frame period will report frames=0.
 
+    config UI_SCREENSHOT_TOUR
+        bool "Capture every orb state over serial (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, runs the display
+            test on its own -- every orb state, then frozen -- and prints three
+            captures of the screen per step over the serial console, 1.5, 2.5
+            and 3.5 s into it. host/shot2png.py turns the log into PNGs.
+
+            What is captured is the face's canvas: LVGL labels on top of it,
+            such as the status word, are not in the images. The microphone is
+            live throughout (monitor mode), so the states that respond to sound
+            show the room as it was. Costs 434 kB of PSRAM for the copy.
+
+    config UI_PANEL_SELFTEST
+        bool "Touch panel self-test (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds into the first live session,
+            drives the touch panel through every page and control -- volume and
+            mic gain up and down, three colours, noise reduction and the clock
+            format there and back, the alarm page's buttons -- through the same
+            hit tests a finger uses, 1.5 s apart, then closes it. Everything it
+            changes it puts back; an alarm's cancel is only armed, never
+            confirmed.
+
+            It exists so the panel's draw time ("EVT panel draw"), its effect on
+            internal RAM (TLM int=/intmax=/dma=) and every action ("EVT ctl")
+            can be read off the serial log with nobody touching the board. Every
+            repaint is also printed as a screen capture, for host/shot2png.py
+            (434 kB of PSRAM for the copy).
+
     config UI_SHOW_INDICATORS
         bool "Draw the touch target and what a tap will do"
         default n

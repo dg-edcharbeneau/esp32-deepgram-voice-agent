@@ -62,6 +62,9 @@ static volatile bool s_flush_wanted;
  * not do that -- it runs on iot_button's task, with the audio path one
  * priority level away. */
 static volatile bool s_ns_save_wanted;
+/* And again for the touch panel's volume and mic gain, which it applies at once
+ * on the LVGL task and leaves here to save. */
+static volatile bool s_settings_save_wanted;
 /*
  * "Reopen the session when you get a moment, and only if there is one."
  *
@@ -313,6 +316,10 @@ static void session_ctl_task(void *arg)
             audio_io_ns_persist();
         }
 #endif
+        if (s_settings_save_wanted) {
+            s_settings_save_wanted = false;
+            audio_io_settings_persist();
+        }
 
         if (req == 0) {
             continue;
@@ -557,6 +564,15 @@ void session_ctl_request_ns_save(void)
     }
 }
 #endif
+
+/* The same again: see s_settings_save_wanted. */
+void session_ctl_request_settings_save(void)
+{
+    s_settings_save_wanted = true;
+    if (s_task != NULL) {
+        xTaskNotify(s_task, 0, eNoAction);
+    }
+}
 
 /* Same mechanism, same reason: see s_reload_wanted. */
 void session_ctl_request_reload_soon(void)

@@ -54,6 +54,10 @@
 #include "ui.h"
 #include "arc_text.h"
 #include "ui_face.h"
+#include "ui_panel.h"
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST
+#include "screenshot.h"
+#endif
 
 static const char *TAG = "ui";
 
@@ -580,6 +584,9 @@ static volatile bool s_test_want;   /* set from the agent task */
 /* Both defined below select_face(), which they use. */
 static void test_enter(void);
 static void test_advance(void);
+#if CONFIG_UI_SCREENSHOT_TOUR
+static void tour_frame(uint32_t now);
+#endif
 static bool s_test_active;          /* LVGL task only, below here */
 static size_t s_test_step;
 static size_t s_test_face_restore;
@@ -2210,6 +2217,7 @@ void ui_get_telemetry(ui_telemetry_t *out)
     out->peak_agent = s_amp_peak_agent;
     out->face = (s_face != NULL) ? s_face->name : "none";
     out->face_changed = s_face_changed;
+    out->panel = ui_panel_page();
     s_face_changed = false;
     out->behaviour = behaviour_name(s_behaviour_now);
     /* What was selected, matching amp= on the same line. */
@@ -2244,7 +2252,7 @@ void ui_get_telemetry(ui_telemetry_t *out)
 /*
  * Enter or leave sleep. LVGL task only -- it touches the panel and an lv_timer.
  *
- * Refuses to sleep during the display test. The test runs with the session
+ * Refuses to sleep during the display test, or while the touch panel is open. The test runs with the session
  * stopped and can outlast the sleep timer -- main.c records a measured 41 s run
  * against a 30 s threshold -- so without this it would dim and slow down in the
  * middle of someone stepping through it.
@@ -2255,6 +2263,15 @@ static void apply_sleep(bool want)
         return;
     }
     if (want && s_test_active) {
+        return;
+    }
+    /*
+     * Nor while the touch panel is open: someone is using it, and the stopped
+     * device's 30 s sleep timer knows nothing about that. The panel closes
+     * itself 8 s after the last touch, and the sleep that was waiting then
+     * lands on the next frame.
+     */
+    if (want && ui_panel_is_open()) {
         return;
     }
     s_asleep = want;
@@ -2318,6 +2335,49 @@ static void frame_timer_cb(lv_timer_t *timer)
     }
 
     update_qr();
+
+    /*
+     * THE TOUCH PANEL, when it is open, owns the frame: the face, its overlays
+     * and the labels all stand down, and nothing below runs. Anything that owns
+     * the whole screen by design closes it first -- an alarm ringing (a press
+     * anywhere must dismiss it, as it always has), the setup QR code, the display
+     * test. Called every frame regardless, because the panel's deferred save of
+     * volume and mic gain runs from it even after the panel has closed.
+     */
+    if (s_ringing || s_test_active || s_qr_payload != NULL) {
+        ui_panel_close(s_ringing ? "alarm" : "screen taken");
+    }
+    static bool s_panel_shown;
+    const bool panel = ui_panel_frame((uint32_t)(draw_start_us / 1000), s_tint_rgb,
+                                      s_session_live);
+    if (panel != s_panel_shown) {
+        s_panel_shown = panel;
+        if (panel) {
+            /* The panel painted over everything, so no overlay's record of what
+             * it last drew is true any more; each draws afresh once it closes.
+             * update_clock() puts the status word back on the first frame after. */
+            lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+#if CONFIG_BATTERY_SHOW_DOTS
+            s_bat_drawn = false;
+#endif
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+            s_sig_drawn = false;
+#endif
+            s_arc_drawn = false;
+            s_arc_shown = NULL;
+        }
+#if CONFIG_UI_SHOW_INDICATORS
+        if (panel) {
+            lv_obj_add_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
+        }
+#endif
+    }
+    if (panel) {
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
 
     ui_behaviour_t beh = resolve_behaviour(idle, draw_start_us);
 
@@ -2442,6 +2502,11 @@ static void frame_timer_cb(lv_timer_t *timer)
     /* After the caption: it reads s_arc_drawn to decide the centre label. */
     update_clock();
 
+#if CONFIG_UI_SCREENSHOT_TOUR
+    /* Last, so what it copies is the finished frame. */
+    tour_frame((uint32_t)(draw_start_us / 1000));
+#endif
+
     tlm_accumulate_frame(draw_start_us);
 }
 
@@ -2506,9 +2571,39 @@ static void gesture_event_cb(lv_event_t *e)
             }
             break;
         }
+        /*
+         * The touch panel next. Open, it takes the press whole: the centre button
+         * means nothing under it, so a tap meant for a setting can never also
+         * interrupt or end the conversation. Closed, it only notes a press that
+         * began on the top edge, which can never be the button either -- a drag
+         * from there is how the panel opens.
+         */
+        {
+            lv_point_t p = {0};
+            lv_indev_t *indev = lv_event_get_indev(e);
+            if (indev != NULL) {
+                lv_indev_get_point(indev, &p);
+            }
+            const bool can_open = s_qr_payload == NULL && !s_test_active;
+            if (ui_panel_pressed(p.x, p.y, can_open)) {
+                s_press_in_button = false;
+                s_press_active = false;
+                break;
+            }
+        }
         s_press_in_button = press_is_in_button(e);
         s_press_active = s_press_in_button;
         break;
+
+    case LV_EVENT_PRESSING: {
+        lv_point_t p = {0};
+        lv_indev_t *indev = lv_event_get_indev(e);
+        if (indev != NULL) {
+            lv_indev_get_point(indev, &p);
+        }
+        ui_panel_pressing(p.x, p.y);
+        break;
+    }
 
     case LV_EVENT_RELEASED:
     case LV_EVENT_PRESS_LOST:
@@ -2520,6 +2615,9 @@ static void gesture_event_cb(lv_event_t *e)
          * on the next PRESSED, so leaving it set costs nothing.
          */
         s_press_active = false;
+        /* The drag that opened the panel began off the button, so its click is
+         * already gated out; this only has to finish the panel's own gesture. */
+        ui_panel_released(lv_event_get_code(e) == LV_EVENT_PRESS_LOST);
         break;
 
     case LV_EVENT_SHORT_CLICKED:
@@ -2748,6 +2846,59 @@ static void test_advance(void)
     }
 }
 
+#if CONFIG_UI_SCREENSHOT_TOUR
+/*
+ * The display test, on a timer instead of taps, with the canvas captured three
+ * times into each step -- 1.5, 2.5 and 3.5 s in, so the states that animate are
+ * seen at three points of their motion -- then advanced at 4 s. A capture still
+ * printing holds the step; the serial link sets the pace, not this.
+ */
+static void tour_frame(uint32_t now)
+{
+    static const uint32_t SHOT_AT_MS[] = {1500, 2500, 3500};
+    static size_t step = SIZE_MAX;
+    static uint32_t step_ms;
+    static unsigned shots;
+    if (!s_test_active) {
+        step = SIZE_MAX;
+        return;
+    }
+    if (step != s_test_step) {
+        step = s_test_step;
+        step_ms = now;
+        shots = 0;
+    }
+    const uint32_t in = now - step_ms;
+    const unsigned n_shots = sizeof(SHOT_AT_MS) / sizeof(SHOT_AT_MS[0]);
+    if (shots < n_shots && in >= SHOT_AT_MS[shots] && !screenshot_busy()) {
+        char tag[48];
+        int k = snprintf(tag, sizeof(tag), "s%u-", (unsigned)step);
+        /* "listening (fill, in)" -> "listening-fill-in" */
+        for (const char *c = s_test_steps[step].label; *c && k < (int)sizeof(tag) - 4; c++) {
+            const bool alnum = (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9');
+            if (alnum) {
+                tag[k++] = *c;
+            } else if (k > 0 && tag[k - 1] != '-') {
+                tag[k++] = '-';
+            }
+        }
+        if (tag[k - 1] == '-') {
+            k--;
+        }
+        snprintf(tag + k, sizeof(tag) - (size_t)k, "-%u", shots + 1);
+        lv_draw_buf_t *buf = lv_canvas_get_draw_buf(canvas_obj);
+        if (screenshot_capture((const uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t),
+                               BSP_LCD_H_RES, BSP_LCD_V_RES, tag)) {
+            ESP_LOGI(TAG, "EVT shot %s", tag);
+            shots++;
+        }
+    }
+    if (shots == n_shots && in >= 4000 && !screenshot_busy()) {
+        test_advance();
+    }
+}
+#endif
+
 static esp_err_t build_ui(void)
 {
     lv_obj_t *scr = lv_screen_active();
@@ -2830,6 +2981,7 @@ static esp_err_t build_ui(void)
      * too: LVGL suppresses LONG_PRESSED while a scroll object is latched.
      */
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_LONG_PRESSED, NULL);
@@ -2838,6 +2990,11 @@ static esp_err_t build_ui(void)
      * returns white for an out-of-range index, so a Kconfig list that has drifted
      * out of step with the table degrades to the default look. */
     s_tint_rgb = orb_colors_rgb(CONFIG_UI_DEFAULT_ORB_COLOR);
+
+    ui_panel_init(canvas_obj);
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST
+    screenshot_init();
+#endif
 
     /* Before the frame timer and before any tap is attached, which is what makes
      * publish_level() free of a first-use check. See s_pole_low. */

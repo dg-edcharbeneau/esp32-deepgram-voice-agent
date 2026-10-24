@@ -5,6 +5,11 @@ face, orb colour, voice -- and what each one costs, plus what it can read about
 itself: charge, Wi-Fi signal, and the time. Timers and alarms are on their own
 page.
 
+Volume, mic gain, orb colour, the clock format and cancelling a timer or alarm
+can also be done by touch, from the panel a swipe down from the top edge opens;
+see [the touch panel](display.md#the-touch-panel). Both routes call the same
+code.
+
 ## Changing the volume by asking
 
 There are two tools, because "turn it down a bit" and "set your volume to 50" are

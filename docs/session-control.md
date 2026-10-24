@@ -281,6 +281,16 @@ an interrupt and a hold as an offer to forget. ui.c sends `UI_DISMISS` on the
 press and clears the button gate, and `on_gesture()` checks for a ringing alarm
 before anything else. See [the clock](clock.md#when-it-rings).
 
+### The touch panel stays out of the button's way
+
+The panel of settings ([display.md](display.md#the-touch-panel)) opens with a
+drag that must **start within 40 px of the top edge** and travel 80 px down. That
+start point can never be the 70 px button, whose meaning is decided on the press,
+so opening the panel cannot also tap or hold it; and a brush of the edge travels
+too little to open anything, which keeps the lesson the interrupt's old target
+taught. While the panel is open it takes every press whole and the button means
+nothing, so a tap on a setting can never also interrupt or end the conversation.
+
 ## Stopping when nobody is talking
 
 The device uplinks 16 kHz mono for as long as a session is open — roughly

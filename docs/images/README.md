@@ -4,6 +4,7 @@
 |---|---|---|
 | `device-orb.png` | The board mid-reply, orb face lit and labelled `speaking`. | The README header. |
 | `portal.png` | The captive-portal setup page, as a phone sees it after joining the device's AP. | The `Get one running` section of `docs/index.html`. |
+| `orb-states/` | Every orb state from the display test, three frames each about 1 s apart, captured from the device's canvas with `CONFIG_UI_SCREENSHOT_TOUR` and `host/shot2png.py`. `contact.png` is all of them on one sheet, a row per state. | The display test section of `docs/display.md`. |
 
 `portal.png` is a real device screenshot rather than the `host/portal.sh`
 preview, which is why it shows Android's "Sign in to dg-agent-B1A1" sheet around

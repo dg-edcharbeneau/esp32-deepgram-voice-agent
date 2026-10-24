@@ -734,8 +734,98 @@ void alarms_fn_cancel(const cJSON *args, char *out, size_t n)
     }
 }
 
+int alarms_snapshot(alarm_view_t *out, int max)
+{
+    if (s_b == NULL || max <= 0) {
+        return 0;
+    }
+    int64_t now = 0;
+    const bool valid = clock_now(&now, NULL);
+    const int64_t mono = esp_timer_get_time() / 1000;
+    const bool h12 = clock_12h();
+    int64_t key[ALARM_MAX];   /* seconds until it fires, for the sort */
+    int n = 0;
+
+    clock_lock();   /* day_word() converts local time; same order as alarms_fn_list() */
+    lock();
+    for (int i = 0; i < ALARM_MAX && n < max && n < ALARM_MAX; i++) {
+        const alarm_entry_t *e = &s_b->e[i];
+        if (e->kind == ALARM_EMPTY) {
+            continue;
+        }
+        alarm_view_t *v = &out[n];
+        memset(v, 0, sizeof(*v));
+        v->id = e->id;
+        strlcpy(v->label, e->label, sizeof(v->label));
+        if (e->kind == ALARM_TIMER) {
+            const int64_t left = s_mono_ms[i] > 0 ? (s_mono_ms[i] - mono) / 1000
+                                                  : (valid ? e->fire_epoch - now : 0);
+            v->timer = true;
+            v->secs_left = left > 0 ? left : 0;
+            key[n] = v->secs_left;
+        } else {
+            alarm_fmt_time(e->hh, e->mm, h12, v->time, sizeof(v->time));
+            if (e->kind == ALARM_WEEKLY) {
+                alarm_days_phrase(e->dow_mask, v->when, sizeof(v->when));
+            } else if (valid) {
+                strlcpy(v->when, day_word(now, e->fire_epoch), sizeof(v->when));
+            }
+            key[n] = valid ? e->fire_epoch - now : INT64_MAX;
+        }
+        n++;
+    }
+    unlock();
+    clock_unlock();
+
+    /* Soonest first. Eight entries at most, so insertion sort. */
+    for (int i = 1; i < n; i++) {
+        const alarm_view_t v = out[i];
+        const int64_t k = key[i];
+        int j = i - 1;
+        while (j >= 0 && key[j] > k) {
+            out[j + 1] = out[j];
+            key[j + 1] = key[j];
+            j--;
+        }
+        out[j + 1] = v;
+        key[j + 1] = k;
+    }
+    return n;
+}
+
+bool alarms_cancel_id(uint8_t id)
+{
+    if (s_b == NULL || id == 0) {
+        return false;
+    }
+    bool found = false;
+    lock();
+    for (int i = 0; i < ALARM_MAX; i++) {
+        const alarm_entry_t *e = &s_b->e[i];
+        if (e->kind != ALARM_EMPTY && e->id == id) {
+            ESP_LOGI(TAG, "EVT alarm cancel id=%u label=\"%s\" (panel)", e->id, e->label);
+            remove_locked(i);
+            found = true;
+            break;
+        }
+    }
+    unlock();
+    return found;
+}
+
 #else /* !CONFIG_CLOCK */
 
+int alarms_snapshot(alarm_view_t *out, int max)
+{
+    (void)out;
+    (void)max;
+    return 0;
+}
+bool alarms_cancel_id(uint8_t id)
+{
+    (void)id;
+    return false;
+}
 void alarms_init(void) {}
 void alarms_tick(void) {}
 bool alarms_ringing(void) { return false; }
