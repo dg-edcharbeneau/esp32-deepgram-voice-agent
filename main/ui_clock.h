@@ -38,5 +38,7 @@ bool ui_clock_init(lv_obj_t *canvas);
  * from t = 0, as the mockup does when it appears. */
 void ui_clock_frame(const ui_clock_state_t *st);
 
-/* Black the canvas and forget the clock, for the face that takes over. */
-void ui_clock_leave(void);
+/* Forget the clock, and with `blank` black the canvas for the face that takes
+ * over. Without it when the touch panel took over: it has already painted the
+ * whole canvas this frame. */
+void ui_clock_leave(bool blank);

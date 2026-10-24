@@ -529,7 +529,26 @@ static bool s_clock_forced;
 static bool s_clock_swipe;       /* this press began on the bottom edge */
 static int32_t s_clock_swipe_x0, s_clock_swipe_y0;
 static bool s_clock_shown;       /* the clock owns the frame */
+static bool s_clock_ok;          /* ui_clock_init() found its PSRAM */
+/* A session started: the on-demand clock gives the face back. Set by
+ * ui_set_stopped() on the session worker, consumed on the LVGL task. */
+static volatile bool s_clock_cancel;
 static lv_timer_t *s_frame_timer;
+
+/*
+ * The frame period, from the one rule: the sleep rate while asleep or while the
+ * clock is up on demand, the full rate otherwise. A clock frame costs 25-60 ms,
+ * which at the awake 33 ms period would hold the LVGL task busy on the core the
+ * echo canceller shares. Called wherever either input changes, on the event that
+ * changed it -- never a frame later, which is the lag a woken panel must not have.
+ */
+static void set_frame_period(void)
+{
+    if (s_frame_timer != NULL) {
+        lv_timer_set_period(s_frame_timer,
+                            (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS : FRAME_MS);
+    }
+}
 
 static volatile int s_face_want = -1;
 
@@ -1113,6 +1132,9 @@ bool ui_is_asleep(void)
 
 void ui_set_stopped(bool stopped)
 {
+    if (!stopped && s_stopped) {
+        s_clock_cancel = true;
+    }
     s_stopped = stopped;
 }
 
@@ -1560,13 +1582,24 @@ static bool clock_wanted(uint32_t now)
 #else
     (void)now;
 #endif
-    /* Anything that owns the whole screen ends the on-demand clock outright,
-     * rather than leaving it to come back afterwards. */
-    if (s_ringing || s_test_active || s_qr_payload != NULL) {
-        s_clock_forced = false;
+    /* Anything that owns the whole screen, or a session starting, ends the
+     * on-demand clock outright rather than leaving it to come back afterwards. */
+    const bool cancel = s_clock_cancel;
+    if (cancel) {
+        s_clock_cancel = false;
     }
-    return (s_asleep || s_clock_forced) && s_clk_valid && !s_ringing && !s_test_active &&
-           s_qr_payload == NULL;
+    if (s_clock_forced && (cancel || s_ringing || s_test_active || s_qr_payload != NULL)) {
+        s_clock_forced = false;
+        set_frame_period();
+    }
+    /*
+     * Asleep, only while STOPPED: the battery-critical sleep keeps a live
+     * conversation's face, dim, with its caption -- main.c holds the panel asleep
+     * then without ending the session, and a clock over the agent would hide
+     * every state it is in.
+     */
+    return s_clock_ok && ((s_asleep && s_stopped) || s_clock_forced) && s_clk_valid &&
+           !s_ringing && !s_test_active && s_qr_payload == NULL;
 }
 
 static void paint_clock(uint32_t now)
@@ -2381,10 +2414,7 @@ static void apply_sleep(bool want)
     }
     if (want != s_asleep) {
         s_asleep = want;
-        if (s_frame_timer != NULL) {
-            /* The clock draws at the sleep rate awake too: see frame_timer_cb. */
-            lv_timer_set_period(s_frame_timer, (want || s_clock_shown) ? SLEEP_FRAME_MS : FRAME_MS);
-        }
+        set_frame_period();
     }
     /* Also when only the dimming changed: a cell that turns critical while the
      * panel already sleeps dims it, and the charger un-dims it. */
@@ -2437,12 +2467,15 @@ static void frame_timer_cb(lv_timer_t *timer)
     int cwant = s_color_want;
     if (cwant >= 0) {
         s_color_want = -1;
+        /* The index whatever the RGB: it is what main.c saves and what the
+         * picker marks, and it must be a real one even when the ink is not
+         * changing. */
+        s_color_index = cwant;
         uint32_t rgb = orb_colors_rgb((size_t)cwant);
         if (rgb != s_tint_rgb) {
             ESP_LOGI(TAG, "EVT color %s (0x%06" PRIX32 ")",
                      orb_colors_name((size_t)cwant), rgb);
             s_tint_rgb = rgb;
-            s_color_index = cwant;
             apply_tint();
         }
     }
@@ -2469,20 +2502,14 @@ static void frame_timer_cb(lv_timer_t *timer)
     if (panel != s_panel_shown || clock != s_clock_shown) {
         const bool was_taken = s_panel_shown || s_clock_shown;
         if (s_clock_shown && !clock) {
-            /* Hand the face a black canvas, as the panel's close does. */
-            ui_clock_leave();
+            /* Hand the face a black canvas, as the panel's close does -- unless
+             * the panel is what took over, in which case it has already painted
+             * the whole canvas this frame and blacking it would leave it black
+             * until something changed. */
+            ui_clock_leave(!panel);
         }
         s_panel_shown = panel;
-        if (clock != s_clock_shown) {
-            s_clock_shown = clock;
-            /*
-             * The clock draws at the sleep rate even awake. A frame of it costs
-             * 25-60 ms, which at the awake 33 ms period would hold the LVGL task
-             * busy on the core the echo canceller shares; at 200 ms it is a
-             * quarter of one frame. Its motion is designed slow enough for it.
-             */
-            lv_timer_set_period(s_frame_timer, (clock || s_asleep) ? SLEEP_FRAME_MS : FRAME_MS);
-        }
+        s_clock_shown = clock;
         if ((panel || clock) && !was_taken) {
             /* Painted over everything, so no overlay's record of what it last
              * drew is true any more; each draws afresh once it is gone.
@@ -2692,11 +2719,15 @@ static void gesture_event_cb(lv_event_t *e)
          * button's job -- any touch means someone is there.
          */
         s_sleep_want = false;
-        apply_sleep(false);
         s_clock_swipe = false;
-        /* The on-demand clock goes on any press, and the press goes with it. */
-        if (s_clock_forced) {
-            s_clock_forced = false;
+        /* The on-demand clock goes on any press, and the press goes with it.
+         * Cleared BEFORE the wake below, so the frame period it sets is the
+         * full rate on this very event. */
+        const bool was_forced = s_clock_forced;
+        s_clock_forced = false;
+        apply_sleep(false);
+        set_frame_period();
+        if (was_forced) {
             s_press_in_button = false;
             s_press_active = false;
             /* A press that can open nothing, so the panel's drag state is not
@@ -2763,8 +2794,9 @@ static void gesture_event_cb(lv_event_t *e)
                 s_clock_swipe = false;
                 s_press_in_button = false;
                 s_press_active = false;
-                if (s_clk_valid) {
+                if (s_clk_valid && s_clock_ok) {
                     s_clock_forced = true;
+                    set_frame_period();
                     ESP_LOGI(TAG, "EVT clock on demand");
                 } else {
                     /* Nothing for the rings to show before the first sync. */
@@ -3135,11 +3167,14 @@ static esp_err_t build_ui(void)
      * table degrades to the default look. */
     const int saved_color = orb_colors_saved();
     s_color_index = saved_color >= 0 ? saved_color : CONFIG_UI_DEFAULT_ORB_COLOR;
+    if (s_color_index < 0 || (size_t)s_color_index >= orb_colors_count()) {
+        s_color_index = 0;   /* white: what orb_colors_rgb() would show anyway */
+    }
     s_tint_rgb = orb_colors_rgb((size_t)s_color_index);
     apply_tint();
 
     ui_panel_init(canvas_obj);
-    ui_clock_init(canvas_obj);
+    s_clock_ok = ui_clock_init(canvas_obj);
 #if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW
     screenshot_init();
 #endif

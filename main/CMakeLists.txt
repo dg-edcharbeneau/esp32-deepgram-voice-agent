@@ -32,6 +32,7 @@ idf_component_register(
         font_clock_15.c
         clock_face.c
         ui_clock.c
+        ui_paint.c
         audio_rec.c
         controls.c
         panel_geom.c

@@ -26,6 +26,8 @@
 #include "esp_timer.h"
 
 #include "clock_face.h"
+#include "panel_geom.h"
+#include "ui_paint.h"
 #include "ui_tone.h"
 
 static const char *TAG = "clock";
@@ -83,36 +85,14 @@ static uint32_t s_t0_ms;
 
 /* ---------------- pixels ---------------- */
 
-static inline uint16_t pack565(uint32_t r, uint32_t g, uint32_t b)
-{
-    /* Rounded, not truncated: truncating tints neutral greys green. */
-    return (uint16_t)((((r * 31 + 127) / 255) << 11) | (((g * 63 + 127) / 255) << 5) |
-                      ((b * 31 + 127) / 255));
-}
-
-/* Source-over, `a` of 0..255. */
+/* Source-over, `a` of 0..255, clipped to the canvas. */
 static inline void blend(int x, int y, uint32_t rgb, uint32_t a)
 {
     if (a == 0 || x < 0 || y < 0 || x >= s_w || y >= s_h) {
         return;
     }
     uint16_t *p = s_px + (size_t)y * s_stride + x;
-    const uint32_t d = *p;
-    const uint32_t dr = (((d >> 11) & 31) * 255 + 15) / 31;
-    const uint32_t dg = (((d >> 5) & 63) * 255 + 31) / 63;
-    const uint32_t db = ((d & 31) * 255 + 15) / 31;
-    const uint32_t na = 255 - a;
-    *p = pack565((((rgb >> 16) & 0xFF) * a + dr * na + 127) / 255,
-                 (((rgb >> 8) & 0xFF) * a + dg * na + 127) / 255,
-                 ((rgb & 0xFF) * a + db * na + 127) / 255);
-}
-
-/* How much of a pixel a shape covers at signed distance d: a one-pixel ramp,
- * as panel_coverage(). */
-static inline float coverage(float d)
-{
-    const float c = 0.5f - d;
-    return c <= 0.0f ? 0.0f : (c >= 1.0f ? 1.0f : c);
+    *p = ui_paint_blend(*p, rgb, a);
 }
 
 static inline uint32_t a8(float a)
@@ -120,26 +100,49 @@ static inline uint32_t a8(float a)
     return a <= 0.0f ? 0 : (a >= 1.0f ? 255 : (uint32_t)(a * 255.0f + 0.5f));
 }
 
-/* A filled disc, or with r_in > 0 an annulus. */
+/*
+ * A filled disc, or with r_in > 0 an annulus. Squared distance first, as the
+ * panel's fill_circle does: inside the edge band a pixel is wholly covered,
+ * outside it wholly not, and only the one-pixel band takes a sqrtf -- a library
+ * call on this FPU, and most of what a clock frame used to cost. The bands are
+ * exactly where panel_coverage() would return 1 or 0, so the result is the same.
+ */
 static void disc(float cx, float cy, float r_in, float r_out, uint32_t rgb, float alpha)
 {
+    const float out_lo = r_out - 0.5f, out_hi = r_out + 0.5f;
+    const float in_lo = r_in - 0.5f, in_hi = r_in + 0.5f;
+    const float solid2 = out_lo > 0.0f ? out_lo * out_lo : -1.0f;   /* d2 <= this: covered */
+    const float none2 = out_hi * out_hi;                            /* d2 >= this: not */
+    const float hole2 = in_lo > 0.0f ? in_lo * in_lo : -1.0f;       /* d2 <= this: in the hole */
+    const float rim2 = in_hi * in_hi;                               /* d2 >= this: clear of it */
+    const uint32_t a_full = a8(alpha);
+
     const int x0 = (int)floorf(cx - r_out - 1.0f), x1 = (int)ceilf(cx + r_out + 1.0f);
     const int y0 = (int)floorf(cy - r_out - 1.0f), y1 = (int)ceilf(cy + r_out + 1.0f);
     for (int y = y0; y <= y1; y++) {
         const float dy = (float)y + 0.5f - cy;
         for (int x = x0; x <= x1; x++) {
             const float dx = (float)x + 0.5f - cx;
-            const float dist = sqrtf(dx * dx + dy * dy);
-            float cov = coverage(dist - r_out);
-            if (r_in > 0.0f) {
-                cov = fminf(cov, 1.0f - coverage(dist - r_in));
+            const float d2 = dx * dx + dy * dy;
+            if (d2 >= none2 || (r_in > 0.0f && d2 <= hole2)) {
+                continue;
+            }
+            const bool solid_out = d2 <= solid2;
+            const bool solid_in = r_in <= 0.0f || d2 >= rim2;
+            if (solid_out && solid_in) {
+                blend(x, y, rgb, a_full);
+                continue;
+            }
+            const float dist = sqrtf(d2);
+            float cov = solid_out ? 1.0f : panel_coverage(dist - r_out);
+            if (!solid_in) {
+                cov = fminf(cov, 1.0f - panel_coverage(dist - r_in));
             }
             blend(x, y, rgb, a8(cov * alpha));
         }
     }
 }
 
-/* A stroked arc about straight up, +-half radians, round caps. */
 static void arc_up(float cx, float cy, float r, float half, float w, uint32_t rgb)
 {
     const float ex = r * sinf(half), ey = r * cosf(half);   /* the right-hand end */
@@ -156,7 +159,7 @@ static void arc_up(float cx, float cy, float r, float half, float w, uint32_t rg
                 const float ax = fabsf(px) - ex, ay = py + ey;   /* nearer end */
                 d = sqrtf(ax * ax + ay * ay);
             }
-            blend(x, y, rgb, a8(coverage(d - w * 0.5f)));
+            blend(x, y, rgb, a8(panel_coverage(d - w * 0.5f)));
         }
     }
 }
@@ -180,7 +183,7 @@ static void box(float x0, float y0, float x1, float y1, float rad, float border,
             if (border > 0.0f) {
                 d = fabsf(d + border * 0.5f) - border * 0.5f;
             }
-            blend(x, y, rgb, a8(coverage(d)));
+            blend(x, y, rgb, a8(panel_coverage(d)));
         }
     }
 }
@@ -205,58 +208,9 @@ static void tri(float ax, float ay, float bx, float by, float cx, float cy, uint
                 const float d = wind * (ex * ((float)y + 0.5f - py[e]) - ey * ((float)x + 0.5f - px[e])) / len;
                 inside = fminf(inside, d);
             }
-            blend(x, y, rgb, a8(coverage(-inside)));
+            blend(x, y, rgb, a8(panel_coverage(-inside)));
         }
     }
-}
-
-/* ---------------- text ---------------- */
-
-/*
- * Where the digits' ink sits in a line box, so text is placed by what is seen
- * rather than by the box: the top and bottom of '0' below the box's top.
- */
-static void ink_rows(const lv_font_t *f, uint32_t ch, int32_t *top, int32_t *bottom)
-{
-    lv_font_glyph_dsc_t g;
-    const int32_t ascent = f->line_height - f->base_line;
-    if (lv_font_get_glyph_dsc(f, &g, ch, 0)) {
-        *top = ascent - (g.ofs_y + g.box_h);
-        *bottom = ascent - g.ofs_y;
-    } else {
-        *top = 0;
-        *bottom = f->line_height;
-    }
-}
-
-/* Draw `s` with its ink centred on (cx, cy); returns its inked box. */
-static lv_area_t text_at(lv_layer_t *L, const lv_font_t *f, uint32_t rgb, int32_t cx, int32_t cy,
-                         int32_t space, const char *s)
-{
-    lv_point_t sz;
-    lv_text_get_size(&sz, s, f, space, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    int32_t top, bottom;
-    ink_rows(f, (uint32_t)(unsigned char)s[0], &top, &bottom);
-    const int32_t y1 = cy - (top + bottom) / 2;
-    const lv_area_t a = {cx - sz.x / 2 - 1, y1, cx + sz.x / 2 + 1, y1 + sz.y};
-
-    lv_draw_label_dsc_t d;
-    lv_draw_label_dsc_init(&d);
-    d.font = f;
-    d.color = lv_color_hex(rgb);
-    d.text = s;
-    d.letter_space = space;
-    d.text_local = 1;   /* rendered at finish_layer, after the caller's buffer goes */
-    d.align = LV_TEXT_ALIGN_CENTER;
-    lv_draw_label(L, &d, &a);
-    return (lv_area_t){a.x1, y1 + top, a.x2, y1 + bottom};
-}
-
-static int32_t text_width(const lv_font_t *f, const char *s)
-{
-    lv_point_t sz;
-    lv_text_get_size(&sz, s, f, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    return sz.x;
 }
 
 /* ---------------- the status row ---------------- */
@@ -286,7 +240,7 @@ static void status_row(lv_layer_t *L, const ui_clock_state_t *st, float ox, floa
     int32_t pct_w = 0;
     if (st->bat_valid) {
         snprintf(pct, sizeof(pct), "%d%%", st->bat_percent);
-        pct_w = text_width(&lv_font_montserrat_14, pct);
+        pct_w = ui_paint_text_width(&lv_font_montserrat_14, 0, pct);
     }
     const int32_t bat_w = BAT_W + BAT_NUB_GAP + BAT_NUB_W;
     const int32_t bolt_w = (st->bat_valid && st->bat_charging) ? BOLT_GAP + 2 * BOLT_HW : 0;
@@ -322,7 +276,8 @@ static void status_row(lv_layer_t *L, const ui_clock_state_t *st, float ox, floa
     box(nx, mid - BAT_NUB_H * 0.5f, nx + BAT_NUB_W, mid + BAT_NUB_H * 0.5f, 1.0f, 0.0f, ink);
     x += bat_w + STATUS_GAP;
 
-    text_at(L, &lv_font_montserrat_14, ink, (int32_t)(x + pct_w * 0.5f), (int32_t)mid, 0, pct);
+    ui_paint_text(L, &lv_font_montserrat_14, ink, (int32_t)(x + pct_w * 0.5f), (int32_t)mid, 0,
+                  true, pct);
     x += pct_w;
 
     if (bolt_w) {
@@ -348,14 +303,16 @@ bool ui_clock_init(lv_obj_t *canvas)
     return true;
 }
 
-void ui_clock_leave(void)
+void ui_clock_leave(bool blank)
 {
     if (!s_running) {
         return;
     }
     s_running = false;
-    lv_canvas_fill_bg(s_canvas, lv_color_black(), LV_OPA_COVER);
-    lv_obj_invalidate(s_canvas);
+    if (blank) {
+        lv_canvas_fill_bg(s_canvas, lv_color_black(), LV_OPA_COVER);
+        lv_obj_invalidate(s_canvas);
+    }
 }
 
 void ui_clock_frame(const ui_clock_state_t *st)
@@ -376,6 +333,7 @@ void ui_clock_frame(const ui_clock_state_t *st)
     s_w = (int)buf->header.w;
     s_h = (int)buf->header.h;
     memset(s_px, 0, (size_t)buf->header.stride * buf->header.h);
+    const int64_t t_clear = esp_timer_get_time();
 
     /*
      * An AMOLED marks under a picture held for hours, so the whole clock never
@@ -413,16 +371,16 @@ void ui_clock_frame(const ui_clock_state_t *st)
 
     /* The box the dots stay out of: the digits' ink, down to whatever line is
      * last under them. */
-    const int32_t tw = text_width(&font_clock_52, hm);
+    const int32_t tw = ui_paint_text_width(&font_clock_52, 0, hm);
     int32_t dt, db;
-    ink_rows(&font_clock_52, '0', &dt, &db);
+    ui_paint_ink_rows(&font_clock_52, '0', &dt, &db);
     const int32_t time_bottom = time_cy + (db - dt) / 2;
     /* Under AM/PM, or under the digits in 24-hour, by the same step. */
     const int32_t next_cy = st->h12 ? ampm_cy + NEXT_BELOW : time_bottom + NEXT_BELOW - 6;
     int32_t half_w = tw / 2;
     float fy1 = (float)(st->h12 ? ampm_cy + 6 : time_bottom);
     if (has_next) {
-        const int32_t nw = text_width(&lv_font_montserrat_14, st->next);
+        const int32_t nw = ui_paint_text_width(&lv_font_montserrat_14, 0, st->next);
         half_w = nw / 2 > half_w ? nw / 2 : half_w;
         fy1 = (float)(next_cy + 6);
     }
@@ -443,23 +401,30 @@ void ui_clock_frame(const ui_clock_state_t *st)
         }
     }
 
+    const int64_t t_dots = esp_timer_get_time();
+
     lv_layer_t layer;
     lv_canvas_init_layer(s_canvas, &layer);
     status_row(&layer, st, ox, oy, c_status, c_status_off, c_fill);
-    text_at(&layer, &font_clock_52, c_digits, cx, time_cy, 0, hm);
+    ui_paint_text(&layer, &font_clock_52, c_digits, cx, time_cy, 0, true, hm);
     if (st->h12) {
-        text_at(&layer, &font_clock_15, c_status, cx, ampm_cy, AMPM_SPACE, st->hh < 12 ? "AM" : "PM");
+        ui_paint_text(&layer, &font_clock_15, c_status, cx, ampm_cy, AMPM_SPACE, true,
+                      st->hh < 12 ? "AM" : "PM");
     }
     if (has_next) {
-        text_at(&layer, &lv_font_montserrat_14, c_next, cx, next_cy, 0, st->next);
+        ui_paint_text(&layer, &lv_font_montserrat_14, c_next, cx, next_cy, 0, true, st->next);
     }
     lv_canvas_finish_layer(s_canvas, &layer);
     lv_obj_invalidate(s_canvas);
+    const int64_t t_end = esp_timer_get_time();
 
-    /* Once a minute is plenty to see what a frame costs while it sleeps. */
+    /* Once a minute is plenty to see what a frame costs while it sleeps: the
+     * clear, the dots (and halos), then the status row and the text. */
     static int logged_mm = -1;
     if (st->mm != logged_mm) {
         logged_mm = st->mm;
-        ESP_LOGI(TAG, "EVT clock draw %lld ms", (long long)((esp_timer_get_time() - t0) / 1000));
+        ESP_LOGI(TAG, "EVT clock draw %lld ms (clear %lld dots %lld text %lld)",
+                 (long long)((t_end - t0) / 1000), (long long)((t_clear - t0) / 1000),
+                 (long long)((t_dots - t_clear) / 1000), (long long)((t_end - t_dots) / 1000));
     }
 }

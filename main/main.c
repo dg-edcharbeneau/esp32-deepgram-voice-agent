@@ -1091,7 +1091,9 @@ void app_main(void)
         const bool bat_critical = false;
 #endif
         static bool prev_critical;
+        bool critical_cleared = false;
         if (bat_critical != prev_critical) {
+            critical_cleared = prev_critical;
             prev_critical = bat_critical;
             ESP_LOGW(TAG, "EVT battery critical=%d pct=%d", (int)bat_critical, bat.percent);
         }
@@ -1123,6 +1125,13 @@ void app_main(void)
         }
         prev_asleep = panel_asleep;
 
+        if (critical_cleared && panel_asleep) {
+            /* The charger went in, or the reading recovered, while the panel
+             * slept dimmed: keep it asleep but bring the brightness back. No
+             * branch below would ask again -- asleep and stopped, they leave a
+             * sleeping panel alone. A live session's branch still wakes it. */
+            ui_set_sleep(true, false);
+        }
         if (bat_critical) {
             /* Ahead of the session check, which is the only branch that would
              * otherwise wake the panel back up on the next pass. Ahead of a

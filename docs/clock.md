@@ -188,8 +188,10 @@ follows, because that is how you learn which alarm it was.
 
 ## The sleep clock
 
-While the panel sleeps and the time is known, it shows the **orb clock**, after
-Ed's "Orb clock" mockup:
+While the panel sleeps with the session stopped and the time is known, it shows
+the **orb clock**, after Ed's "Orb clock" mockup. (The one sleep with a session
+still live, the battery-critical one, keeps the conversation face, dimmed, so the
+agent's states and caption stay readable.)
 
 - **A small dotted sphere** in the middle: 180 dots, 96 px across the radius,
   turning slowly on a fixed tilt. A **meridian** sweeps across its near side and
@@ -208,7 +210,9 @@ Ed's "Orb clock" mockup:
 
 **On demand**, too: swipe up from the bottom edge and it comes up straight away,
 awake, with the session carrying on underneath. Any touch puts the face back,
-and does nothing else. Before the first time sync the swipe does nothing.
+and does nothing else; so does a session starting (a BOOT press, an alarm's
+announcement), since the face is then the point. Before the first time sync the
+swipe does nothing.
 
 It takes the orb colour like the rest of the screen: on white it is the mockup
 exactly. It is hidden under the QR code and the display test. A touch wakes the
@@ -232,7 +236,11 @@ sync there is nothing for the rings to show, so the panel keeps the plain orb.
   ring of dots read as the whole face jumping off centre. At under 0.02 px a
   second the drift cannot be seen; the dots take the fraction, the text whole
   pixels.
-- **What a frame costs** is in the log once a minute, as `EVT clock draw`.
+- **What a frame costs** is in the log once a minute, split into its parts:
+  `EVT clock draw N ms (clear a dots b text c)`. The dots take the squared-
+  distance shortcut the touch panel's circles do -- only a dot's one-pixel edge
+  takes a `sqrtf` -- and share their RGB565 packing, blend and text placement
+  with the panel through `main/ui_paint.c`.
 - **The fonts** are digits and a colon at 52 px, and `A`, `M`, `P` at 15 px --
   generated, because full faces would spend flash on letters a clock never draws:
 

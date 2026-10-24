@@ -32,6 +32,7 @@
 #include "orb_colors.h"
 #include "panel_geom.h"
 #include "ui.h"
+#include "ui_paint.h"
 #include "ui_tone.h"
 #if CONFIG_UI_PANEL_SELFTEST
 #include "screenshot.h"
@@ -128,21 +129,6 @@ static inline uint32_t now_ms(void)
 static uint16_t *s_px;
 static uint32_t s_stride;   /* in pixels */
 
-/*
- * rgb scaled by cov/255 -- "this much of the colour, over black" -- rounded to
- * the nearest RGB565 step rather than truncated. Truncating takes 3 bits off red
- * and blue but only 2 off green, which turned the reference sheet's neutral
- * dark greys (#16181D) visibly green on the panel.
- */
-static inline uint16_t rgb565_cov(uint32_t rgb, uint32_t cov)
-{
-    const uint32_t r = (((rgb >> 16) & 0xFF) * cov + 127) / 255;
-    const uint32_t g = (((rgb >> 8) & 0xFF) * cov + 127) / 255;
-    const uint32_t b = ((rgb & 0xFF) * cov + 127) / 255;
-    const uint32_t r5 = (r * 31 + 127) / 255, g6 = (g * 63 + 127) / 255, b5 = (b * 31 + 127) / 255;
-    return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
-}
-
 static void clear(void)
 {
     for (int y = 0; y < PANEL_SIZE; y++) {
@@ -219,7 +205,7 @@ static void fill_seg(panel_seg_t seg, uint32_t rgb)
     const bool flip_x = seg == PANEL_SEG_QUAD_TL || seg == PANEL_SEG_QUAD_BL;
     const bool flip_y = seg == PANEL_SEG_HALF_BOTTOM || seg == PANEL_SEG_QUAD_BL ||
                         seg == PANEL_SEG_QUAD_BR;
-    const uint16_t solid = rgb565_cov(rgb, 255);
+    const uint16_t solid = ui_paint_rgb565_cov(rgb, 255);
     for (int my = 0; my < m->h; my++) {
         const uint8_t *src = m->cov + (size_t)my * m->w;
         const int y = flip_y ? PANEL_SIZE - 1 - (m->y0 + my) : m->y0 + my;
@@ -230,7 +216,7 @@ static void fill_seg(panel_seg_t seg, uint32_t rgb)
                 continue;
             }
             const int x = flip_x ? PANEL_SIZE - 1 - (m->x0 + mx) : m->x0 + mx;
-            row[x] = (c == 255) ? solid : rgb565_cov(rgb, c);
+            row[x] = (c == 255) ? solid : ui_paint_rgb565_cov(rgb, c);
         }
     }
 }
@@ -269,7 +255,7 @@ static void fill_side(bool right, uint32_t up_rgb, uint32_t down_rgb, float leve
             const float dy = (float)y + 0.5f - PANEL_C;
             const uint32_t rgb = (dy < -PANEL_BRIDGE) ? band_rgb[0]
                                  : (dy > PANEL_BRIDGE) ? band_rgb[2] : meter;
-            s_px[(size_t)y * s_stride + x] = rgb565_cov(rgb, cov);
+            s_px[(size_t)y * s_stride + x] = ui_paint_rgb565_cov(rgb, cov);
         }
     }
 }
@@ -287,7 +273,7 @@ static void fill_circle(float cx, float cy, float r, float ring_w, uint32_t rgb)
     const float solid_hi = (r_out > 1.0f) ? (r_out - 1.0f) * (r_out - 1.0f) : -1.0f;
     const float none_lo = (r_in > 1.0f) ? (r_in - 1.0f) * (r_in - 1.0f) : -1.0f;
     const float none_hi = (r_out + 1.0f) * (r_out + 1.0f);
-    const uint16_t solid = rgb565_cov(rgb, 255);
+    const uint16_t solid = ui_paint_rgb565_cov(rgb, 255);
 
     const int x0 = (int)(cx - r_out - 2.0f), x1 = (int)(cx + r_out + 2.0f);
     const int y0 = (int)(cy - r_out - 2.0f), y1 = (int)(cy + r_out + 2.0f);
@@ -312,7 +298,7 @@ static void fill_circle(float cx, float cy, float r, float ring_w, uint32_t rgb)
             }
             const float cov = panel_coverage(d);
             if (cov > 0.0f) {
-                row[x] = rgb565_cov(rgb, (uint32_t)(cov * 255.0f + 0.5f));
+                row[x] = ui_paint_rgb565_cov(rgb, (uint32_t)(cov * 255.0f + 0.5f));
             }
         }
     }
@@ -321,34 +307,22 @@ static void fill_circle(float cx, float cy, float r, float ring_w, uint32_t rgb)
 /* ---------------- text and icons, through an LVGL layer ---------------- */
 
 /* Centred on (cx, cy), with `space` px between letters. */
+/* Centred on (cx, cy) by the line box, as the panel's labels always have been. */
 static void text_spaced(lv_layer_t *L, const lv_font_t *f, uint32_t rgb, int32_t cx, int32_t cy,
                         int32_t space, const char *s)
 {
-    lv_point_t sz;
-    lv_text_get_size(&sz, s, f, space, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    lv_draw_label_dsc_t d;
-    lv_draw_label_dsc_init(&d);
-    d.font = f;
-    d.color = lv_color_hex(rgb);
-    d.text = s;
-    d.letter_space = space;
-    d.text_local = 1;   /* rendered at finish_layer, after callers' buffers go */
-    d.align = LV_TEXT_ALIGN_CENTER;
-    const lv_area_t a = {cx - sz.x / 2 - 1, cy - sz.y / 2, cx + sz.x / 2 + 1, cy + sz.y / 2 + 1};
-    lv_draw_label(L, &d, &a);
+    ui_paint_text(L, f, rgb, cx, cy, space, false, s);
 }
 
 static void text(lv_layer_t *L, const lv_font_t *f, uint32_t rgb, int32_t cx, int32_t cy,
                  const char *s)
 {
-    text_spaced(L, f, rgb, cx, cy, 0, s);
+    ui_paint_text(L, f, rgb, cx, cy, 0, false, s);
 }
 
 static int32_t text_width(const lv_font_t *f, const char *s)
 {
-    lv_point_t sz;
-    lv_text_get_size(&sz, s, f, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    return sz.x;
+    return ui_paint_text_width(f, 0, s);
 }
 
 static void line_w(lv_layer_t *L, uint32_t rgb, int32_t width, int32_t x1, int32_t y1,
