@@ -32,6 +32,7 @@
 #include "orb_colors.h"
 #include "panel_geom.h"
 #include "ui.h"
+#include "ui_tone.h"
 #if CONFIG_UI_PANEL_SELFTEST
 #include "screenshot.h"
 #endif
@@ -44,18 +45,41 @@ LV_FONT_DECLARE(font_panel_40);
 
 /* ---------------- the reference sheet's palette ---------------- */
 
+/* As the sheet draws it, in white and greys: what the panel shows on a white
+ * orb. Any other orb colour is applied by ui_tone.h's rules in set_palette(). */
 #define COL_PRIMARY        0xFFFFFF
 #define COL_PRIMARY_INK    0x0B0C0F
 #define COL_PRIMARY_LABEL  0x4A4F59   /* the small grey word on a white button */
 #define COL_SECONDARY      0x1F2229
-#define COL_SECONDARY_INK  0xFFFFFF
 #define COL_PRESSED        0xC8CCD4
 #define COL_DISABLED       0x16181D
 #define COL_DISABLED_INK   0x5B606B
 #define COL_DOT_OFF        0x3A3E48
-#define COL_HINT           0x8B96A0   /* the grey ui.c's hint and clock use */
+#define COL_HINT           UI_HINT_RGB   /* the grey ui.c's hint and clock use */
 #define COL_BRIDGE_FILL    0x4E5462   /* the sound page's level meter: the level */
 #define COL_BRIDGE_EMPTY   0x2B2E37   /* ... and the rest of the band */
+
+/* The palette in force: the sheet's, in the orb's colour. */
+static struct {
+    uint32_t primary, primary_ink, primary_label, secondary, text, pressed, disabled,
+        disabled_ink, dot_off, hint, bridge_fill, bridge_empty;
+} s_col;
+
+static void set_palette(uint32_t tint)
+{
+    s_col.primary = ui_tone_mul(tint, COL_PRIMARY);
+    s_col.primary_ink = ui_tone_mul(tint, COL_PRIMARY_INK);
+    s_col.primary_label = ui_tone_mul(tint, COL_PRIMARY_LABEL);
+    s_col.pressed = ui_tone_mul(tint, COL_PRESSED);
+    s_col.text = ui_tone_ink(tint);
+    s_col.secondary = ui_tone_grey(tint, COL_SECONDARY);
+    s_col.disabled = ui_tone_grey(tint, COL_DISABLED);
+    s_col.disabled_ink = ui_tone_grey(tint, COL_DISABLED_INK);
+    s_col.dot_off = ui_tone_grey(tint, COL_DOT_OFF);
+    s_col.hint = ui_tone_grey(tint, COL_HINT);
+    s_col.bridge_fill = ui_tone_grey(tint, COL_BRIDGE_FILL);
+    s_col.bridge_empty = ui_tone_grey(tint, COL_BRIDGE_EMPTY);
+}
 
 /* ---------------- gestures ---------------- */
 
@@ -235,7 +259,7 @@ static void fill_side(bool right, uint32_t up_rgb, uint32_t down_rgb, float leve
         const int xl = m->y0 + r;                         /* x on the left half */
         const int x = right ? PANEL_SIZE - 1 - xl : xl;
         const uint8_t *src = m->cov + (size_t)r * m->w;
-        const uint32_t meter = ((float)x + 0.5f < edge) ? COL_BRIDGE_FILL : COL_BRIDGE_EMPTY;
+        const uint32_t meter = ((float)x + 0.5f < edge) ? s_col.bridge_fill : s_col.bridge_empty;
         for (int c = 0; c < m->w; c++) {
             const uint8_t cov = src[c];
             if (cov == 0) {
@@ -456,18 +480,18 @@ typedef enum { ST_PRIMARY, ST_SECONDARY, ST_PRESSED, ST_DISABLED } style_t;
 static uint32_t fill_of(style_t s)
 {
     switch (s) {
-    case ST_PRIMARY: return COL_PRIMARY;
-    case ST_SECONDARY: return COL_SECONDARY;
-    case ST_PRESSED: return COL_PRESSED;
-    default: return COL_DISABLED;
+    case ST_PRIMARY: return s_col.primary;
+    case ST_SECONDARY: return s_col.secondary;
+    case ST_PRESSED: return s_col.pressed;
+    default: return s_col.disabled;
     }
 }
 
 static uint32_t ink_of(style_t s, bool was_secondary)
 {
-    if (s == ST_DISABLED) return COL_DISABLED_INK;
-    if (s == ST_SECONDARY || (s == ST_PRESSED && was_secondary)) return COL_SECONDARY_INK;
-    return COL_PRIMARY_INK;
+    if (s == ST_DISABLED) return s_col.disabled_ink;
+    if (s == ST_SECONDARY || (s == ST_PRESSED && was_secondary)) return s_col.text;
+    return s_col.primary_ink;
 }
 
 static style_t style(panel_hit_t id, bool enabled, bool secondary)
@@ -524,19 +548,21 @@ static void paint_pair(lv_layer_t *L, bool right, panel_hit_t up_id, panel_hit_t
 
     const int32_t cx = (int32_t)(PANEL_C + (right ? 1.0f : -1.0f) * (PANEL_R + PANEL_GAP) * 0.5f);
     const int32_t cy = (int32_t)PANEL_C;
-    /* The signs: bold strokes, as large as the reference draws them. */
+    /* The signs: bold strokes, as large as the reference draws them, hugging
+     * the bridge and set in towards the centre gap rather than under the value. */
+    const int32_t sx = (int32_t)(PANEL_C + (right ? 76.0f : -76.0f));
     const uint32_t ink_u = ink_of(su, false), ink_d = ink_of(sd, false);
-    line_w(L, ink_u, 5, cx - 13, cy - 114, cx + 13, cy - 114);
-    line_w(L, ink_u, 5, cx, cy - 127, cx, cy - 101);
-    line_w(L, ink_d, 5, cx - 13, cy + 116, cx + 13, cy + 116);
+    line_w(L, ink_u, 5, sx - 12, cy - 72, sx + 12, cy - 72);
+    line_w(L, ink_u, 5, sx, cy - 84, sx, cy - 60);
+    line_w(L, ink_d, 5, sx - 12, cy + 79, sx + 12, cy + 79);
 
     /* The bridge: icon and number as one centred pair, the label under them. */
     const int32_t icon_w = 26, gap = 8;
     const int32_t num_w = text_width(&font_panel_28, value);
     const int32_t left = cx - (icon_w + gap + num_w) / 2;
-    icon(L, ico, COL_SECONDARY_INK, left + icon_w / 2, cy - 9);
-    text(L, &font_panel_28, COL_SECONDARY_INK, left + icon_w + gap + num_w / 2, cy - 9, value);
-    text_spaced(L, &lv_font_montserrat_14, COL_SECONDARY_INK, cx, cy + 20, 2, label);
+    icon(L, ico, s_col.text, left + icon_w / 2, cy - 9);
+    text(L, &font_panel_28, s_col.text, left + icon_w + gap + num_w / 2, cy - 9, value);
+    text_spaced(L, &lv_font_montserrat_14, s_col.text, cx, cy + 20, 2, label);
 }
 
 static void paint_sound(lv_layer_t *L)
@@ -576,8 +602,8 @@ static void paint_color(lv_layer_t *L, uint32_t tint_rgb)
         const int idx = panel_color_for_slot(s_color_sub, slot, count);
         const bool pressed = s_pressed == (panel_hit_t)(PANEL_HIT_SLOT + slot);
         if (idx == PANEL_SLOT_IS_MORE) {
-            fill_circle(x, y, PANEL_SWATCH_R, 0.0f, pressed ? COL_PRESSED : COL_SECONDARY);
-            const uint32_t ink = pressed ? COL_PRIMARY_INK : COL_SECONDARY_INK;
+            fill_circle(x, y, PANEL_SWATCH_R, 0.0f, pressed ? s_col.pressed : s_col.secondary);
+            const uint32_t ink = pressed ? s_col.primary_ink : s_col.text;
             if (s_color_sub == 0) {
                 char more[16];
                 snprintf(more, sizeof(more), "+%d", count - (PANEL_SLOTS - 1));
@@ -586,33 +612,31 @@ static void paint_color(lv_layer_t *L, uint32_t tint_rgb)
                 icon(L, ICON_LEFT, ink, (int32_t)x, (int32_t)y);
             }
         } else if (idx < 0) {
-            fill_circle(x, y, 3.0f, 0.0f, COL_DOT_OFF);
+            fill_circle(x, y, 3.0f, 0.0f, s_col.dot_off);
         } else {
             const uint32_t rgb = orb_colors_rgb((size_t)idx);
             /* Pressed shrinks it a touch: the only feedback a colour can take. */
             fill_circle(x, y, PANEL_SWATCH_R - (pressed ? 3.0f : 0.0f), 0.0f, rgb);
             if (idx == current) {
                 fill_circle(x, y, PANEL_SWATCH_R + 6.0f, 3.0f, rgb);
-                icon(L, ICON_CHECK, COL_PRIMARY_INK, (int32_t)x, (int32_t)y);
+                icon(L, ICON_CHECK, s_col.primary_ink, (int32_t)x, (int32_t)y);
             }
         }
     }
 
-    /* The centre: the colour in force, by name and by value, in itself. */
+    /* The centre: the colour in force, by name, in itself. */
     if (current >= 0) {
-        char name[16], hex[8];
+        char name[16];
         snprintf(name, sizeof(name), "%s", orb_colors_name((size_t)current));
         if (name[0] >= 'a' && name[0] <= 'z') {
             name[0] = (char)(name[0] - 'a' + 'A');
         }
-        snprintf(hex, sizeof(hex), "#%06" PRIX32, tint_rgb & 0xFFFFFF);
-        text(L, &font_panel_40, tint_rgb, (int32_t)PANEL_C, (int32_t)PANEL_C - 14, name);
-        text(L, &font_panel_18, COL_HINT, (int32_t)PANEL_C, (int32_t)PANEL_C + 24, hex);
+        text(L, &font_panel_40, tint_rgb, (int32_t)PANEL_C, (int32_t)PANEL_C, name);
     }
     /* The picker's own two pages. */
     for (int i = 0; i < 2; i++) {
         fill_circle(PANEL_C - 8.0f + 16.0f * (float)i, PANEL_C + 52.0f, 3.0f, 0.0f,
-                    i == s_color_sub ? COL_PRIMARY : COL_DOT_OFF);
+                    i == s_color_sub ? s_col.primary : s_col.dot_off);
     }
 }
 
@@ -626,17 +650,18 @@ static void paint_toggles(lv_layer_t *L)
     const uint32_t ink = ink_of(st, !ns_on);
     icon(L, ICON_WAVE, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - 128);
     text(L, &font_panel_28, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - 84, "Noise reduction");
-    text(L, &font_panel_18, st == ST_PRIMARY ? COL_PRIMARY_LABEL : (ns_ok ? COL_HINT : COL_DISABLED_INK),
+    text(L, &font_panel_18, st == ST_PRIMARY ? s_col.primary_label : (ns_ok ? s_col.hint : s_col.disabled_ink),
          (int32_t)PANEL_C, (int32_t)PANEL_C - 50, ns_ok ? (ns_on ? "On" : "Off") : "Unavailable");
 
-    /* Bottom: the clock format in force; a tap switches to the other. */
+    /* Bottom: the clock format in force; a tap switches to the other. A switch
+     * like the one above it, so it reads the same way: solid for 12-hour. */
     const bool clk_ok = controls_clock_available();
     const bool h12 = controls_clock_12h();
-    const style_t sb = style(PANEL_HIT_CLOCK_FMT, clk_ok, true);
+    const style_t sb = style(PANEL_HIT_CLOCK_FMT, clk_ok, !h12);
     fill_seg(PANEL_SEG_HALF_BOTTOM, fill_of(sb));
-    const uint32_t inkb = ink_of(sb, true);
+    const uint32_t inkb = ink_of(sb, !h12);
     text(L, &font_panel_28, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + 62, h12 ? "12-hour" : "24-hour");
-    text(L, &font_panel_18, sb == ST_DISABLED ? COL_DISABLED_INK : COL_HINT,
+    text(L, &font_panel_18, sb == ST_PRIMARY ? s_col.primary_label : (clk_ok ? s_col.hint : s_col.disabled_ink),
          (int32_t)PANEL_C, (int32_t)PANEL_C + 96, h12 ? "tap for 24-hour" : "tap for 12-hour");
     icon(L, ICON_CLOCK, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + 136);
 }
@@ -661,8 +686,8 @@ static int64_t timer_left(const alarm_view_t *v, uint32_t now)
 static void paint_alarms(lv_layer_t *L, uint32_t now)
 {
     if (s_alarm_n == 0) {
-        text(L, &font_panel_28, COL_HINT, (int32_t)PANEL_C, (int32_t)PANEL_C - 16, "No timers");
-        text(L, &font_panel_28, COL_HINT, (int32_t)PANEL_C, (int32_t)PANEL_C + 20, "or alarms");
+        text(L, &font_panel_28, s_col.hint, (int32_t)PANEL_C, (int32_t)PANEL_C - 16, "No timers");
+        text(L, &font_panel_28, s_col.hint, (int32_t)PANEL_C, (int32_t)PANEL_C + 20, "or alarms");
         return;
     }
     if (s_alarm_idx >= s_alarm_n) {
@@ -679,11 +704,11 @@ static void paint_alarms(lv_layer_t *L, uint32_t now)
         snprintf(big, sizeof(big), "%s", v->time);
         snprintf(when, sizeof(when), "%s", v->when);
     }
-    text(L, &font_panel_18, COL_HINT, (int32_t)PANEL_C, 80, count);
-    text(L, &font_panel_40, COL_PRIMARY, (int32_t)PANEL_C, 128, big);
-    text(L, &font_panel_18, COL_HINT, (int32_t)PANEL_C, 170, when);
+    text(L, &font_panel_18, s_col.hint, (int32_t)PANEL_C, 80, count);
+    text(L, &font_panel_40, s_col.text, (int32_t)PANEL_C, 128, big);
+    text(L, &font_panel_18, s_col.hint, (int32_t)PANEL_C, 170, when);
     if (v->label[0]) {
-        text(L, &font_panel_18, COL_PRIMARY, (int32_t)PANEL_C, 196, v->label);
+        text(L, &font_panel_18, s_col.text, (int32_t)PANEL_C, 196, v->label);
     }
 
     for (int side = 0; side < 2; side++) {
@@ -703,12 +728,13 @@ static void paint_alarms(lv_layer_t *L, uint32_t now)
     text(L, &font_panel_28, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + 62, armed ? "Cancel?" : "Cancel");
     icon(L, ICON_X, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + 104);
     if (armed) {
-        text(L, &font_panel_18, COL_PRIMARY_LABEL, (int32_t)PANEL_C, (int32_t)PANEL_C + 140, "tap again");
+        text(L, &font_panel_18, s_col.primary_label, (int32_t)PANEL_C, (int32_t)PANEL_C + 140, "tap again");
     }
 }
 
 static void paint(uint32_t now, uint32_t tint_rgb)
 {
+    set_palette(tint_rgb);
     const int64_t t0 = esp_timer_get_time();
     lv_draw_buf_t *buf = lv_canvas_get_draw_buf(s_canvas);
     s_px = (uint16_t *)buf->data;
@@ -732,7 +758,7 @@ static void paint(uint32_t now, uint32_t tint_rgb)
     /* Which page of the panel, in the rim below the disc on every page. */
     for (int i = 0; i < PANEL_PAGE_COUNT; i++) {
         fill_circle(PANEL_C + 14.0f * ((float)i - (PANEL_PAGE_COUNT - 1) / 2.0f), PAGE_DOTS_Y,
-                    3.0f, 0.0f, i == (int)s_page ? COL_PRIMARY : COL_DOT_OFF);
+                    3.0f, 0.0f, i == (int)s_page ? s_col.primary : s_col.dot_off);
     }
 
     lv_obj_invalidate(s_canvas);
@@ -759,13 +785,13 @@ static void paint(uint32_t now, uint32_t tint_rgb)
  */
 static uint32_t signature(uint32_t now, uint32_t tint_rgb)
 {
-    uint32_t h = (uint32_t)s_page * 2654435761u;
+    uint32_t h = (uint32_t)s_page * 2654435761u ^ tint_rgb;   /* every page wears the colour */
     switch (s_page) {
     case PANEL_PAGE_SOUND:
         h ^= (uint32_t)controls_volume() << 8 ^ (uint32_t)controls_mic_gain() << 16;
         break;
     case PANEL_PAGE_COLOR:
-        h ^= tint_rgb ^ (uint32_t)s_color_sub << 24;
+        h ^= (uint32_t)s_color_sub << 24;
         break;
     case PANEL_PAGE_TOGGLES:
         h ^= (uint32_t)controls_ns_on() << 3 ^ (uint32_t)controls_clock_12h() << 5;
@@ -830,7 +856,7 @@ static void act(panel_hit_t id)
             s_color_sub ^= 1;
         } else if (idx >= 0) {
             ESP_LOGI(TAG, "EVT ctl color %s", orb_colors_name((size_t)idx));
-            ui_set_orb_color(idx);   /* applied by the frame timer, not saved: as by voice */
+            ui_set_orb_color(idx);   /* applied by the frame timer; main.c saves it */
         }
         break;
     }

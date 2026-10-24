@@ -648,6 +648,19 @@ menu "Deepgram Agent Device"
             live throughout (monitor mode), so the states that respond to sound
             show the room as it was. Costs 434 kB of PSRAM for the copy.
 
+    config UI_CLOCK_PREVIEW
+        bool "Orb clock preview (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, shows the orb
+            clock -- the sleeping panel's face -- in four set states for 3 s
+            each, whether or not the device is asleep or the time is known:
+            the mockup's own 2:38 PM in white, the same in purple, 9:05 AM with
+            an alarm set and a low battery, and 21:52 in 24-hour while
+            charging. Prints two captures of each over serial, a second apart;
+            host/shot2png.py turns the log into PNGs. Then the face carries on
+            as normal. Costs 434 kB of PSRAM for the capture copy.
+
     config UI_PANEL_SELFTEST
         bool "Touch panel self-test (bench only)"
         default n
@@ -715,8 +728,10 @@ menu "Deepgram Agent Device"
         prompt "Default orb colour"
         default UI_DEFAULT_ORB_COLOR_WHITE
         help
-            What colour the orb's dots boot as. Any of these can be asked for at
-            runtime ("change the colour to teal"), so this only picks the default.
+            What colour the orb's dots boot as until one is chosen. Any of these
+            can be asked for at runtime ("change the colour to teal") or picked
+            on the touch panel, and the last one chosen is saved and booted in
+            from then on, so this only picks the out-of-box look.
 
             Named colours rather than a raw hex on purpose: every colour the
             device can boot in is then also one the agent can be asked to return
@@ -822,9 +837,14 @@ menu "Deepgram Agent Device"
     config BATTERY_SHOW_DOTS
         bool "Show the charge dots on screen"
         depends on BATTERY
-        default y
+        default n
         help
-            Four dots following the display's outer curve from 1 to 2 o'clock,
+            OFF BY DEFAULT: the orb clock's status row shows the charge -- a
+            battery whose fill is the level, red when low, the percentage and
+            a bolt while charging -- whenever the device sleeps or the clock is
+            swiped up. These dots predate it and are kept as an option.
+
+            Four dots following the display's outer curve round 3 o'clock,
             each worth a quarter of the charge, filling clockwise. Dots still
             held go bright, spent ones go dim, so 50% reads as two bright then
             two dim. A bolt continues the arc past them while current is going
@@ -912,20 +932,21 @@ menu "Deepgram Agent Device"
             Off costs nothing: no code, no event handler.
 
     config WIFI_SIGNAL_SHOW_BARS
-        bool "Show the signal icon on screen"
+        bool "Show the weak-signal icon on screen"
         depends on WIFI_SIGNAL
         default y
         help
+            A WARNING ONLY: shown while the signal is weak (WIFI_SIGNAL_WEAK_DBM,
+            with wifi_sta.c's hysteresis), conversation or not, and not
+            otherwise. The orb clock's status row is where the signal is read
+            at rest, whenever the device sleeps or the clock is swiped up.
+
             The familiar wifi glyph -- a dot with three arcs fanning out above
-            it -- at 10 to 11 o'clock, balancing the battery dots across the
-            panel. Four elements for four bars: the dot alone is one, each arc
-            past it is one more, which is the progression every phone draws.
+            it -- at 9 o'clock. Four elements for four bars: the dot alone is
+            one, each arc past it is one more, which is the progression every
+            phone draws.
             Lit parts go bright, the rest go dim. It takes the orb's colour, so
             set_color moves it too.
-
-            Shown while the session is stopped, the display is asleep, or the
-            signal is weak. Not during a conversation: the face is the point
-            then, and a permanent gauge over it is clutter.
 
     config WIFI_SIGNAL_WEAK_DBM
         int "Weak-signal warning threshold (dBm)"
@@ -955,7 +976,9 @@ menu "Deepgram Agent Device"
             voice or in the setup portal, and 12 or 24-hour time; four agent
             tools (get_time, set_clock, set_alarm, alarms); timers and alarms
             that chime, wake the panel and then have the agent say what they
-            were; and a large digital clock on the panel while it sleeps.
+            were; and the orb clock on the panel while it sleeps -- hour and
+            minute rings round a small turning orb, with the time, the next
+            alarm, Wi-Fi and battery.
 
             Off removes all of it, tools included -- a tool that can only ever
             answer "no clock" is worse than no tool.

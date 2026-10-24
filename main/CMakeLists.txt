@@ -28,7 +28,10 @@ idf_component_register(
         tz_table.c
         alarms.c
         alarm_sched.c
-        font_clock_72.c
+        font_clock_52.c
+        font_clock_15.c
+        clock_face.c
+        ui_clock.c
         audio_rec.c
         controls.c
         panel_geom.c
@@ -98,9 +101,9 @@ add_custom_command(
 add_custom_target(portal_html DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/portal.html)
 add_dependencies(${COMPONENT_LIB} portal_html)
 
-# font_clock_72.c and the font_panel_*.c set are lv_font_conv output, kept byte for byte as generated so it
+# The font_clock_*.c and font_panel_*.c sets are lv_font_conv output, kept byte for byte as generated so it
 # can be regenerated without a diff to merge (the command is in its header).
 # It includes "lvgl/lvgl.h" unless told otherwise, and only LVGL's desktop build
 # tells it; this does, for that one file.
-set_source_files_properties(font_clock_72.c font_panel_18.c font_panel_28.c font_panel_40.c
+set_source_files_properties(font_clock_52.c font_clock_15.c font_panel_18.c font_panel_28.c font_panel_40.c
     PROPERTIES COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)

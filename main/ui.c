@@ -54,15 +54,15 @@
 #include "ui.h"
 #include "arc_text.h"
 #include "ui_face.h"
+#include "ui_clock.h"
 #include "ui_panel.h"
-#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST
+#include "ui_tone.h"
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW
 #include "screenshot.h"
 #endif
 
 static const char *TAG = "ui";
 
-/* main/font_clock_72.c: digits and a colon, 72 px. */
-LV_FONT_DECLARE(font_clock_72);
 
 #define CENTER_X (BSP_LCD_H_RES / 2)
 #define CENTER_Y (BSP_LCD_V_RES / 2)
@@ -372,8 +372,13 @@ static inline lv_area_t signal_box(void)
  *
  * 88% of this device's life is spent with the session stopped, and until now it
  * rendered that at full rate and full brightness -- which is where the heat was
- * going. Asleep it keeps drawing, slowly and dim, because a frozen or black panel
- * reads as a crash where a slow breathing orb reads as waiting.
+ * going. Asleep it keeps drawing, slowly, because a frozen or black panel reads
+ * as a crash where a slow breathing orb reads as waiting.
+ *
+ * FULL BRIGHTNESS, now that sleeping shows the orb clock: it is there to be read
+ * across a room, and at 15 % it was not (Ed's call). What saves power asleep is
+ * the 5 fps and the radio's power save. The one sleep that still dims is the
+ * battery-critical one, which exists to stretch the last few percent.
  *
  * 200 ms is 5 fps. The frame timer is the ONLY thing slowed: LVGL itself keeps
  * running, so the touch panel is polled at its usual rate and a tap is as
@@ -382,7 +387,7 @@ static inline lv_area_t signal_box(void)
  * what reads the touch, so nothing but the BOOT button could wake it.
  */
 #define SLEEP_FRAME_MS       200
-#define SLEEP_BRIGHTNESS_PCT 15
+#define DIM_BRIGHTNESS_PCT   15    /* battery-critical sleep only */
 #define AWAKE_BRIGHTNESS_PCT 100
 
 /* How long after the last sample we treat the display as idle. Slightly longer
@@ -506,7 +511,24 @@ static bool s_face_ready[FACE_COUNT];    /* has init() succeeded */
  * the flush, so it must not run while one is in flight.
  */
 static volatile bool s_sleep_want;
+static volatile bool s_sleep_dim;   /* only the battery-critical sleep dims */
 static bool s_asleep;            /* LVGL task only */
+static bool s_dimmed;            /* LVGL task only */
+
+/*
+ * THE CLOCK ON DEMAND: a swipe up from the bottom edge shows the orb clock now,
+ * without waiting for sleep -- the mirror of the swipe down that opens the touch
+ * panel, and for the same reason no tap can be mistaken for it: it starts on
+ * the edge, nowhere near the centre button. The session is not touched. Any
+ * press puts the face back, and that press is nobody else's, so dismissing the
+ * clock can never also end a conversation. LVGL task only.
+ */
+#define CLOCK_SWIPE_BAND_PX 40   /* a press must start this close to the bottom edge */
+#define CLOCK_SWIPE_PX      80   /* and travel this far up */
+static bool s_clock_forced;
+static bool s_clock_swipe;       /* this press began on the bottom edge */
+static int32_t s_clock_swipe_x0, s_clock_swipe_y0;
+static bool s_clock_shown;       /* the clock owns the frame */
 static lv_timer_t *s_frame_timer;
 
 static volatile int s_face_want = -1;
@@ -517,6 +539,9 @@ static volatile int s_face_want = -1;
  * task before anything draws.
  */
 static volatile int s_color_want = -1;
+
+/* The index on screen, for ui_orb_color() and so main.c can save it. */
+static volatile int s_color_index;
 
 /*
  * The live ink colour, replaced with CONFIG_UI_DEFAULT_ORB_COLOR's during
@@ -794,8 +819,9 @@ static uint32_t s_flash_until_ms;
 
 static volatile bool s_stopped;
 
-#if CONFIG_BATTERY_SHOW_DOTS
-/* Written by ui_set_battery from main's telemetry task, read by the frame timer.
+#if CONFIG_BATTERY
+/* Written by ui_set_battery from main's telemetry task, read by the frame timer:
+ * by the orb clock's status row, and by the edge dots when they are built in.
  * Four independent words, per the setter contract in ui.h: store here, apply
  * there. Nothing in this file reads the AXP2101 -- an I2C transfer on the LVGL
  * task would land straight in the frame budget. */
@@ -803,6 +829,9 @@ static volatile int  s_bat_percent;
 static volatile bool s_bat_charging;
 static volatile bool s_bat_low;
 static volatile bool s_bat_valid;
+#endif
+
+#if CONFIG_BATTERY_SHOW_DOTS
 
 /* Whether ink from this overlay is currently on the canvas. LVGL task only.
  *
@@ -813,13 +842,17 @@ static volatile bool s_bat_valid;
 static bool s_bat_drawn;
 #endif
 
-#if CONFIG_WIFI_SIGNAL_SHOW_BARS
-/* Written by ui_set_signal from main's telemetry task, read by the frame timer.
+#if CONFIG_WIFI_SIGNAL
+/* Written by ui_set_signal from main's telemetry task, read by the frame timer:
+ * by the orb clock's status row, and by the edge glyph when it is built in.
  * Independent words, per the setter contract in ui.h: store here, apply there.
  * Nothing in this file calls into the Wi-Fi driver. */
 static volatile int  s_sig_bars;
 static volatile bool s_sig_weak;
 static volatile bool s_sig_valid;
+#endif
+
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
 
 /* Whether ink from this overlay is currently on the canvas -- the same
  * load-bearing flag as s_bat_drawn, for the same reason. LVGL task only. */
@@ -865,10 +898,6 @@ static lv_obj_t *status_label;
 #if CONFIG_UI_SHOW_INDICATORS
 static lv_obj_t *hint_label;
 #endif
-/* The sleep face's time, and the next alarm under it. See update_clock(). */
-static lv_obj_t *clock_label;
-static lv_obj_t *ampm_label;
-static lv_obj_t *next_label;
 static uint32_t s_frame;
 static lv_indev_t *s_touch;
 static void (*s_gesture_handler)(ui_gesture_t gesture);
@@ -1071,8 +1100,9 @@ void ui_set_gesture_handler(void (*handler)(ui_gesture_t gesture))
     s_gesture_handler = handler;
 }
 
-void ui_set_sleep(bool sleep)
+void ui_set_sleep(bool sleep, bool dim)
 {
+    s_sleep_dim = dim;
     s_sleep_want = sleep;
 }
 
@@ -1088,7 +1118,7 @@ void ui_set_stopped(bool stopped)
 
 void ui_set_signal(int bars, bool weak, bool valid)
 {
-#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+#if CONFIG_WIFI_SIGNAL
     s_sig_bars = bars;
     s_sig_weak = weak;
     s_sig_valid = valid;
@@ -1118,7 +1148,7 @@ void ui_set_ringing(bool ringing)
 
 void ui_set_battery(int percent, bool charging, bool low, bool valid)
 {
-#if CONFIG_BATTERY_SHOW_DOTS
+#if CONFIG_BATTERY
     s_bat_percent = percent;
     s_bat_charging = charging;
     s_bat_low = low;
@@ -1146,6 +1176,31 @@ void ui_set_face(int index)
         return;
     }
     s_face_want = index;
+}
+
+/*
+ * THE ORB COLOUR IS THE WHOLE SCREEN'S COLOUR. The words take it,
+ * lifted towards white on the darker colours so they stay readable, and the grey
+ * hints take its hue at their own brightness -- ui_tone.h has the rules, which
+ * leave everything exactly as designed on white. LVGL task only; called when the
+ * colour changes and once from build_ui().
+ */
+static void apply_tint(void)
+{
+    const lv_color_t ink = lv_color_hex(ui_tone_ink(s_tint_rgb));
+    const lv_color_t grey = lv_color_hex(ui_tone_grey(s_tint_rgb, UI_HINT_RGB));
+    lv_obj_set_style_text_color(status_label, ink, LV_PART_MAIN);
+#if CONFIG_UI_SHOW_INDICATORS
+    lv_obj_set_style_text_color(hint_label, grey, LV_PART_MAIN);
+#else
+    (void)grey;
+#endif
+    /* The orb clock reads s_tint_rgb itself, every frame. */
+}
+
+int ui_orb_color(void)
+{
+    return s_color_index;
 }
 
 void ui_set_orb_color(int index)
@@ -1406,8 +1461,8 @@ static void draw_arc_status(uint32_t now)
             arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
             lv_canvas_finish_layer(canvas_obj, &layer);
             lv_obj_invalidate_area(canvas_obj, &s_arc_box);
-            /* The centre label comes back in update_clock(), which owns its
-             * HIDDEN flag -- the clock can be hiding it too. */
+            /* The centre label comes back in update_status_shown(), which
+             * owns its HIDDEN flag. */
         }
         return;
     }
@@ -1438,7 +1493,7 @@ static void draw_arc_status(uint32_t now)
         return;
     }
 
-    s_arc_drawn = true;   /* update_clock() hides the centre label off this */
+    s_arc_drawn = true;   /* update_status_shown() hides the centre label off this */
 
     lv_canvas_init_layer(canvas_obj, &layer);
     /* Black the ground every frame, not only on a change: the faces repaint
@@ -1446,112 +1501,158 @@ static void draw_arc_status(uint32_t now)
      * keeps that picture wherever the glyph has thinned. Same reasoning the
      * battery overlay records. */
     arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
-    arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24, lv_color_white(), opa);
+    arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24,
+                  lv_color_hex(ui_tone_ink(s_tint_rgb)), opa);
     lv_canvas_finish_layer(canvas_obj, &layer);
     lv_obj_invalidate_area(canvas_obj, &s_arc_box);
 }
 
 /*
- * THE SLEEP CLOCK, and the one place the centre label's HIDDEN flag is decided.
- *
- * Labels rather than canvas ink, the same choice status_label made: LVGL
- * composites a widget over whatever the orb repaints underneath, so there is no
- * wipe-and-invalidate bookkeeping to get wrong, and the dim breathing orb behind
- * the digits is the "still alive" cue the sleep design exists to keep.
+ * THE ORB CLOCK: the sleeping panel, once the time is known. ui_clock.c paints
+ * it; this decides when, and hands it the state as plain values.
  *
  * Asleep only, and never over the QR code or the display test, both of which
  * own the screen. A touch wakes the panel on the press (gesture_event_cb), so
- * the clock is gone on the same frame the conversation face comes back.
- *
- * Re-texted when the integers change and not otherwise: at 5 fps asleep a
- * set_text per frame would re-lay-out and re-invalidate 72 px glyphs for nothing.
- * The colon does not blink for the same reason, and because this is an AMOLED:
- * a static picture held for hours marks the panel, so the pair also steps a few
- * pixels each minute, walking a 5 x 5 grid that takes 25 minutes to repeat.
+ * the clock is gone on the same frame the conversation face comes back. Before
+ * the first time sync there is nothing for the rings to show, so sleep keeps
+ * the plain orb until there is.
  */
-static void update_clock(void)
+#if CONFIG_UI_CLOCK_PREVIEW
+/*
+ * BENCH AID: the clock in the states worth looking at, captured over serial so
+ * host/shot2png.py can show them side by side with the mockup. The first is
+ * the mockup's own: 2:38 PM, 82 %, white.
+ */
+static const struct {
+    int hh, mm;
+    bool h12;
+    const char *next;
+    int color;          /* orb_colors.c index */
+    int bat;
+    bool low, charging;
+    int bars;
+} PREVIEW[] = {
+    {14, 38, true, "", 0, 82, false, false, 4},
+    {14, 38, true, "", 11, 82, false, false, 4},                 /* purple */
+    {9, 5, true, "alarm 7:30 AM", 0, 15, true, false, 2},       /* low, an alarm */
+    {21, 52, false, "alarm Wed 07:30", 8, 64, false, true, 1},  /* 24 h, charging */
+};
+#define PREVIEW_START_MS 10000
+#define PREVIEW_STEP_MS  3000
+
+/* The preview step showing at `now`, or -1. */
+static int preview_step(uint32_t now)
 {
-    const bool show = s_asleep && s_clk_valid && !s_test_active && s_qr_payload == NULL;
+    if (now < PREVIEW_START_MS) {
+        return -1;
+    }
+    const uint32_t k = (now - PREVIEW_START_MS) / PREVIEW_STEP_MS;
+    return k < sizeof(PREVIEW) / sizeof(PREVIEW[0]) ? (int)k : -1;
+}
+#endif
 
-    static int shown_hh = -1, shown_mm = -1;
-    static int shown_day = -2, shown_nhh = -1, shown_nmm = -1;
-    static bool shown, shown_h12, shown_ampm;
+static bool clock_wanted(uint32_t now)
+{
+#if CONFIG_UI_CLOCK_PREVIEW
+    if (preview_step(now) >= 0) {
+        return true;
+    }
+#else
+    (void)now;
+#endif
+    /* Anything that owns the whole screen ends the on-demand clock outright,
+     * rather than leaving it to come back afterwards. */
+    if (s_ringing || s_test_active || s_qr_payload != NULL) {
+        s_clock_forced = false;
+    }
+    return (s_asleep || s_clock_forced) && s_clk_valid && !s_ringing && !s_test_active &&
+           s_qr_payload == NULL;
+}
 
+static void paint_clock(uint32_t now)
+{
+    static const char *const WDAY[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    char next[32] = "";
     const bool h12 = s_clk_h12;
-    if (show) {
-        const int hh = s_clk_hh, mm = s_clk_mm;
-        const bool relayout = hh != shown_hh || mm != shown_mm || h12 != shown_h12;
-        if (relayout) {
-            shown_hh = hh;
-            shown_mm = mm;
-            const int32_t dx = ((mm % 5) - 2) * 3;
-            const int32_t dy = (((mm / 5) % 5) - 2) * 3;
-            if (h12) {
-                /* "8:52", no leading zero -- a 12-hour clock never shows one. */
-                lv_label_set_text_fmt(clock_label, "%d:%02d", (hh % 12) ? (hh % 12) : 12, mm);
-                lv_label_set_text(ampm_label, hh < 12 ? "AM" : "PM");
-                /*
-                 * The digits are centred on their own and the AM/PM tucks under
-                 * them, right edges flush. Beside them it was centred as a pair,
-                 * which put the digits visibly off the middle of a round panel --
-                 * judged on the device. The montserrat_24 box carries its own
-                 * ascender padding, which is the gap between the two.
-                 */
-                lv_obj_align(clock_label, LV_ALIGN_CENTER, dx, dy - 10);
-                lv_obj_update_layout(clock_label);
-                lv_obj_align_to(ampm_label, clock_label, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 0);
-            } else {
-                lv_label_set_text_fmt(clock_label, "%02d:%02d", hh, mm);
-                lv_obj_align(clock_label, LV_ALIGN_CENTER, dx, dy - 10);
-            }
-            /* Below the AM/PM when there is one, so the two never share a line. */
-            lv_obj_align(next_label, LV_ALIGN_CENTER, dx, dy + (h12 ? 58 : 36));
-        }
-        const int day = s_next_day, nhh = s_next_hh, nmm = s_next_mm;
-        if (day != shown_day || nhh != shown_nhh || nmm != shown_nmm || h12 != shown_h12) {
-            static const char *const WDAY[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-            shown_day = day;
-            shown_nhh = nhh;
-            shown_nmm = nmm;
-            char hm[12];
-            alarm_fmt_time(nhh, nmm, h12, hm, sizeof(hm));
-            if (day < 0 || day > 7) {
-                lv_label_set_text(next_label, "");
-            } else if (day == 7) {
-                lv_label_set_text_fmt(next_label, "alarm %s", hm);
-            } else {
-                lv_label_set_text_fmt(next_label, "alarm %s %s", WDAY[day], hm);
-            }
-        }
-        shown_h12 = h12;
-    }
-    if (show != shown) {
-        shown = show;
-        if (show) {
-            lv_obj_remove_flag(clock_label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(next_label, LV_OBJ_FLAG_HIDDEN);
+    const int day = s_next_day;
+    if (day >= 0 && day <= 7) {
+        char hm[12];
+        alarm_fmt_time(s_next_hh, s_next_mm, h12, hm, sizeof(hm));
+        if (day == 7) {
+            snprintf(next, sizeof(next), "alarm %s", hm);
         } else {
-            lv_obj_add_flag(clock_label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(next_label, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    const bool want_ampm = show && h12;
-    if (want_ampm != shown_ampm) {
-        shown_ampm = want_ampm;
-        if (want_ampm) {
-            lv_obj_remove_flag(ampm_label, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(ampm_label, LV_OBJ_FLAG_HIDDEN);
+            snprintf(next, sizeof(next), "alarm %s %s", WDAY[day], hm);
         }
     }
 
-    /*
-     * Two things can want the centre word out of the way -- the caption bent
-     * round the rim, which is the same word moved, and the clock -- and they
-     * used to be one. Deciding it here, once, after both, is what stops one of
-     * them un-hiding the label while the other still needs it gone.
-     */
-    const bool hide_status = s_arc_drawn || show;
+    ui_clock_state_t st = {
+        .now_ms = now,
+        .hh = s_clk_hh,
+        .mm = s_clk_mm,
+        .h12 = h12,
+        .next = next,
+        .tint_rgb = s_tint_rgb,
+#if CONFIG_BATTERY
+        .bat_valid = s_bat_valid,
+        .bat_low = s_bat_low,
+        .bat_charging = s_bat_charging,
+        .bat_percent = s_bat_percent,
+#endif
+#if CONFIG_WIFI_SIGNAL
+        .sig_valid = s_sig_valid,
+        .sig_bars = s_sig_bars,
+#endif
+    };
+
+#if CONFIG_UI_CLOCK_PREVIEW
+    const int k = preview_step(now);
+    if (k >= 0) {
+        st.hh = PREVIEW[k].hh;
+        st.mm = PREVIEW[k].mm;
+        st.h12 = PREVIEW[k].h12;
+        st.next = PREVIEW[k].next;
+        st.tint_rgb = orb_colors_rgb((size_t)PREVIEW[k].color);
+        st.bat_valid = true;
+        st.bat_percent = PREVIEW[k].bat;
+        st.bat_low = PREVIEW[k].low;
+        st.bat_charging = PREVIEW[k].charging;
+        st.sig_valid = true;
+        st.sig_bars = PREVIEW[k].bars;
+    }
+#endif
+
+    ui_clock_frame(&st);
+
+#if CONFIG_UI_CLOCK_PREVIEW
+    /* Two captures a step, a second apart, so the motion shows between them. */
+    static int shot_step = -1;
+    static unsigned shots;
+    if (k != shot_step) {
+        shot_step = k;
+        shots = 0;
+    }
+    const uint32_t in = k >= 0 ? (now - PREVIEW_START_MS) % PREVIEW_STEP_MS : 0;
+    if (k >= 0 && shots < 2 && in >= 1000u + 1000u * shots && !screenshot_busy()) {
+        char tag[24];
+        snprintf(tag, sizeof(tag), "clock-%d-%u", k, shots + 1);
+        lv_draw_buf_t *buf = lv_canvas_get_draw_buf(canvas_obj);
+        if (screenshot_capture((const uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t),
+                               BSP_LCD_H_RES, BSP_LCD_V_RES, tag)) {
+            ESP_LOGI(TAG, "EVT shot %s", tag);
+            shots++;
+        }
+    }
+#endif
+}
+
+/*
+ * The one place the centre label's HIDDEN flag is decided while the face is
+ * up: the caption bent round the rim is the same word moved, so the two never
+ * show at once. (The clock and the panel hide it on their way in.)
+ */
+static void update_status_shown(void)
+{
+    const bool hide_status = s_arc_drawn;
     if (hide_status != lv_obj_has_flag(status_label, LV_OBJ_FLAG_HIDDEN)) {
         if (hide_status) {
             lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
@@ -1625,7 +1726,8 @@ static void draw_indicators(void)
 
     lv_draw_arc_dsc_t dsc;
     lv_draw_arc_dsc_init(&dsc);
-    dsc.color = lv_color_hex(interrupt ? INDICATOR_RGB_INTERRUPT : INDICATOR_RGB_IDLE);
+    dsc.color = lv_color_hex(interrupt ? INDICATOR_RGB_INTERRUPT
+                                         : ui_tone_grey(s_tint_rgb, INDICATOR_RGB_IDLE));
     dsc.width = INDICATOR_WIDTH;
     dsc.center.x = CENTER_X;
     dsc.center.y = CENTER_Y;
@@ -1829,8 +1931,10 @@ static void draw_battery(void)
  */
 static void draw_signal(void)
 {
-    const bool show = s_sig_valid && s_qr_payload == NULL && !s_test_active &&
-                      (s_stopped || s_asleep || s_sig_weak);
+    /* A warning only, now: weak, and nothing else. The orb clock's status row
+     * is where the signal is read at rest; this is for the moment it matters,
+     * mid-conversation included. */
+    const bool show = s_sig_valid && s_qr_payload == NULL && !s_test_active && s_sig_weak;
 
     const lv_area_t box = signal_box();
     lv_layer_t layer;
@@ -2259,10 +2363,11 @@ void ui_get_telemetry(ui_telemetry_t *out)
  */
 static void apply_sleep(bool want)
 {
-    if (want == s_asleep) {
+    const bool dim = want && s_sleep_dim;
+    if (want == s_asleep && dim == s_dimmed) {
         return;
     }
-    if (want && s_test_active) {
+    if (want && !s_asleep && s_test_active) {
         return;
     }
     /*
@@ -2271,15 +2376,21 @@ static void apply_sleep(bool want)
      * itself 8 s after the last touch, and the sleep that was waiting then
      * lands on the next frame.
      */
-    if (want && ui_panel_is_open()) {
+    if (want && !s_asleep && ui_panel_is_open()) {
         return;
     }
-    s_asleep = want;
-    if (s_frame_timer != NULL) {
-        lv_timer_set_period(s_frame_timer, want ? SLEEP_FRAME_MS : FRAME_MS);
+    if (want != s_asleep) {
+        s_asleep = want;
+        if (s_frame_timer != NULL) {
+            /* The clock draws at the sleep rate awake too: see frame_timer_cb. */
+            lv_timer_set_period(s_frame_timer, (want || s_clock_shown) ? SLEEP_FRAME_MS : FRAME_MS);
+        }
     }
-    bsp_display_brightness_set(want ? SLEEP_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
-    ESP_LOGI(TAG, "EVT %s", want ? "sleep" : "wake");
+    /* Also when only the dimming changed: a cell that turns critical while the
+     * panel already sleeps dims it, and the charger un-dims it. */
+    s_dimmed = dim;
+    bsp_display_brightness_set(dim ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
+    ESP_LOGI(TAG, "EVT %s%s", want ? "sleep" : "wake", dim ? " dim" : "");
 }
 
 static void frame_timer_cb(lv_timer_t *timer)
@@ -2331,6 +2442,8 @@ static void frame_timer_cb(lv_timer_t *timer)
             ESP_LOGI(TAG, "EVT color %s (0x%06" PRIX32 ")",
                      orb_colors_name((size_t)cwant), rgb);
             s_tint_rgb = rgb;
+            s_color_index = cwant;
+            apply_tint();
         }
     }
 
@@ -2347,15 +2460,34 @@ static void frame_timer_cb(lv_timer_t *timer)
     if (s_ringing || s_test_active || s_qr_payload != NULL) {
         ui_panel_close(s_ringing ? "alarm" : "screen taken");
     }
+    const uint32_t now_ms = (uint32_t)(draw_start_us / 1000);
     static bool s_panel_shown;
-    const bool panel = ui_panel_frame((uint32_t)(draw_start_us / 1000), s_tint_rgb,
-                                      s_session_live);
-    if (panel != s_panel_shown) {
+    const bool panel = ui_panel_frame(now_ms, s_tint_rgb, s_session_live);
+    /* The panel cannot be open asleep (apply_sleep refuses), so the two never
+     * both want the frame; the panel is asked first all the same. */
+    const bool clock = !panel && clock_wanted(now_ms);
+    if (panel != s_panel_shown || clock != s_clock_shown) {
+        const bool was_taken = s_panel_shown || s_clock_shown;
+        if (s_clock_shown && !clock) {
+            /* Hand the face a black canvas, as the panel's close does. */
+            ui_clock_leave();
+        }
         s_panel_shown = panel;
-        if (panel) {
-            /* The panel painted over everything, so no overlay's record of what
-             * it last drew is true any more; each draws afresh once it closes.
-             * update_clock() puts the status word back on the first frame after. */
+        if (clock != s_clock_shown) {
+            s_clock_shown = clock;
+            /*
+             * The clock draws at the sleep rate even awake. A frame of it costs
+             * 25-60 ms, which at the awake 33 ms period would hold the LVGL task
+             * busy on the core the echo canceller shares; at 200 ms it is a
+             * quarter of one frame. Its motion is designed slow enough for it.
+             */
+            lv_timer_set_period(s_frame_timer, (clock || s_asleep) ? SLEEP_FRAME_MS : FRAME_MS);
+        }
+        if ((panel || clock) && !was_taken) {
+            /* Painted over everything, so no overlay's record of what it last
+             * drew is true any more; each draws afresh once it is gone.
+             * update_status_shown() puts the status word back on the first
+             * frame after. */
             lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
 #if CONFIG_BATTERY_SHOW_DOTS
             s_bat_drawn = false;
@@ -2367,7 +2499,7 @@ static void frame_timer_cb(lv_timer_t *timer)
             s_arc_shown = NULL;
         }
 #if CONFIG_UI_SHOW_INDICATORS
-        if (panel) {
+        if (panel || clock) {
             lv_obj_add_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
@@ -2375,6 +2507,11 @@ static void frame_timer_cb(lv_timer_t *timer)
 #endif
     }
     if (panel) {
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
+    if (clock) {
+        paint_clock(now_ms);
         tlm_accumulate_frame(draw_start_us);
         return;
     }
@@ -2500,7 +2637,7 @@ static void frame_timer_cb(lv_timer_t *timer)
      */
     draw_arc_status((uint32_t)(draw_start_us / 1000));
     /* After the caption: it reads s_arc_drawn to decide the centre label. */
-    update_clock();
+    update_status_shown();
 
 #if CONFIG_UI_SCREENSHOT_TOUR
     /* Last, so what it copies is the finished frame. */
@@ -2556,6 +2693,18 @@ static void gesture_event_cb(lv_event_t *e)
          */
         s_sleep_want = false;
         apply_sleep(false);
+        s_clock_swipe = false;
+        /* The on-demand clock goes on any press, and the press goes with it. */
+        if (s_clock_forced) {
+            s_clock_forced = false;
+            s_press_in_button = false;
+            s_press_active = false;
+            /* A press that can open nothing, so the panel's drag state is not
+             * left over from the one before. */
+            ui_panel_pressed(-1, -1, false);
+            ESP_LOGI(TAG, "EVT clock dismissed");
+            break;
+        }
         /*
          * A ringing alarm takes the whole panel. A press anywhere dismisses it,
          * and the press is then nobody else's: clearing the button gate here is
@@ -2590,6 +2739,11 @@ static void gesture_event_cb(lv_event_t *e)
                 s_press_active = false;
                 break;
             }
+            /* Noted only; the drag decides, in PRESSING. */
+            s_clock_swipe = can_open && !ui_panel_is_open() &&
+                            p.y >= BSP_LCD_V_RES - CLOCK_SWIPE_BAND_PX;
+            s_clock_swipe_x0 = p.x;
+            s_clock_swipe_y0 = p.y;
         }
         s_press_in_button = press_is_in_button(e);
         s_press_active = s_press_in_button;
@@ -2602,6 +2756,22 @@ static void gesture_event_cb(lv_event_t *e)
             lv_indev_get_point(indev, &p);
         }
         ui_panel_pressing(p.x, p.y);
+        if (s_clock_swipe) {
+            const int32_t up = s_clock_swipe_y0 - p.y;
+            const int32_t side = p.x > s_clock_swipe_x0 ? p.x - s_clock_swipe_x0 : s_clock_swipe_x0 - p.x;
+            if (up >= CLOCK_SWIPE_PX && side < up) {
+                s_clock_swipe = false;
+                s_press_in_button = false;
+                s_press_active = false;
+                if (s_clk_valid) {
+                    s_clock_forced = true;
+                    ESP_LOGI(TAG, "EVT clock on demand");
+                } else {
+                    /* Nothing for the rings to show before the first sync. */
+                    ESP_LOGI(TAG, "EVT clock refused (time not set)");
+                }
+            }
+        }
         break;
     }
 
@@ -2929,7 +3099,6 @@ static esp_err_t build_ui(void)
     lv_label_set_text(status_label, s_status);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_text_color(status_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_center(status_label);
 
 #if CONFIG_UI_SHOW_INDICATORS
@@ -2943,34 +3112,8 @@ static esp_err_t build_ui(void)
     lv_label_set_text(hint_label, "");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(hint_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
     lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 34);
 #endif
-
-    /* The sleep clock, hidden until the panel sleeps; see update_clock(). The
-     * digits-only font is generated -- the command is in its header -- because
-     * a full 72 px Montserrat would spend ~100 kB of flash on letters a clock
-     * never draws. */
-    clock_label = lv_label_create(scr);
-    lv_label_set_text(clock_label, "");
-    lv_obj_set_style_text_font(clock_label, &font_clock_72, LV_PART_MAIN);
-    lv_obj_set_style_text_color(clock_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_add_flag(clock_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_center(clock_label);
-
-    /* Grey and small, like the hint: it qualifies the digits, it is not one. */
-    ampm_label = lv_label_create(scr);
-    lv_label_set_text(ampm_label, "");
-    lv_obj_set_style_text_font(ampm_label, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_text_color(ampm_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
-    lv_obj_add_flag(ampm_label, LV_OBJ_FLAG_HIDDEN);
-
-    next_label = lv_label_create(scr);
-    lv_label_set_text(next_label, "");
-    lv_obj_set_style_text_font(next_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(next_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
-    lv_obj_add_flag(next_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(next_label, LV_ALIGN_CENTER, 0, 36);
 
     /*
      * The screen, not the canvas. lv_canvas derives from lv_image, whose
@@ -2986,13 +3129,18 @@ static esp_err_t build_ui(void)
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-    /* Not a static initialiser because it is a table lookup; orb_colors_rgb()
-     * returns white for an out-of-range index, so a Kconfig list that has drifted
-     * out of step with the table degrades to the default look. */
-    s_tint_rgb = orb_colors_rgb(CONFIG_UI_DEFAULT_ORB_COLOR);
+    /* The colour it was left in, else the Kconfig default. Not a static
+     * initialiser because both are lookups; orb_colors_rgb() returns white for an
+     * out-of-range index, so a Kconfig list that has drifted out of step with the
+     * table degrades to the default look. */
+    const int saved_color = orb_colors_saved();
+    s_color_index = saved_color >= 0 ? saved_color : CONFIG_UI_DEFAULT_ORB_COLOR;
+    s_tint_rgb = orb_colors_rgb((size_t)s_color_index);
+    apply_tint();
 
     ui_panel_init(canvas_obj);
-#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST
+    ui_clock_init(canvas_obj);
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW
     screenshot_init();
 #endif
 

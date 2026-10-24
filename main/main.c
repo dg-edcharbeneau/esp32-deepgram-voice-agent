@@ -47,6 +47,7 @@
 #include "boot_button.h"
 #include "clock.h"
 #include "heap_probe.h"
+#include "orb_colors.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "ui.h"
@@ -143,6 +144,9 @@ static volatile bool s_bad_key_notice;
  * the setup QR is on screen.
  */
 #define SLEEP_AFTER_STOPPED_MS 30000
+
+/* How long a new orb colour must hold before it is written to flash. */
+#define COLOR_SAVE_QUIET_MS 2000
 
 static inline uint32_t now_ms(void)
 {
@@ -994,11 +998,13 @@ void app_main(void)
          * battery.c samples on its own schedule, so this is a copy of the last
          * value and not a bus transaction.
          *
-         * The warning is the dots themselves -- battery.c's hysteresed `low` flag
-         * keeps them on screen whatever else is happening. The status label is
-         * deliberately NOT used: it reports the session, on_state_change() rewrites
-         * it constantly, and a battery message parked there would either be
-         * overwritten within the second or be a lie about the session.
+         * The warning is the orb clock's battery, red at `low` (battery.c's
+         * hysteresed flag), and with CONFIG_BATTERY_SHOW_DOTS the edge dots,
+         * which that flag keeps on screen whatever else is happening. The
+         * status label is deliberately NOT used: it reports the session,
+         * on_state_change() rewrites it constantly, and a battery message
+         * parked there would either be overwritten within the second or be a
+         * lie about the session.
          */
         battery_status_t bat;
         const bool bat_ok = battery_get(&bat);
@@ -1015,6 +1021,28 @@ void app_main(void)
         wifi_signal_t sig;
         const bool sig_ok = wifi_sta_get_signal(&sig);
         ui_set_signal(sig.bars, sig.weak, sig_ok);
+
+        /*
+         * THE ORB COLOUR, saved here so the device boots in the one it was left
+         * in. Here because a flash write stalls audio and the LVGL task must not
+         * make one; and only once a change has held for COLOR_SAVE_QUIET_MS, so
+         * someone trying swatches on the touch panel costs one write, not one a
+         * tap. The first pass takes what boot applied as already saved.
+         */
+        {
+            static int saved = -1, seen = -1;
+            static uint32_t seen_ms;
+            const int now_idx = ui_orb_color();
+            if (saved < 0) {
+                saved = seen = now_idx;
+            } else if (now_idx != seen) {
+                seen = now_idx;
+                seen_ms = now_ms();
+            } else if (now_idx != saved && (now_ms() - seen_ms) >= COLOR_SAVE_QUIET_MS) {
+                orb_colors_save((size_t)now_idx);
+                saved = now_idx;
+            }
+        }
 
         /*
          * CLOCK AND ALARMS. Here because everything slow they do -- applying a
@@ -1100,20 +1128,20 @@ void app_main(void)
              * otherwise wake the panel back up on the next pass. Ahead of a
              * ringing alarm too: the chime, the caption and the announcement all
              * still happen on a dim panel, and a cell this low needs it dim. */
-            ui_set_sleep(true);
+            ui_set_sleep(true, true);
         } else if (alarms_ringing()) {
             /* Awake while it chimes, and the sleep clock restarts from now so
              * the panel does not drop straight back down once it stops. */
             stopped_since_ms = now_ms();
-            ui_set_sleep(false);
+            ui_set_sleep(false, false);
         } else if (session_ctl_is_running()) {
             stopped_since_ms = 0;
-            ui_set_sleep(false);
+            ui_set_sleep(false, false);
         } else if (stopped_since_ms == 0) {
             stopped_since_ms = now_ms();
         } else if (!panel_asleep &&
                    (now_ms() - stopped_since_ms) > SLEEP_AFTER_STOPPED_MS) {
-            ui_set_sleep(true);
+            ui_set_sleep(true, false);
         }
 
         if (panel_asleep != radio_saving) {

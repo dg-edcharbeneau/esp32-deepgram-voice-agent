@@ -2191,9 +2191,10 @@ static esp_err_t send_settings(void)
      * device, so not Flux-gated, and the catalog goes in the description because
      * JSON Schema has nowhere to hang a per-enum-value note.
      *
-     * The description names the orb explicitly. The spectrum draws its own
-     * palette and ignores the setting, and saying so is what stops the model
-     * offering a colour change as the answer to "the bars look wrong".
+     * The description names the orb explicitly, and the rest of the screen that
+     * follows it (ui_tone.h). The spectrum draws its own palette and ignores the
+     * setting, and saying so is what stops the model offering a colour change as
+     * the answer to "the bars look wrong".
      */
     /*
      * PSRAM, and ONE buffer rather than a catalog-plus-description pair.
@@ -2225,7 +2226,7 @@ static esp_err_t send_settings(void)
      * A new described catalog should cost nothing here; if one ever appears to,
      * measure with .claude/skills/esp-stack-budget/ before enlarging anything.
      */
-    /* 543 B in use at thirteen colours (201 prefix + 341 catalog + NUL). Rounded
+    /* 561 B in use at thirteen colours (219 prefix + 341 catalog + NUL). Rounded
      * up because it is PSRAM and free, so a couple more colours cannot quietly
      * run into orb_colors_describe()'s truncation path. */
     enum { COLOR_DESC_LEN = 1024 };
@@ -2237,8 +2238,8 @@ static esp_err_t send_settings(void)
         int n = snprintf(color_desc, COLOR_DESC_LEN,
                          "Change the colour of the orb on the device's screen. Use "
                          "when the user asks for a different colour, or to go back "
-                         "to normal. Only the orb is affected; the spectrum face "
-                         "keeps its own colours. Colours: ");
+                         "to normal. The words, clock and touch panel follow it; "
+                         "the spectrum face keeps its own colours. Colours: ");
         if (n > 0 && (size_t)n < COLOR_DESC_LEN) {
             orb_colors_describe(color_desc + n, COLOR_DESC_LEN - (size_t)n);
             color_desc_str = color_desc;

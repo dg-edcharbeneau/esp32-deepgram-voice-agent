@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "panel_geom.h"
+#include "ui_tone.h"
 
 #define COLORS 13   /* orb_colors.c */
 
@@ -281,12 +282,48 @@ static void dump(const char *dir, const char *name, const panel_seg_t *segs, int
     printf("wrote %s\n", path);
 }
 
+/*
+ * ui_tone.h: white changes nothing, text keeps its floor, and a grey keeps its
+ * brightness in any hue. The colours are orb_colors.c's, from white to the
+ * darkest (purple), so a change to the table can be checked by adding it here.
+ */
+static void tone(void)
+{
+    static const uint32_t greys[] = {0xFFFFFF, 0x0B0C0F, 0x4A4F59, 0x1F2229, 0xC8CCD4,
+                                     0x16181D, 0x5B606B, 0x3A3E48, UI_HINT_RGB,
+                                     0x4E5462, 0x2B2E37, 0x4A5560};
+    static const uint32_t tints[] = {0xFFFFFF, 0xE9A581, 0xF85044, 0xFF7042, 0xFFCF3D,
+                                     0xC6FF00, 0x39EA5F, 0x64FFDA, 0x57D7FF, 0x5393FF,
+                                     0x758AFF, 0xB54DFF, 0xFF669E};
+    int same = 1, floor_ok = 1, bright = 1;
+    for (size_t i = 0; i < sizeof(greys) / sizeof(greys[0]); i++) {
+        same &= ui_tone_mul(0xFFFFFF, greys[i]) == greys[i];
+        same &= ui_tone_grey(0xFFFFFF, greys[i]) == greys[i];
+    }
+    same &= ui_tone_ink(0xFFFFFF) == 0xFFFFFF;
+    for (size_t t = 0; t < sizeof(tints) / sizeof(tints[0]); t++) {
+        floor_ok &= ui_tone_luma(ui_tone_ink(tints[t])) >= UI_TONE_INK_LUMA - 1;
+        /* Dark greys only: the light ones clip at 255 by design. */
+        for (size_t i = 0; i < sizeof(greys) / sizeof(greys[0]); i++) {
+            const int want = (int)ui_tone_luma(greys[i]);
+            if (want <= 0x60) {
+                const int got = (int)ui_tone_luma(ui_tone_grey(tints[t], greys[i]));
+                bright &= abs(got - want) <= 3;
+            }
+        }
+    }
+    check("tone: on white every colour is exactly the reference sheet's", same);
+    check("tone: text on every orb colour is at least UI_TONE_INK_LUMA bright", floor_ok);
+    check("tone: dark greys keep their brightness in every hue", bright);
+}
+
 int main(int argc, char **argv)
 {
     sound();
     halves();
     colours();
     coverage();
+    tone();
 
     if (argc > 1) {
         const panel_seg_t quads[] = {PANEL_SEG_HALF_LEFT, PANEL_SEG_HALF_RIGHT};

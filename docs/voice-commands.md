@@ -313,13 +313,22 @@ half of the outgoing one's output.
 "Make it purple" works, and so does "put it back to normal". `set_color` takes a
 name from a thirteen-entry catalog in
 [main/orb_colors.c](../main/orb_colors.c) — the accent colours of the Vira palette —
-and is the sibling of `set_face` in every mechanical respect: no `Settings` field,
-no session reload, applied by the frame timer, and not persisted across a reboot.
+and is the sibling of `set_face` in most mechanical respects: no `Settings` field,
+no session reload, applied by the frame timer. Unlike the face it **survives a
+reboot**: `main.c`'s loop saves it by name to NVS once a change has held for 2 s
+(so trying swatches on the touch panel costs one flash write, not one a tap), and
+the device boots in it.
 
-**The orb only.** The spectrum colours its bands by frequency and by which half of
-the conversation is live, so a single tint would destroy information rather than
+**The orb, and the screen around it.** The status word, the sleep clock, the
+hints, the ring round the button and the touch panel all take the colour, by the
+rules in [main/ui_tone.h](../main/ui_tone.h) — see the touch panel section of
+[display.md](display.md). On white every one of them is exactly as designed.
+**Not the spectrum**: it colours its bands by frequency and by which half of the
+conversation is live, so a single tint would destroy information rather than
 restyle it. The function description says so, which is what stops the model
-offering a colour change when someone complains about the bars.
+offering a colour change when someone complains about the bars. The QR code stays
+black on white too, because that is what a phone can scan, and the amber "tap:
+interrupt" ring stays amber, because its job is to look different.
 
 Colour is one multiply per channel on the ink the geometry already resolved, at
 the single point in [main/orb_raster.c](../main/orb_raster.c) where that ink became

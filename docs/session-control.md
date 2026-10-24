@@ -291,6 +291,12 @@ too little to open anything, which keeps the lesson the interrupt's old target
 taught. While the panel is open it takes every press whole and the button means
 nothing, so a tap on a setting can never also interrupt or end the conversation.
 
+The orb clock ([clock.md](clock.md#the-sleep-clock)) comes up on demand the same
+way from the other edge: a drag that **starts within 40 px of the bottom edge**
+and travels 80 px up. The session is not touched. Any press puts the face back,
+and that press is swallowed whole, so dismissing the clock can never also tap the
+button and end a conversation that carried on underneath it.
+
 ## Stopping when nobody is talking
 
 The device uplinks 16 kHz mono for as long as a session is open — roughly

@@ -13,9 +13,11 @@
  * LVGL. So a colour is a plain 0xRRGGBB here and stays one until orb_raster.c,
  * which is the only file that has any business knowing about pixel formats.
  *
- * ORB ONLY. The spectrum face colours its bands by frequency and by which half of
- * the conversation is live, so a single tint would destroy information rather than
- * restyle it. The setting is stored whichever face is up and shows on the orb.
+ * THE ORB AND THE SCREEN AROUND IT -- the words, clock, hints and touch panel
+ * follow it by ui_tone.h's rules -- BUT NOT THE SPECTRUM. That face colours its
+ * bands by frequency and by which half of the conversation is live, so a single
+ * tint would destroy information rather than restyle it. The setting is stored
+ * whichever face is up and shows on the orb.
  */
 #pragma once
 
@@ -44,6 +46,17 @@ uint32_t orb_colors_rgb(size_t index);
 
 /* Case-insensitive lookup. Returns the index, or -1 if unknown. */
 int orb_colors_find(const char *name);
+
+/*
+ * The colour chosen last, by voice or on the touch panel, kept in NVS by NAME
+ * so a reordered catalog cannot turn someone's teal into something else. Returns
+ * its index, or -1 for none saved (or a name no longer in the catalog).
+ */
+int orb_colors_saved(void);
+
+/* Save `index` as the colour to boot with. A flash write: never from the LVGL
+ * task -- main.c's loop calls it once a change has held for a moment. */
+void orb_colors_save(size_t index);
 
 /* Appends a JSON string array of the names, for the function schema's `enum`. */
 void orb_colors_add_enum(cJSON *parent, const char *key);

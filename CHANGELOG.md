@@ -25,6 +25,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Screen captures of every orb state.** `CONFIG_UI_SCREENSHOT_TOUR` (bench
   only) runs the display test on its own and prints three captures per step
   over serial; `host/shot2png.py` turns the log into PNGs and a contact sheet.
+- **The orb clock replaces the sleep clock.** While the device sleeps and the
+  time is known, the panel shows Ed's "Orb clock" design: a small dotted orb
+  turning in the middle with a meridian sweeping it, hour and minute rings of
+  dots lit up to the time (the current one large and pulsing), the time with
+  AM/PM and the next alarm, and Wi-Fi and battery across the top. It takes the
+  orb colour; on white it is the mockup exactly. Painted into the canvas from
+  `main/clock_face.c`, which `host/clock.sh` checks; still 5 fps. Against
+  burn-in the whole clock drifts a few pixels, continuously and too slowly to
+  see, where the old one jumped a step a minute.
+  `CONFIG_UI_CLOCK_PREVIEW` (bench only) shows it in four set states for
+  captures.
+- **The battery dots at the panel's edge are off by default, and the Wi-Fi
+  glyph only warns.** The orb clock's status row shows both readings whenever
+  the device sleeps or the clock is swiped up. The glyph at 9 o'clock now shows
+  only while the signal is weak, conversation or not. `CONFIG_BATTERY_SHOW_DOTS`
+  brings the dots back; the readings, the TLM line and the voice tools are
+  unchanged.
+- **Swipe up from the bottom edge for the clock on demand**, awake, with the
+  session carrying on underneath. Any touch puts the face back and does nothing
+  else, so it cannot also end a conversation.
+- **Sleep keeps full brightness**, so the clock can be read across a room. Only
+  the battery-critical sleep still dims to 15 %.
+- **The orb colour survives a reboot.** The last one chosen, by voice or on the
+  touch panel, is saved by name once it has held for 2 s, and the device boots
+  in it. `CONFIG_UI_DEFAULT_ORB_COLOR` is now only the out-of-box colour.
+- **The orb's colour is the whole screen's.** The status word, the sleep clock,
+  the hints, the ring round the button and every touch panel page take it, not
+  only the orb: the white buttons become the colour and the greys take its hue.
+  White is unchanged. The spectrum face, the QR code and the amber interrupt
+  ring keep their own colours. `set_color`'s description now says so.
 
 ## [0.8.0] - 2026-10-23
 

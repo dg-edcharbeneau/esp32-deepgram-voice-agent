@@ -188,29 +188,67 @@ follows, because that is how you learn which alarm it was.
 
 ## The sleep clock
 
-Large `8:52 PM` (or `20:52`) in the centre while the panel sleeps, over the dim breathing orb,
-with the next alarm underneath ("alarm 7:30 AM", or "alarm Wed 7:30 AM" if it is
-not today). These are labels over the canvas, not canvas ink, so there is no
-wipe-and-invalidate bookkeeping. They are hidden under the QR code and the display
-test.
+While the panel sleeps and the time is known, it shows the **orb clock**, after
+Ed's "Orb clock" mockup:
 
-- **Fed integers, never a string.** `ui.c` repaints on a change of value, and a
-  string rewritten in place has none.
-- **Re-texted only when the minute changes.** At 5 fps asleep, a `set_text` per
-  frame would re-lay-out 72 px glyphs for nothing.
-- **Burn-in.** The colon does not blink, and the pair steps a few pixels each
-  minute round a 5 × 5 grid that takes 25 minutes to repeat.
-- **One owner for the centre label's HIDDEN flag.** `update_clock()` hides it if
-  the arc caption *or* the clock wants it gone. Two owners would un-hide it under
-  each other.
-- **The font** is digits and a colon only, about 15 kB of glyph bitmap against
-  roughly 100 kB for a full 72 px face. Regenerate with:
+- **A small dotted sphere** in the middle: 180 dots, 96 px across the radius,
+  turning slowly on a fixed tilt. A **meridian** sweeps across its near side and
+  lights the dots it passes.
+- **Two rings of dots round it**: 12 for the hours at 146 px, 60 for the minutes
+  at 186 px. Every dot up to the current one is lit and twinkles; the current one
+  is large, with a pulsing halo. 2:38 lights hours 12 to 2 and minutes 0 to 38.
+- **The time** in the middle, `2:38` with a small spaced `PM` under it (24-hour:
+  `14:38` and no AM/PM), and the next alarm under that ("alarm 7:30 AM", or
+  "alarm Wed 7:30 AM" if it is not today).
+- **Wi-Fi and battery across the top**: the Wi-Fi glyph lit one element per bar,
+  a battery whose fill is the charge (red at 20 % or under), the percentage, and
+  a bolt while charging. This row is where battery and Wi-Fi are read at rest:
+  the older battery dots at 3 o'clock are off by default, and the Wi-Fi glyph at
+  9 o'clock only appears, on the face, while the signal is weak.
+
+**On demand**, too: swipe up from the bottom edge and it comes up straight away,
+awake, with the session carrying on underneath. Any touch puts the face back,
+and does nothing else. Before the first time sync the swipe does nothing.
+
+It takes the orb colour like the rest of the screen: on white it is the mockup
+exactly. It is hidden under the QR code and the display test. A touch wakes the
+panel on the press, and the clock is gone on that frame. Before the first time
+sync there is nothing for the rings to show, so the panel keeps the plain orb.
+
+- **Painted, not labels.** `main/clock_face.c` works out the dots from the
+  mockup's own formulas -- pure C, checked on a laptop by `host/clock.sh` --
+  and `main/ui_clock.c` paints them into the canvas, every frame from black,
+  with the text drawn through an LVGL layer on top. The mockup keeps the sphere
+  off the digits with a black text-shadow; LVGL text has none, so the dots under
+  the text fade out instead.
+- **Full brightness, 5 fps** -- awake on demand too. A frame costs 25-60 ms,
+  which at the awake 33 ms period would hold the LVGL task busy on the core the
+  echo canceller shares. It is there to be read across a room, and at the old
+  15 % brightness it was not. The frame rate and the radio's power save are what sleep
+  still saves. The one sleep that dims is the battery-critical one.
+- **Burn-in.** The whole clock drifts round a 3 px Lissajous, 17 minutes across
+  and 23 down, so no pixel holds the same ink for hours. Continuous, not stepped:
+  the old clock's 3 px jump a minute (12 back every fifth) made a screen-wide
+  ring of dots read as the whole face jumping off centre. At under 0.02 px a
+  second the drift cannot be seen; the dots take the fraction, the text whole
+  pixels.
+- **What a frame costs** is in the log once a minute, as `EVT clock draw`.
+- **The fonts** are digits and a colon at 52 px, and `A`, `M`, `P` at 15 px --
+  generated, because full faces would spend flash on letters a clock never draws:
 
   ```bash
-  npx lv_font_conv@1.5.2 --no-compress --no-prefilter --bpp 4 --size 72 \
+  npx lv_font_conv@1.5.2 --no-compress --no-prefilter --bpp 4 --size 52 \
       --font managed_components/lvgl__lvgl/scripts/built_in_font/Montserrat-Medium.ttf \
-      -r 0x30-0x3A --format lvgl -o main/font_clock_72.c
+      -r 0x30-0x3A --format lvgl -o main/font_clock_52.c
+  npx lv_font_conv@1.5.2 --no-compress --no-prefilter --bpp 4 --size 15 \
+      --font managed_components/lvgl__lvgl/scripts/built_in_font/Montserrat-Medium.ttf \
+      -r 0x41,0x4D,0x50 --format lvgl -o main/font_clock_15.c
   ```
+
+  The mockup's Inter SemiBold is a later swap, made by regenerating these.
+- **Seeing it without waiting.** `CONFIG_UI_CLOCK_PREVIEW` (bench only) shows it
+  in four set states 10 s after boot and prints captures over serial for
+  `host/shot2png.py`.
 
 ## The tools
 
@@ -262,9 +300,8 @@ leading zero. `get_time` hands the model that one form only, which is the form i
 then speaks. Alarm *input* stays 24-hour `HH:MM`: the model converts, and a
 parser guessing at "7:30" would be guessing on the thing that must not be wrong.
 
-On the sleep face, 12-hour shows `8:52` centred, with a small grey `PM` under it,
-right-aligned to the digits. It sat beside them at first, centred as a pair, and
-on the panel that put the digits visibly off the middle.
+On the sleep face, 12-hour shows `8:52` centred, with a small spaced `PM` centred
+under it.
 
 ## Kconfig
 

@@ -1,0 +1,42 @@
+#pragma once
+
+/*
+ * The orb clock: what the panel shows while the device sleeps and the time is
+ * known. A small dotted sphere with a meridian sweeping it, hour and minute
+ * rings that light up to the time, the time itself, and a Wi-Fi / battery row
+ * along the top -- Ed's "Orb clock" mockup. clock_face.c has the geometry; this
+ * paints it into the face's canvas.
+ *
+ * ui.c decides when it shows and hands it the whole frame, as it does the touch
+ * panel: the face and its overlays stand down until it is gone.
+ *
+ * LVGL task only, like everything in ui.c.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "lvgl.h"
+
+typedef struct {
+    uint32_t now_ms;
+    int hh, mm;            /* local, 24-hour */
+    bool h12;              /* show "2:38" + "PM" rather than "14:38" */
+    const char *next;      /* the next-alarm line, "" for none */
+    uint32_t tint_rgb;     /* the orb colour */
+    bool bat_valid, bat_low, bat_charging;
+    int bat_percent;
+    bool sig_valid;
+    int sig_bars;          /* 0..4 */
+} ui_clock_state_t;
+
+/* Once, from build_ui(), with the face's canvas. False if its PSRAM is short;
+ * the clock then simply never shows and sleep keeps the plain orb. */
+bool ui_clock_init(lv_obj_t *canvas);
+
+/* Paint one frame. The first call after ui_clock_leave() starts the motion
+ * from t = 0, as the mockup does when it appears. */
+void ui_clock_frame(const ui_clock_state_t *st);
+
+/* Black the canvas and forget the clock, for the face that takes over. */
+void ui_clock_leave(void);

@@ -37,7 +37,8 @@ level is frequency modulation, and reads as vibration rather than as a voice.
 
 The dots are white by default and can be recoloured by asking — see "Changing
 the orb's colour by asking" in [voice-commands.md](voice-commands.md).
-`CONFIG_UI_DEFAULT_ORB_COLOR` picks what it boots as.
+The colour chosen last, by voice or on the touch panel, survives a reboot;
+`CONFIG_UI_DEFAULT_ORB_COLOR` picks what it boots as until one has been chosen.
 
 The geometry is verified numerically rather than by eye. `host/run.sh` runs the
 upstream TypeScript under node's native type stripping and diffs the C
@@ -138,6 +139,12 @@ curve, on the same radius 200 as before.
 
 ### The battery dots
 
+**Off by default.** The orb clock's status row shows the charge whenever the
+device sleeps or the clock is swiped up -- see
+[the clock page](clock.md#the-sleep-clock) -- and these dots predate it.
+`CONFIG_BATTERY_SHOW_DOTS` brings them back; the rest of this section is how they
+work when it does.
+
 Four dots following the display's outer curve **down the right side**,
 straddling 3 o'clock, each worth a quarter of the charge and filling clockwise
 so the row reads downward the way a clock face does. Spent dots go dim rather than disappearing: a row that keeps
@@ -197,6 +204,11 @@ the frame budget. `CONFIG_BATTERY_SHOW_DOTS` turns them off, separately from
 
 ### The signal icon
 
+**A weak-signal warning only.** The orb clock's status row is where the signal
+is read at rest, so this icon shows while the signal is **weak** and not
+otherwise -- mid-conversation included, the one time it is worth interrupting
+the face for.
+
 The familiar wifi glyph -- a dot with three arcs fanning out above it -- at
 **9 o'clock**, on the same radius 200 the charge dots use, so the two indicators
 balance across the panel. **Four elements for four bars**, and they
@@ -246,9 +258,7 @@ several dB between beacons, so a display that bucketed the raw value would blink
 an arc in and out for as long as the device sat at that distance. Promotion needs
 3 dB of margin; demotion is immediate. `draw_signal()` only clamps and draws.
 
-On screen while the session is **stopped**, the display is **asleep**, or the
-signal is **weak** -- `weak` being that same hysteresed flag, which is what keeps
-the icon up mid-conversation, the one time it is worth interrupting the face for.
+On screen only while the signal is **weak** -- that same hysteresed flag.
 Nothing is drawn while there is no association: during provisioning the panel is
 showing a QR code, and a signal icon beside it would be describing a link that
 does not exist yet. `CONFIG_WIFI_SIGNAL_SHOW_BARS` turns the icon off and leaves
@@ -256,11 +266,14 @@ the TLM line and the voice tool intact.
 
 ### The sleep clock
 
-While the panel sleeps -- dim, 5 fps, 30 s after a session stops -- a large
-`HH:MM` sits in the middle over the slow orb, with the next alarm in small type
-under it. These are labels, not canvas ink, and a touch removes them on the same
-frame it wakes the panel. The digits step a few pixels each minute, because a
-static picture held for hours marks an AMOLED. The details are in
+While the panel sleeps -- 5 fps, full brightness, 30 s after a session stops --
+and the time is known, it shows the orb clock: a small dotted sphere with a
+meridian sweeping it, hour and minute rings of dots lit up to the time, the time
+and the next alarm in the middle, and Wi-Fi and battery across the top. It is
+painted into the canvas in the orb colour, and a touch removes it on the same
+frame it wakes the panel. **Swipe up from the bottom edge** to bring it up on
+demand; a touch puts the face back. The whole clock drifts a few pixels, too
+slowly to see, because a static picture held for hours marks an AMOLED. The details are in
 [the clock page](clock.md#the-sleep-clock).
 
 ### The touch panel
@@ -298,6 +311,16 @@ a readout only -- a tap on it does nothing. Volume's meter reads out of 100, lik
 its number; mic gain's spans 6-30 dB. Colours are rounded, not truncated, to
 RGB565: truncating takes more off red and blue than green and turned those
 neutral greys green on the panel.
+
+**In the orb's colour.** Those are the colours on a white orb; on any other, the
+panel and the rest of the screen wear it, by three rules in
+[main/ui_tone.h](../main/ui_tone.h). White things become the colour, and the dark
+ink on them stays dark. Dark surfaces and grey text take its hue at their own
+brightness, since a straight multiply halves it on purple or blue and the dark
+buttons vanish into the black. White text on a dark surface becomes the colour,
+lifted towards white on the darker colours (purple most) so it keeps 3.6:1 or
+better on the meter, the darkest thing text sits on. Each rule returns its input
+unchanged on white, which `host/panel.sh` checks.
 
 **Painted, not built from widgets.** LVGL has no shape for a segment of a
 circle, and its widgets allocate mask buffers from internal RAM while they draw.

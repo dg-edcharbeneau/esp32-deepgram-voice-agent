@@ -10,10 +10,15 @@
 #include <stdio.h>
 
 #include "esp_log.h"
+#include "nvs.h"
 
 #include "orb_colors.h"
 
 static const char *TAG = "orb_colors";
+
+/* The namespace voices.c and audio_io.c use for the same kind of thing. */
+#define NVS_NAMESPACE "dgagent"
+#define NVS_KEY_COLOR "orb_color"
 
 /*
  * The Vira palette's accent colours. Names are the palette's, lowercased to match
@@ -84,6 +89,46 @@ int orb_colors_find(const char *name)
         }
     }
     return -1;
+}
+
+int orb_colors_saved(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return -1;   /* never written: every device until the first change */
+    }
+    char name[16];
+    size_t len = sizeof(name);
+    const esp_err_t err = nvs_get_str(h, NVS_KEY_COLOR, name, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return -1;
+    }
+    const int idx = orb_colors_find(name);
+    ESP_LOGI(TAG, "orb colour: %s (%s)", name, idx >= 0 ? "saved" : "no longer in the catalog");
+    return idx;
+}
+
+void orb_colors_save(size_t index)
+{
+    if (index >= COLOR_COUNT) {
+        return;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_COLOR, s_colors[index].name);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        /* The colour stays on screen either way; only the next boot loses it. */
+        ESP_LOGW(TAG, "could not persist orb colour: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "EVT color saved %s", s_colors[index].name);
+    }
 }
 
 void orb_colors_add_enum(cJSON *parent, const char *key)
