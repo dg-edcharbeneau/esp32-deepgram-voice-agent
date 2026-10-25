@@ -312,3 +312,107 @@ void alarm_days_phrase(uint8_t mask, char *out, size_t cap)
         }
     }
 }
+
+/* ---------------- snooze ---------------- */
+
+bool alarm_snooze_entry(const alarm_entry_t *rang, int64_t now, int minutes, alarm_entry_t *out)
+{
+    if (rang == NULL || out == NULL || rang->kind == ALARM_TIMER || minutes < 1 ||
+        minutes > ALARM_SNOOZE_MAX_MIN) {
+        return false;
+    }
+    const int64_t when = now + (int64_t)minutes * 60;
+    const time_t t = (time_t)when;
+    struct tm lt;
+    localtime_r(&t, &lt);
+
+    memset(out, 0, sizeof(*out));
+    out->kind = ALARM_ONCE;
+    out->hh = (uint8_t)lt.tm_hour;
+    out->mm = (uint8_t)lt.tm_min;
+    out->dow_mask = 0;   /* "the next hh:mm": a snooze is never a day away */
+    /* To the second, not rounded to hh:mm's minute: "+1 min" means a minute. */
+    out->fire_epoch = when;
+    memcpy(out->label, rang->label, sizeof(out->label));
+    out->label[ALARM_LABEL_MAX - 1] = '\0';
+    return true;
+}
+
+/* ---------------- the ring cycle ---------------- */
+
+static unsigned enter(alarm_ring_t *r, alarm_ring_phase_t phase, uint32_t now_ms)
+{
+    r->phase = phase;
+    r->phase_ms = now_ms;
+    switch (phase) {
+    case ALARM_RING_CHIME:
+        return ALARM_RING_CHIME_ON | ALARM_RING_HOLD_ON;
+    case ALARM_RING_SPEAK:
+        r->heard_ms = 0;
+        r->announced = true;
+        return ALARM_RING_HOLD_OFF | ALARM_RING_ANNOUNCE;
+    case ALARM_RING_DRAIN:
+        return ALARM_RING_CHIME_OFF;
+    case ALARM_RING_SILENT:
+        return ALARM_RING_CHIME_OFF | ALARM_RING_HOLD_OFF;
+    case ALARM_RING_IDLE:
+    default:
+        return ALARM_RING_CHIME_OFF | ALARM_RING_HOLD_OFF | ALARM_RING_ENDED;
+    }
+}
+
+unsigned alarm_ring_begin(alarm_ring_t *r, uint32_t now_ms, bool session_live)
+{
+    memset(r, 0, sizeof(*r));
+    r->start_ms = now_ms;
+    return enter(r, session_live ? ALARM_RING_SPEAK : ALARM_RING_CHIME, now_ms);
+}
+
+unsigned alarm_ring_step(alarm_ring_t *r, const alarm_ring_cfg_t *cfg, uint32_t now_ms,
+                         bool playback, bool stop, bool snooze)
+{
+    if (r->phase == ALARM_RING_IDLE) {
+        return 0;
+    }
+    if (snooze) {
+        return enter(r, ALARM_RING_IDLE, now_ms);
+    }
+    if (stop) {
+        if (r->announced) {
+            /* Said already: an announcement under way finishes on its own. */
+            return enter(r, ALARM_RING_IDLE, now_ms);
+        }
+        r->stopping = true;
+        if (r->phase == ALARM_RING_CHIME || r->phase == ALARM_RING_SILENT) {
+            return enter(r, ALARM_RING_DRAIN, now_ms);
+        }
+        /* DRAIN goes on to its one SPEAK below. */
+    }
+
+    const uint32_t in_phase = now_ms - r->phase_ms;
+    if (!r->stopping && cfg->cap_ms > 0 && r->phase != ALARM_RING_SILENT &&
+        now_ms - r->start_ms >= cfg->cap_ms) {
+        return enter(r, ALARM_RING_SILENT, now_ms);
+    }
+
+    switch (r->phase) {
+    case ALARM_RING_CHIME:
+        return in_phase >= cfg->chime_ms ? enter(r, ALARM_RING_DRAIN, now_ms) : 0;
+    case ALARM_RING_DRAIN:
+        return (!playback || in_phase >= cfg->drain_max_ms) ? enter(r, ALARM_RING_SPEAK, now_ms)
+                                                            : 0;
+    case ALARM_RING_SPEAK: {
+        if (playback) {
+            r->heard_ms = now_ms;
+        }
+        const bool said = r->heard_ms != 0 && !playback && now_ms - r->heard_ms >= cfg->quiet_ms;
+        if (said || in_phase >= cfg->speak_max_ms) {
+            return r->stopping ? enter(r, ALARM_RING_IDLE, now_ms)
+                               : enter(r, ALARM_RING_CHIME, now_ms);
+        }
+        return 0;
+    }
+    default:
+        return 0;
+    }
+}

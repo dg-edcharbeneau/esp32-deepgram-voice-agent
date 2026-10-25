@@ -113,25 +113,34 @@ each once by IANA name and once as the POSIX rule the device applies.
 
 ## When it rings
 
+It **rings until it is stopped or snoozed**: a chime, the agent saying what it
+is, a chime again, and so on. The panel shows the ring screen throughout.
+
 ```mermaid
 sequenceDiagram
     participant A as alarms_tick
     participant P as playback_task
     participant S as session_ctl
     participant D as dg_agent
-    A->>D: dg_agent_announce("Your pasta timer is done.")
-    A->>P: audio_io_chime_start()
+    A->>P: audio_io_chime_start(), uplink held
     Note over P: tone synthesised whenever the ring is empty
-    A->>P: chime_stop() after ALARM_CHIME_S, or a tap
-    A->>S: request_start_soon() once the speaker is silent
-    S->>D: dg_agent_start()
-    D-->>D: no history: announcement IS the greeting
-    D-->>D: history: InjectAgentMessage from keepalive_task
+    A->>P: chime_stop() after ALARM_CHIME_S
+    A->>A: speaker drains
+    A->>D: dg_agent_announce("Your tea timer is done.")
+    A->>S: request_start_soon() (a no-op on a live session)
+    D-->>D: spoken as the greeting, or injected
+    A->>P: speech came and went: chime again, uplink held
+    Note over A: ... until Stop or snooze; silent after ALARM_RING_MAX_S
 ```
 
+The cycle is a pure state machine, `alarm_ring_step()` in
+[main/alarm_sched.c](../main/alarm_sched.c), walked through its timeline by
+`host/alarms.sh`; `alarms.c` only carries out what it returns.
+
 **The chime first, because it needs nothing.** No network, no session. It is
-what actually gets someone's attention. The caption shows the label, the panel is
-held awake, and `CONFIG_ALARM_CHIME_S` (8 s) later the voice follows.
+what actually gets someone's attention. `CONFIG_ALARM_CHIME_S` (8 s) later the
+voice follows. With a session already up it is the other way round -- the agent
+says it first, as it always did -- and the chimes come after.
 
 **The tone is generated inside the playback task, never queued.**
 `audio_io_play()` has exactly one writer, the WebSocket task. The carry byte and
@@ -141,14 +150,22 @@ permanent white-noise failure the carry exists to prevent. So `playback_task`
 fills its own buffer with the tone whenever the ring is empty, and agent audio
 always wins.
 
-**The chime stops, and the speaker drains, before the session opens.** The
-microphone opens with the session. A pure tone is the worst thing the echo
-canceller could warm up on: it would count towards `AEC_WARMUP_BLOCKS` and be
-declared converged without ever hearing speech. Its residue can also clear the
-uplink VAD and read as the user barging in.
+**The microphone uplink is held while it chimes** (`audio_io_uplink_hold()`).
+From the second round on the chime plays into a live session, and a pure tone
+is the worst thing the echo canceller could hear: it can count towards
+`AEC_WARMUP_BLOCKS` without ever hearing speech, and its residue can clear the
+uplink VAD and read to the agent as the user barging in. Held, the blocks are
+withheld -- as the VAD gate already withholds quiet ones -- while the canceller
+and the display carry on. The speaker also drains before each announcement.
 
-**With a session already up there is no chime.** The announcement goes out on
-that session.
+**An announcement is over** once the agent's voice has come and gone for a
+second, or after 30 s if it never comes (no network, an inject refused). Then it
+chimes again. The idle timeout is held off while something rings: the user is
+silent through every chime by design.
+
+**`CONFIG_ALARM_RING_MAX_S`** (10 minutes): after that the sound stops, but the
+ring screen stays, its overtime counting, until someone acts on it. A device
+ringing in an empty room should not go on all day.
 
 **How the agent says it.** It depends on the session:
 
@@ -164,7 +181,8 @@ that session.
   times, by timer. It is never retried on `AgentAudioDone`, which this stack
   almost never sends.
 
-The model is told why the session exists, through a prompt note.
+The model is told why the session exists, through a prompt note. Each round's
+announcement is rebuilt, so an alarm still ringing at 7:34 says 7:34.
 
 **An announcement expires after two minutes unsaid.** A device that took five
 minutes to reach Deepgram should not then announce a timer as though it had just
@@ -176,15 +194,42 @@ fires right after the idle timeout stopped the session lands in exactly that
 window. A gesture dropped there costs a second tap; an alarm has nobody to tap
 again.
 
-**Battery critical wins.** The panel stays dim, but the chime, the caption and
-the announcement all still happen.
+**Battery critical wins.** The panel stays dim, but the ring, the screen and the
+announcements all still happen.
+
+### The ring screen
+
+After Ed's "Timer alarm" design: a small dotted orb near the top -- the orb
+clock's sphere, smaller -- with rings pulsing out of it while it sounds, the
+label, and a spaced line with the overtime counting up: `TIME'S UP · +5:11` for
+a timer, the set time for an alarm (`7:30 AM · +5:11`). In the bottom half:
+
+- **A timer**: one big **Stop**, the whole bottom half.
+- **An alarm**: a white **Stop** quarter on the right, and a dark **+1 min**
+  snooze quarter on the left.
+
+It takes the orb colour like every screen, and draws at 10 fps
+([main/ui_ring.c](../main/ui_ring.c)).
 
 ### Stopping it
 
-While it chimes, **a press anywhere on the panel** stops it, not just the 70 px
-button. So does the BOOT button. Either way the press is swallowed: it cannot also
-toggle the session or offer to forget the conversation. The announcement still
-follows, because that is how you learn which alarm it was.
+**Stop**, on the screen or the BOOT button. The sound stops at once. If the agent
+has not yet said what it was, it still does, once -- that is how you learn which
+alarm it was -- and the screen goes straight away; otherwise the ring simply
+ends. A press anywhere else on the ring screen does nothing, and every press is
+the ring screen's: none can also toggle the session or offer to forget the
+conversation.
+
+### Snooze
+
+Alarms only. **Each tap on +1 min adds a minute**: the button turns solid and
+shows the total, then fades to its dark shade over 1.5 s; a tap meanwhile adds
+another and starts the fade again. When it reaches the dark end the snooze
+commits for the minutes shown: the ring ends with no announcement, "snoozed 3
+min" shows briefly, and a one-shot copy of the alarm -- same label, its own ring
+screen with snooze again -- is added for that many minutes on
+(`alarm_snooze_entry()`). It persists like any alarm. With the table full (8)
+the snooze is refused, "cannot snooze" shows, and it keeps ringing.
 
 ## The sleep clock
 
@@ -209,10 +254,15 @@ agent's states and caption stay readable.)
   9 o'clock only appears, on the face, while the signal is weak.
 
 **On demand**, too: swipe up from the bottom edge and it comes up straight away,
-awake, with the session carrying on underneath. Any touch puts the face back,
-and does nothing else; so does a session starting (a BOOT press, an alarm's
-announcement), since the face is then the point. Before the first time sync the
-swipe does nothing.
+awake, with the session carrying on underneath. A tap puts the face back, and
+does nothing else; so does a session starting (a BOOT press, an alarm's
+announcement), since the face is then the point. A **sideways swipe** goes to the
+stopwatch (below). Before the first time sync the swipe up does nothing.
+
+What a press on the clock is gets decided on its release, not its press: a tap
+puts the face back, a sideways swipe brings the stopwatch. So a press on a
+*sleeping* clock wakes the panel and holds the clock up, on demand, for the swipe
+it may turn into; a tap then gives the face back as it always did.
 
 It takes the orb colour like the rest of the screen: on white it is the mockup
 exactly. It is hidden under the QR code and the display test. A touch wakes the
@@ -258,6 +308,37 @@ sync there is nothing for the rings to show, so the panel keeps the plain orb.
   in four set states 10 s after boot and prints captures over serial for
   `host/shot2png.py`.
 
+## The stopwatch
+
+After Ed's "Orb stopwatch" design, built on the orb clock: the same status row,
+sphere, drift and text fade, with the hour ring gone and the minute ring counting
+**seconds** -- lit up to the current second, the current one large with its halo.
+The time sits in the middle, `12:34` with a smaller `.56`, and `h:mm:ss` past an
+hour (centiseconds over an hour are noise). Under it, `READY`, `RUNNING` or
+`PAUSED`, or the latest lap: `LAP 1 · 11:53.36`, its number and the total time
+when it was taken. Only the latest lap is kept.
+
+**Getting there:** swipe sideways on the orb clock, asleep or swiped up, and
+sideways again to go back. Or by voice ("start a stopwatch"), which brings the
+screen up over the conversation as the on-demand clock does.
+
+**Two round buttons**, acting on the press: the white one on the right plays and
+pauses; the dark one on the left takes a **lap** (a flag) while it runs, and
+**resets** (time and laps) while it is paused. The sphere spins while it runs and
+stops, dimmed, when paused.
+
+**It runs on** when the screen goes -- a swipe back, a session starting, an
+alarm ringing. RAM only: a reboot clears it. The screen holds the panel awake
+while it counts; paused or ready it sleeps as anything else, and sleep gives the
+clock back. 10 fps while it counts, 5 while it stands still.
+
+**By voice**, on the `alarms` tool rather than a fifth tool: `stopwatch` is
+`start`, `pause` (or `stop`), `lap`, `reset` or `read`, and the reply is a line
+for the agent to say ("Stopwatch running at 2 minutes 13 seconds. Lap 1 was at 1
+minute 53 seconds."). "Reset" said aloud pauses a running one first.
+`main/stopwatch.c` is the arithmetic, checked by `host/alarms.sh`; `controls.c`
+keeps the one instance, behind a lock, since voice and touch both drive it.
+
 ## The tools
 
 The schemas are constant JSON in flash, one raw cJSON node each, and none of the
@@ -269,7 +350,7 @@ replies through a PSRAM buffer.
 | `get_time` | none | local time in the user's format, weekday, date, zone |
 | `set_clock` | `zone?`, `hours?` | IANA name, refused if `tz_table.c` does not hold it; `hours` 12 or 24. Either or both, checked before either applies |
 | `set_alarm` | `seconds`, or `time` (24 h `HH:MM`) + `days?`; `label?` | `seconds` makes it a timer (1 s to 24 h). `days`: daily, weekdays, weekends, or `mon,wed`; a half-understood list is refused whole |
-| `alarms` | `cancel?` | lists ids, times and time left; with `cancel`, cancels an id, a label, or `all` |
+| `alarms` | `cancel?`, `stopwatch?` | lists ids, times and time left; with `cancel`, cancels an id, a label, or `all`; with `stopwatch`, starts, pauses, laps, resets or reads it |
 
 **Four, not six, because of the `Settings` message, and measured.** The first
 version had a tool per verb and a sentence per parameter. That was 1,723 bytes,

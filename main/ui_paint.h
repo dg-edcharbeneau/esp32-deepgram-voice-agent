@@ -50,6 +50,48 @@ static inline uint16_t ui_paint_blend(uint16_t dst, uint32_t rgb, uint32_t a)
  * below the box's top. */
 void ui_paint_ink_rows(const lv_font_t *f, uint32_t ch, int32_t *top, int32_t *bottom);
 
+/* ---------------- anti-aliased shapes, blended ---------------- */
+
+/* Where a painter draws: the canvas pixels and their bounds. */
+typedef struct {
+    uint16_t *px;
+    uint32_t stride;   /* in pixels */
+    int w, h;
+} ui_paint_target_t;
+
+/* Opacity 0..1 as the blend's 0..255. */
+static inline uint32_t ui_paint_a8(float a)
+{
+    return a <= 0.0f ? 0 : (a >= 1.0f ? 255 : (uint32_t)(a * 255.0f + 0.5f));
+}
+
+/* One pixel, source-over at a/255, clipped to the target. */
+static inline void ui_paint_plot(const ui_paint_target_t *t, int x, int y, uint32_t rgb, uint32_t a)
+{
+    if (a == 0 || x < 0 || y < 0 || x >= t->w || y >= t->h) {
+        return;
+    }
+    uint16_t *p = t->px + (size_t)y * t->stride + x;
+    *p = ui_paint_blend(*p, rgb, a);
+}
+
+/*
+ * A filled disc, or with r_in > 0 an annulus, at `alpha`. Squared distance
+ * first: inside the edge band a pixel is wholly covered, outside it wholly not,
+ * and only the one-pixel band takes a sqrtf -- a library call on this FPU. The
+ * bands are exactly where panel_coverage() returns 1 or 0.
+ */
+void ui_paint_disc(const ui_paint_target_t *t, float cx, float cy, float r_in, float r_out,
+                   uint32_t rgb, float alpha);
+
+/*
+ * A thin circle of radius r and stroke w, drawn only on rows above `y_end`.
+ * Walks the two short spans each row crosses rather than the circle's whole
+ * box, so a circle the size of the panel costs a few thousand pixels.
+ */
+void ui_paint_circle(const ui_paint_target_t *t, float cx, float cy, float r, float w,
+                     uint32_t rgb, float alpha, int y_end);
+
 /* Width of `s` set in `f` with `space` px between letters. */
 int32_t ui_paint_text_width(const lv_font_t *f, int32_t space, const char *s);
 

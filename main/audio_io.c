@@ -153,6 +153,16 @@ static volatile bool s_play_gap;
  */
 static volatile bool s_chime_on;
 
+/*
+ * The uplink withheld outright, whatever the VAD says: set while an alarm
+ * chimes into a live session. A pure tone is what the echo canceller handles
+ * worst, and its residue can clear the uplink VAD and read to the agent as the
+ * user barging in. Withheld, not zeroed -- the VAD gate above already withholds
+ * blocks, so a gap is something the stream is built for. The canceller and the
+ * display tap still see everything.
+ */
+static volatile bool s_uplink_hold;
+
 #if CONFIG_AEC_ENABLE
 /*
  * The canceller, and the two buffers it needs beside the ones already here.
@@ -1342,9 +1352,9 @@ static void capture_task(void *arg)
 #if CONFIG_AEC_UPLINK_VAD
         /* The tap above already ran, so the orb keeps drawing the room whether
          * or not the network is being spared. Only the uplink is withheld. */
-        if (s_sink != NULL && uplink_ok) {
+        if (s_sink != NULL && uplink_ok && !s_uplink_hold) {
 #else
-        if (s_sink != NULL) {
+        if (s_sink != NULL && !s_uplink_hold) {
 #endif
             s_sink((const uint8_t *)mono, mono_bytes);
             s_captured += mono_bytes;
@@ -2003,6 +2013,14 @@ void audio_io_chime_stop(void)
 bool audio_io_chime_active(void)
 {
     return s_chime_on;
+}
+
+void audio_io_uplink_hold(bool hold)
+{
+    if (hold != s_uplink_hold) {
+        s_uplink_hold = hold;
+        ESP_LOGI(TAG, "EVT uplink hold %s", hold ? "on" : "off");
+    }
 }
 
 void audio_io_mute_playback(bool muted)

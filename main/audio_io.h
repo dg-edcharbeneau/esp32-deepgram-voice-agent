@@ -150,6 +150,11 @@ void audio_io_chime_start(void);
 void audio_io_chime_stop(void);
 bool audio_io_chime_active(void);
 
+/* Withhold the microphone uplink while `hold` -- an alarm chiming into a live
+ * session, so the tone cannot reach the agent as speech. The capture path, the
+ * echo canceller and the display tap carry on. Safe from any task. */
+void audio_io_uplink_hold(bool hold);
+
 /*
  * Tell the playback path that the incoming byte stream has broken.
  *

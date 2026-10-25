@@ -46,13 +46,18 @@ void alarms_init(void);
 /* Main loop, once per pass. */
 void alarms_tick(void);
 
-/* The chime phase is under way: the panel stays awake and a touch anywhere
- * dismisses rather than doing what it would normally do. */
+/* Something is ringing -- from the first chime until it is stopped or snoozed:
+ * the panel stays awake and shows the ring screen. */
 bool alarms_ringing(void);
 
-/* Stop the chime. The announcement still follows -- it is how the user learns
- * which alarm it was. Safe from any task. */
+/* Stop it. If the agent has not yet said what it was, it still does, once --
+ * that is how the user learns which alarm it was. Safe from any task. */
 void alarms_dismiss(void);
+
+/* Snooze the ringing alarm for `minutes` (clamped to ALARM_SNOOZE_MAX_MIN): it
+ * goes quiet, and a one-shot copy rings that many minutes on. Timers do not
+ * snooze; a full table refuses and it keeps ringing. Safe from any task. */
+void alarms_snooze(int minutes);
 
 /* Pending entries, for the TLM line. */
 int alarms_count(void);
@@ -91,3 +96,6 @@ void alarms_fn_set_timer(const cJSON *args, char *out, size_t n);
 void alarms_fn_set_alarm(const cJSON *args, char *out, size_t n);
 void alarms_fn_list(char *out, size_t n);
 void alarms_fn_cancel(const cJSON *args, char *out, size_t n);
+/* The stopwatch rides on the alarms tool: `stopwatch` is start, pause, lap,
+ * reset or read. A start or a lap brings its screen up. */
+void alarms_fn_stopwatch(const cJSON *args, char *out, size_t n);

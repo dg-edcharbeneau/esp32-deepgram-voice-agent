@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 #include "lvgl.h"
+#include "stopwatch.h"
 
 typedef struct {
     uint32_t now_ms;
@@ -37,6 +38,17 @@ bool ui_clock_init(lv_obj_t *canvas);
 /* Paint one frame. The first call after ui_clock_leave() starts the motion
  * from t = 0, as the mockup does when it appears. */
 void ui_clock_frame(const ui_clock_state_t *st);
+
+/*
+ * The stopwatch screen: the clock's parts with the seconds ring, the sphere
+ * spinning only while `sw` runs, and two round buttons. `pressed` is the button
+ * showing its pressed shade (0 left, 1 right), or -1.
+ */
+void ui_clock_stopwatch_frame(const ui_clock_state_t *st, const sw_t *sw, int pressed);
+
+/* Which stopwatch button a press at (x, y) is on: 0 the left (reset or lap),
+ * 1 the right (play or pause), -1 neither. */
+int ui_clock_stopwatch_hit(int32_t x, int32_t y);
 
 /* Forget the clock, and with `blank` black the canvas for the face that takes
  * over. Without it when the touch panel took over: it has already painted the

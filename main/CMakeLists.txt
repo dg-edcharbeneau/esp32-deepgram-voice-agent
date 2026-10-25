@@ -33,6 +33,8 @@ idf_component_register(
         clock_face.c
         ui_clock.c
         ui_paint.c
+        ui_ring.c
+        stopwatch.c
         audio_rec.c
         controls.c
         panel_geom.c

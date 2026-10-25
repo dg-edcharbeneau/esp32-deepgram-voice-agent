@@ -59,6 +59,13 @@ typedef struct {
 void clock_face_build(clock_frame_t *f, float t, int hh, int mm, float ox, float oy);
 
 /*
+ * The sphere alone -- CLOCK_FACE_SPHERE dots into `out` -- centred at (cx, cy)
+ * with `radius`: the clock's at CLOCK_FACE_SPHERE_R, the ring screen's smaller.
+ * The dots keep their mockup sizes whatever the radius.
+ */
+void clock_face_sphere(clock_dot_t *out, float t, float cx, float cy, float radius);
+
+/*
  * The mockup's black text-shadow, as a fade on the dots instead: 0 inside the
  * box (x0,y0)-(x1,y1), 1 from `soft` pixels outside it, smooth between. LVGL
  * text has no shadow, and the shadow's only job is to keep the sphere's dots

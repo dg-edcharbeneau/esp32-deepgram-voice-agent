@@ -276,6 +276,24 @@ demand; a touch puts the face back. The whole clock drifts a few pixels, too
 slowly to see, because a static picture held for hours marks an AMOLED. The details are in
 [the clock page](clock.md#the-sleep-clock).
 
+### The stopwatch
+
+A sideways swipe on the orb clock, or "start a stopwatch", brings it up: the
+clock's status row and sphere, the minute ring counting seconds, the time in the
+middle with its centiseconds, the latest lap under it, and two round buttons --
+play/pause, and lap/reset. It owns the frame as the clock does, at 10 fps while
+it counts. See [the clock page](clock.md#the-stopwatch).
+
+### The ring screen
+
+While a timer or alarm rings, the panel shows the ring screen instead of the
+face: a small dotted orb near the top with rings pulsing out of it, the label,
+the overtime counting up, and the way to end it in the bottom half -- one big
+**Stop** for a timer; a **Stop** quarter beside a **+1 min** snooze quarter for an
+alarm. It owns the frame as the touch panel and the clock do, ahead of both, at
+10 fps, and takes the orb colour. The details, and how snooze counts up and
+fades before it commits, are on [the clock page](clock.md#the-ring-screen).
+
 ### The touch panel
 
 **Swipe down from the top edge** and a panel of settings covers the face. Swipe

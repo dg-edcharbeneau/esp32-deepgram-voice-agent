@@ -8,6 +8,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 
 #include "audio_io.h"
 #include "clock.h"
@@ -137,6 +138,69 @@ bool controls_alarm_cancel(uint8_t id)
     const bool ok = alarms_cancel_id(id);
     ESP_LOGI(TAG, "EVT ctl cancel id=%u %s", id, ok ? "done" : "gone");
     return ok;
+}
+
+/* ---------------- the stopwatch ---------------- */
+
+static sw_t s_sw;
+static portMUX_TYPE s_sw_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static uint32_t ms_now(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+void controls_stopwatch_get(sw_t *out)
+{
+    portENTER_CRITICAL(&s_sw_lock);
+    *out = s_sw;
+    portEXIT_CRITICAL(&s_sw_lock);
+}
+
+void controls_stopwatch_toggle(void)
+{
+    const uint32_t now = ms_now();
+    portENTER_CRITICAL(&s_sw_lock);
+    sw_toggle(&s_sw, now);
+    const sw_state_t st = s_sw.state;
+    portEXIT_CRITICAL(&s_sw_lock);
+    ESP_LOGI(TAG, "EVT ctl stopwatch %s", st == SW_RUNNING ? "run" : "pause");
+}
+
+bool controls_stopwatch_lap(void)
+{
+    const uint32_t now = ms_now();
+    portENTER_CRITICAL(&s_sw_lock);
+    const bool ok = sw_lap(&s_sw, now);
+    const unsigned n = s_sw.laps;
+    portEXIT_CRITICAL(&s_sw_lock);
+    if (ok) {
+        ESP_LOGI(TAG, "EVT ctl stopwatch lap %u", n);
+    }
+    return ok;
+}
+
+bool controls_stopwatch_reset(void)
+{
+    portENTER_CRITICAL(&s_sw_lock);
+    const bool ok = sw_reset(&s_sw);
+    portEXIT_CRITICAL(&s_sw_lock);
+    if (ok) {
+        ESP_LOGI(TAG, "EVT ctl stopwatch reset");
+    }
+    return ok;
+}
+
+void controls_alarm_stop(void)
+{
+    ESP_LOGI(TAG, "EVT ctl alarm stop");
+    alarms_dismiss();
+}
+
+void controls_alarm_snooze(int minutes)
+{
+    ESP_LOGI(TAG, "EVT ctl alarm snooze %d", minutes);
+    alarms_snooze(minutes);
 }
 
 void controls_commit(uint32_t now_ms, uint32_t quiet_ms)

@@ -19,6 +19,7 @@
 
 #include "audio_io.h"
 #include "clock.h"
+#include "controls.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "ui.h"
@@ -65,21 +66,30 @@ static bool s_dirty;                  /* under s_lock */
 static bool s_reconciled;             /* loop only */
 static uint32_t s_tz_gen;             /* loop only */
 
-typedef enum {
-    RING_IDLE,
-    RING_CHIME,   /* the tone is sounding */
-    RING_DRAIN,   /* tone stopped, waiting for the speaker to go quiet */
-} ring_phase_t;
+/* An announcement nobody speaks -- no network, an inject refused four times --
+ * gives up after this and the cycle chimes again. */
+#define SPEAK_MAX_MS 30000
+/* The agent's voice gone this long means it has finished saying it. */
+#define SPEAK_QUIET_MS 1000
 
-static volatile ring_phase_t s_phase;
-static uint32_t s_phase_ms;           /* loop only */
-static volatile bool s_dismissed;
+/*
+ * THE RING, decided by alarm_ring_step() in alarm_sched.c (host-tested) and
+ * acted on here: it rings until stopped or snoozed -- chime, the agent saying
+ * what it is, chime again -- and falls silent after CONFIG_ALARM_RING_MAX_S
+ * with the screen still up. Loop only, apart from the request flags.
+ */
+static alarm_ring_t s_ring;
+static alarm_entry_t s_rang;          /* what is ringing; its table slot may be gone */
+static volatile bool s_ringing;       /* any task */
+static volatile bool s_stop_req;      /* Stop, from the screen or BOOT */
+static volatile int s_snooze_req;     /* minutes, 0 none */
+static uint32_t s_ring_seq;           /* bumped per ring, so the screen resets */
 /*
  * TWO caption buffers, alternated. ui.c keeps the pointer and decides "has the
- * text changed" by comparing pointers, so a second alarm written into the same
- * buffer as the first would never repaint.
+ * text changed" by comparing pointers, so a second message written into the
+ * same buffer as the first would never repaint.
  */
-static char s_caption[2][ALARM_LABEL_MAX];
+static char s_caption[2][32];
 static int s_caption_idx;
 
 static inline uint32_t now_ms(void)
@@ -237,9 +247,11 @@ static void persist(void)
 
 /* ---------------- ringing ---------------- */
 
-static void ring(const alarm_entry_t *e)
+/* What the agent says, in plain words: spoken verbatim, or as the greeting, and
+ * either way TTS input rather than a prompt. Rebuilt for each announcement, so
+ * an alarm still ringing at 7:34 says 7:34. */
+static void announce(const alarm_entry_t *e)
 {
-    const bool timer = (e->kind == ALARM_TIMER);
     /*
      * The time it IS, not the time it was set for: an alarm can ring late --
      * inside the miss window after a reboot, or at 3:00 for a 2:30 lost to the
@@ -254,40 +266,151 @@ static void ring(const alarm_entry_t *e)
     }
     const int h12 = (hh % 12) ? (hh % 12) : 12;
 
-    /* What the agent will say. Plain words: it is spoken verbatim, or as the
-     * greeting, and either way it is TTS input rather than a prompt. */
+    /* "Tea timer" is already a timer: "Your Tea timer is done.", not "Your Tea
+     * timer timer is done." -- heard on the bench. Likewise an alarm. */
+    const size_t n = strlen(e->label);
+    const bool says_timer = n >= 5 && strcasecmp(e->label + n - 5, "timer") == 0;
+    const bool says_alarm = n >= 5 && strcasecmp(e->label + n - 5, "alarm") == 0;
+
     char say[ALARM_LABEL_MAX + 48];
-    if (timer) {
-        snprintf(say, sizeof(say), e->label[0] ? "Your %s timer is done." : "Your timer is done.",
+    if (e->kind == ALARM_TIMER) {
+        snprintf(say, sizeof(say),
+                 !e->label[0] ? "Your timer is done."
+                 : says_timer ? "Your %s is done."
+                              : "Your %s timer is done.",
                  e->label);
     } else if (e->label[0]) {
-        snprintf(say, sizeof(say), "It's %d:%02d. This is your %s alarm.", h12, mm, e->label);
+        snprintf(say, sizeof(say),
+                 says_alarm ? "It's %d:%02d. This is your %s." : "It's %d:%02d. This is your %s alarm.",
+                 h12, mm, e->label);
     } else {
         snprintf(say, sizeof(say), "It's %d:%02d. This is your alarm.", h12, mm);
     }
     dg_agent_announce(say);
+    /* A flag, not a start: a no-op on a session that is up, and the start that
+     * lands once a stopping one has finished. */
+    session_ctl_request_start_soon();
+}
 
+static void caption(const char *text)
+{
     s_caption_idx ^= 1;
     char *cap = s_caption[s_caption_idx];
-    strlcpy(cap, e->label[0] ? e->label : (timer ? "timer" : "alarm"), sizeof(s_caption[0]));
-    ui_flash_status(cap, (uint32_t)CONFIG_ALARM_CHIME_S * 1000 + 2000);
+    strlcpy(cap, text, sizeof(s_caption[0]));
+    ui_flash_status(cap, 3000);
+}
 
+/* Hand the screen what it shows: plain values and a copied label. */
+static void publish(void)
+{
+    ui_ring_t r = {
+        /* Not once stopped: what is left is the one announcement, and the
+         * screen and every gesture go back to normal for it. */
+        .ringing = s_ringing && !s_ring.stopping,
+        .timer = s_rang.kind == ALARM_TIMER,
+        .snoozable = s_rang.kind != ALARM_TIMER,
+        .sounding = s_ring.phase != ALARM_RING_SILENT,
+        .hh = s_rang.hh,
+        .mm = s_rang.mm,
+        .since_ms = s_ring.start_ms,
+        .seq = s_ring_seq,
+    };
+    strlcpy(r.label, s_rang.label, sizeof(r.label));
+    ui_set_ring(&r);
+}
+
+/* Carry out what the cycle decided. */
+static void perform(unsigned acts)
+{
+    if (acts & ALARM_RING_CHIME_OFF) {
+        audio_io_chime_stop();
+    }
+    if (acts & ALARM_RING_HOLD_OFF) {
+        audio_io_uplink_hold(false);
+    }
+    if (acts & ALARM_RING_HOLD_ON) {
+        audio_io_uplink_hold(true);
+    }
+    if (acts & ALARM_RING_CHIME_ON) {
+        audio_io_chime_start();
+    }
+    if (acts & ALARM_RING_ANNOUNCE) {
+        announce(&s_rang);
+    }
+    if (acts & ALARM_RING_ENDED) {
+        s_ringing = false;
+    }
+    if (acts != 0) {
+        ESP_LOGI(TAG, "EVT alarm ring phase=%d%s", (int)s_ring.phase,
+                 (acts & ALARM_RING_ENDED) ? " ended" : "");
+        publish();
+    }
+}
+
+static void ring(const alarm_entry_t *e)
+{
     ESP_LOGI(TAG, "EVT alarm ring id=%u kind=%u label=\"%s\"", e->id, e->kind, e->label);
-
+    /* A second one due while the first still rings takes the screen over: the
+     * first counts as stopped, and its sound gives way. */
+    if (s_ringing) {
+        audio_io_chime_stop();
+    }
+    s_rang = *e;
+    s_stop_req = false;
+    s_snooze_req = 0;
+    s_ring_seq++;
+    s_ringing = true;
     /*
-     * A session that is up, or on its way up or down, gets no chime: the
-     * microphone is open or about to be, and the tone must never reach it. The
-     * announcement goes out on that session -- or, if it was stopping, on the
-     * one start_soon opens once the worker is free.
+     * A session that is up, or on its way up or down, hears it first: the
+     * microphone is open or about to be, and the chimes after it go out with
+     * the uplink held. Stopped, it chimes first, as it always has -- the chime
+     * needs no network.
      */
-    if (session_ctl_is_running() || session_ctl_is_busy()) {
-        session_ctl_request_start_soon();
+    perform(alarm_ring_begin(&s_ring, now_ms(),
+                             session_ctl_is_running() || session_ctl_is_busy()));
+}
+
+/* The ring's step, once per pass of the loop. */
+static void ring_tick(void)
+{
+    if (!s_ringing) {
         return;
     }
-    s_dismissed = false;
-    s_phase_ms = now_ms();
-    s_phase = RING_CHIME;
-    audio_io_chime_start();
+    static const alarm_ring_cfg_t cfg = {
+        .chime_ms = (uint32_t)CONFIG_ALARM_CHIME_S * 1000,
+        .drain_max_ms = DRAIN_MAX_MS,
+        .speak_max_ms = SPEAK_MAX_MS,
+        .quiet_ms = SPEAK_QUIET_MS,
+        .cap_ms = (uint32_t)CONFIG_ALARM_RING_MAX_S * 1000,
+    };
+
+    const bool stop = s_stop_req;
+    s_stop_req = false;
+    int snooze = s_snooze_req;
+    s_snooze_req = 0;
+    if (snooze > 0) {
+        /* The entry first: a snooze that cannot be kept must not silence it. */
+        int64_t now = 0;
+        alarm_entry_t e;
+        bool added = false;
+        if (clock_now(&now, NULL) && alarm_snooze_entry(&s_rang, now, snooze, &e)) {
+            lock();
+            added = add_locked(&e) >= 0;
+            unlock();
+        }
+        if (added) {
+            char msg[32];
+            snprintf(msg, sizeof(msg), "snoozed %d min", snooze);
+            caption(msg);
+            ESP_LOGI(TAG, "EVT alarm snooze %d", snooze);
+        } else {
+            caption("cannot snooze");
+            ESP_LOGW(TAG, "EVT alarm snooze %d failed (table full or no clock)", snooze);
+            snooze = 0;
+        }
+    }
+    perform(alarm_ring_step(&s_ring, &cfg, now_ms(), audio_io_playback_active(), stop,
+                            snooze > 0));
 }
 
 /* ---------------- public ---------------- */
@@ -347,6 +470,19 @@ void alarms_init(void)
         s_b->next_id = 1;
     }
 
+#if CONFIG_UI_RING_SELFTEST
+    {
+        /* Bench aid: a timer to ring; the alarm follows once the clock is
+         * known. See CONFIG_UI_RING_SELFTEST. */
+        alarm_entry_t tea = {.kind = ALARM_TIMER};
+        strlcpy(tea.label, "Tea timer", sizeof(tea.label));
+        const int tslot = add_locked(&tea);
+        if (tslot >= 0) {
+            s_mono_ms[tslot] = esp_timer_get_time() / 1000 + 25000;
+        }
+    }
+#endif
+
 #if CONFIG_CLOCK_TEST_TIMER_S > 0
     /* Bench aid: a timer at boot, so the whole firing path can be exercised
      * with nobody speaking to the device. */
@@ -380,6 +516,18 @@ void alarms_tick(void)
             s_reconciled = true;
             s_tz_gen = gen;
         }
+#if CONFIG_UI_RING_SELFTEST
+        static bool selftest_alarm;
+        if (!selftest_alarm) {
+            selftest_alarm = true;
+            alarm_entry_t wake = {.kind = ALARM_ONCE}, e;
+            strlcpy(wake.label, "Wake up", sizeof(wake.label));
+            /* The snooze builder makes exactly this: a one-shot n minutes on. */
+            if (alarm_snooze_entry(&wake, now + 30, 1, &e)) {
+                add_locked(&e);
+            }
+        }
+#endif
         /* Timers that started life on the monotonic clock get a real instant as
          * soon as there is one, so a reboot from here on does not lose them. */
         const int64_t mono = esp_timer_get_time() / 1000;
@@ -412,35 +560,32 @@ void alarms_tick(void)
         ring(&fired);
     }
 
-    if (s_phase == RING_CHIME &&
-        (s_dismissed || now_ms() - s_phase_ms >= (uint32_t)CONFIG_ALARM_CHIME_S * 1000)) {
-        audio_io_chime_stop();
-        ESP_LOGI(TAG, "EVT alarm chime %s", s_dismissed ? "dismissed" : "done");
-        s_phase_ms = now_ms();
-        s_phase = RING_DRAIN;
-    }
-    if (s_phase == RING_DRAIN &&
-        (!audio_io_playback_active() || now_ms() - s_phase_ms >= DRAIN_MAX_MS)) {
-        /* Silent, so the microphone may open. The announcement rides on it. */
-        s_phase = RING_IDLE;
-        session_ctl_request_start_soon();
-    }
-
+    ring_tick();
     persist();
 }
 
 bool alarms_ringing(void)
 {
-    return s_phase != RING_IDLE;
+    /* Stopped and only finishing its one announcement is not ringing: the
+     * screen and every gesture are back to normal for that. */
+    return s_ringing && !s_ring.stopping;
 }
 
 void alarms_dismiss(void)
 {
-    /* Stopped here, not on the next tick: a tap should silence it at once. The
-     * tick sees the flag and moves on to opening the session. */
-    if (s_phase == RING_CHIME) {
+    /* Silenced here, not on the next tick: a press should stop the sound at
+     * once. The tick does the rest -- the one announcement, if none was made. */
+    if (s_ringing) {
         audio_io_chime_stop();
-        s_dismissed = true;
+        s_stop_req = true;
+    }
+}
+
+void alarms_snooze(int minutes)
+{
+    if (s_ringing && s_rang.kind != ALARM_TIMER && minutes > 0) {
+        audio_io_chime_stop();
+        s_snooze_req = minutes > ALARM_SNOOZE_MAX_MIN ? ALARM_SNOOZE_MAX_MIN : minutes;
     }
 }
 
@@ -696,6 +841,61 @@ void alarms_fn_list(char *out, size_t n)
     }
 }
 
+void alarms_fn_stopwatch(const cJSON *args, char *out, size_t n)
+{
+    const cJSON *a = cJSON_GetObjectItemCaseSensitive(args, "stopwatch");
+    const char *verb = cJSON_IsString(a) ? a->valuestring : "read";
+    sw_t sw;
+    controls_stopwatch_get(&sw);
+    const bool running = sw.state == SW_RUNNING;
+    bool show = false;
+
+    if (strcasecmp(verb, "start") == 0) {
+        if (!running) {
+            controls_stopwatch_toggle();
+        }
+        show = true;
+    } else if (strcasecmp(verb, "pause") == 0 || strcasecmp(verb, "stop") == 0) {
+        if (running) {
+            controls_stopwatch_toggle();
+        }
+    } else if (strcasecmp(verb, "lap") == 0) {
+        if (!controls_stopwatch_lap()) {
+            snprintf(out, n, "The stopwatch is not running, so there is no lap to take.");
+            return;
+        }
+        show = true;
+    } else if (strcasecmp(verb, "reset") == 0) {
+        /* Said aloud, "reset" means it: a running one is paused first. */
+        if (running) {
+            controls_stopwatch_toggle();
+        }
+        controls_stopwatch_reset();
+    } else if (strcasecmp(verb, "read") != 0) {
+        snprintf(out, n, "Unknown stopwatch action \"%s\": use start, pause, lap, reset or read.",
+                 verb);
+        return;
+    }
+    if (show) {
+        ui_show_stopwatch();
+    }
+
+    controls_stopwatch_get(&sw);
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    char total[40], lap[40];
+    fmt_duration(sw_elapsed(&sw, now) / 1000, total, sizeof(total));
+    const char *state = sw.state == SW_RUNNING ? "running" : sw.state == SW_PAUSED ? "paused" : "";
+    if (sw.state == SW_READY) {
+        snprintf(out, n, "The stopwatch is at zero.");
+    } else if (sw.laps > 0) {
+        fmt_duration(sw.lap_ms / 1000, lap, sizeof(lap));
+        snprintf(out, n, "Stopwatch %s at %s. Lap %u was at %s.", state, total,
+                 (unsigned)sw.laps, lap);
+    } else {
+        snprintf(out, n, "Stopwatch %s at %s.", state, total);
+    }
+}
+
 void alarms_fn_cancel(const cJSON *args, char *out, size_t n)
 {
     if (unavailable(out, n)) {
@@ -830,6 +1030,7 @@ void alarms_init(void) {}
 void alarms_tick(void) {}
 bool alarms_ringing(void) { return false; }
 void alarms_dismiss(void) {}
+void alarms_snooze(int minutes) { (void)minutes; }
 int alarms_count(void) { return 0; }
 bool alarms_next(int64_t *epoch)
 {
@@ -840,5 +1041,6 @@ void alarms_fn_set_timer(const cJSON *args, char *out, size_t n) { (void)args; s
 void alarms_fn_set_alarm(const cJSON *args, char *out, size_t n) { (void)args; snprintf(out, n, "No clock."); }
 void alarms_fn_list(char *out, size_t n) { snprintf(out, n, "No clock."); }
 void alarms_fn_cancel(const cJSON *args, char *out, size_t n) { (void)args; snprintf(out, n, "No clock."); }
+void alarms_fn_stopwatch(const cJSON *args, char *out, size_t n) { (void)args; snprintf(out, n, "No clock."); }
 
 #endif

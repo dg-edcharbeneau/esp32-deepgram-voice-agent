@@ -577,17 +577,16 @@ static void on_gesture(ui_gesture_t gesture)
     s_forget_armed_ms = 0;
 
     /*
-     * A RINGING ALARM OWNS EVERY GESTURE. While it chimes, a tap would read as
+     * A RINGING ALARM OWNS EVERY GESTURE. While it rings, a tap would read as
      * an interrupt (the chime makes audio_io_playback_active() true) and a hold
      * as an offer to forget the conversation -- neither of which is what someone
-     * slapping a ringing device means. ui.c also turns a press anywhere on the
-     * panel into UI_DISMISS while it rings, because a sleepy hand does not aim
-     * for a 70 px button. Ahead of the switch, so nothing below can also act.
+     * reaching for a ringing device means. ui.c sends the ring screen's presses
+     * to its Stop and snooze buttons and none to the centre button, so nothing
+     * should arrive here; anything that does, in the instant before the screen
+     * knows, is dropped. Ahead of the switch, so nothing below can act.
      */
-    if (gesture == UI_DISMISS || (alarms_ringing() && (gesture == UI_TAP || gesture == UI_HOLD))) {
-        ESP_LOGI(TAG, "EVT alarm dismiss (%s)", gesture == UI_DISMISS ? "anywhere"
-                                                : gesture == UI_TAP ? "tap" : "hold");
-        alarms_dismiss();
+    if (alarms_ringing() && (gesture == UI_TAP || gesture == UI_HOLD)) {
+        ESP_LOGI(TAG, "EVT alarm ringing: %s ignored", gesture == UI_TAP ? "tap" : "hold");
         return;
     }
 
@@ -694,9 +693,6 @@ static void on_gesture(ui_gesture_t gesture)
         }
         break;
 
-    case UI_DISMISS:
-        /* Handled above; listed so the switch stays exhaustive. */
-        break;
 
     case UI_TEST_DONE:
         /*
@@ -1073,7 +1069,6 @@ void app_main(void)
             }
             ui_set_clock(clk_ok, clk_ok ? lt.tm_hour : 0, clk_ok ? lt.tm_min : 0,
                          next_day, next_hh, next_mm, clock_12h());
-            ui_set_ringing(alarms_ringing());
         }
 
         /*
@@ -1141,6 +1136,11 @@ void app_main(void)
         } else if (alarms_ringing()) {
             /* Awake while it chimes, and the sleep clock restarts from now so
              * the panel does not drop straight back down once it stops. */
+            stopped_since_ms = now_ms();
+            ui_set_sleep(false, false);
+        } else if (ui_stopwatch_holds_awake()) {
+            /* The stopwatch screen, counting: someone is timing something and
+             * wants to see it. Stopped or paused, it sleeps as anything else. */
             stopped_since_ms = now_ms();
             ui_set_sleep(false, false);
         } else if (session_ctl_is_running()) {
@@ -1333,8 +1333,10 @@ void app_main(void)
             ui_set_status("check api key", false);
         }
 
+        /* Not while something rings: the user is silent through every chime by
+         * design, and the cycle needs the session for its next announcement. */
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
-            ready_now && s_activity_ms != 0) {
+            ready_now && s_activity_ms != 0 && !alarms_ringing()) {
             /* Unsigned, so correct across the 49.7-day wrap. */
             uint32_t quiet_ms = now_ms() - s_activity_ms;
             if (quiet_ms > (uint32_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000) {

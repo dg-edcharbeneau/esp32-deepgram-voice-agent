@@ -18,6 +18,8 @@
 
 #include "lvgl.h"
 
+#include "panel_geom.h"
+
 void ui_panel_init(lv_obj_t *canvas);
 
 bool ui_panel_is_open(void);
@@ -46,3 +48,34 @@ void ui_panel_close(const char *why);
  * only paces the self-test (CONFIG_UI_PANEL_SELFTEST).
  */
 bool ui_panel_frame(uint32_t now_ms, uint32_t tint_rgb, bool session_live);
+
+/*
+ * THE KIT: what the ring screen (ui_ring.c) borrows to paint the same canvas in
+ * the same visual language -- the panel's shapes from its precomputed masks,
+ * its stroked icons, and its palette in the orb's colour. LVGL task only.
+ */
+typedef enum {
+    UI_ICON_MIC, UI_ICON_SPEAKER_HI, UI_ICON_SPEAKER_LO, UI_ICON_PLUS, UI_ICON_MINUS,
+    UI_ICON_X, UI_ICON_LEFT, UI_ICON_RIGHT, UI_ICON_CHECK, UI_ICON_WAVE, UI_ICON_CLOCK,
+    UI_ICON_BELL_OFF, UI_ICON_ALARM,
+    /* The stopwatch's, smaller: about 18 px, for its 50 px round buttons. */
+    UI_ICON_RESET, UI_ICON_FLAG, UI_ICON_PLAY, UI_ICON_PAUSE,
+} ui_icon_t;
+
+typedef struct {
+    uint32_t primary, primary_ink;   /* a white button and the ink on it */
+    uint32_t secondary;              /* a dark button; its ink is `text` */
+    uint32_t text, hint;             /* white and grey text on black */
+} ui_panel_palette_t;
+
+void ui_panel_kit_palette(uint32_t tint, ui_panel_palette_t *out);
+
+/* The masks are built in the background at boot; until then a fill draws
+ * nothing. */
+bool ui_panel_kit_ready(void);
+
+/* Fill one of panel_geom's shapes into the canvas pixels. */
+void ui_panel_kit_fill(uint16_t *px, uint32_t stride_px, panel_seg_t seg, uint32_t rgb);
+
+/* A stroked icon, about 28 px across, centred on (x, y). */
+void ui_panel_kit_icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_t y);

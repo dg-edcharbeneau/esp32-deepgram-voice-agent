@@ -272,14 +272,16 @@ session to recover, so a hold there already did nothing a tap could not do.
 
 ### When an alarm is ringing
 
-While an alarm chimes, **any** press on the panel dismisses it, not just one on
-the button. So does a BOOT click, the one exception to "the button always
-toggles". The press is swallowed either way: it cannot also start or stop a
-session, interrupt, or offer to forget. A chime makes
-`audio_io_playback_active()` true, so without this branch a tap would read as
-an interrupt and a hold as an offer to forget. ui.c sends `UI_DISMISS` on the
-press and clears the button gate, and `on_gesture()` checks for a ringing alarm
-before anything else. See [the clock](clock.md#when-it-rings).
+While a timer or alarm rings, the panel is the **ring screen**, and every press
+is its own: its **Stop** button ends it, an alarm's **+1 min** snoozes it, and a
+press anywhere else does nothing -- the centre button means nothing under it. A
+BOOT click stops it too, the one exception to "the button always toggles", and
+that press is swallowed. Either way it cannot also start or stop a session,
+interrupt, or offer to forget. A chime makes `audio_io_playback_active()` true,
+so without this a tap would read as an interrupt and a hold as an offer to
+forget; ui.c routes the press to the ring screen and clears the button gate, and
+`on_gesture()` drops any tap or hold that arrives while it rings. See
+[the clock](clock.md#when-it-rings).
 
 ### The touch panel stays out of the button's way
 
@@ -293,9 +295,11 @@ nothing, so a tap on a setting can never also interrupt or end the conversation.
 
 The orb clock ([clock.md](clock.md#the-sleep-clock)) comes up on demand the same
 way from the other edge: a drag that **starts within 40 px of the bottom edge**
-and travels 80 px up. The session is not touched. Any press puts the face back,
-and that press is swallowed whole, so dismissing the clock can never also tap the
-button and end a conversation that carried on underneath it.
+and travels 80 px up. The session is not touched. A tap puts the face back, a
+sideways swipe goes to the stopwatch, and either way the press is swallowed
+whole, so neither can also tap the button and end a conversation that carried on
+underneath it. The stopwatch screen takes every press the same way: its two
+buttons, or a sideways swipe back to the clock.
 
 ## Stopping when nobody is talking
 

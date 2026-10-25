@@ -67,11 +67,11 @@ static void ring(clock_frame_t *f, int count, float radius, float base, int curr
  * are small and a little transparent, so where two overlap the order barely
  * shows, and copying it is the way to match the reference rather than argue
  * with it. */
-static void sphere(clock_frame_t *f, float t, float ox, float oy)
+void clock_face_sphere(clock_dot_t *out, float t, float cx, float cy, float radius)
 {
     const float a = t * YAW_RATE;
     const float ca = cosf(a), sa = sinf(a), cb = cosf(TILT), sb = sinf(TILT);
-    const float rr = CLOCK_FACE_SPHERE_R * (1.0f + BREATH * sinf(t * BREATH_RATE));
+    const float rr = radius * (1.0f + BREATH * sinf(t * BREATH_RATE));
     const float sweep = sinf(t * SWEEP_RATE);
     const float golden = (float)M_PI * (3.0f - sqrtf(5.0f));
 
@@ -90,9 +90,9 @@ static void sphere(clock_frame_t *f, float t, float ox, float oy)
             op = 1.0f;
             size += SWEEP_GROW;
         }
-        f->dot[f->n++] = (clock_dot_t){
-            .x = CLOCK_FACE_C + ox + x1 * rr,
-            .y = CLOCK_FACE_C + oy + y2 * rr,
+        out[i] = (clock_dot_t){
+            .x = cx + x1 * rr,
+            .y = cy + y2 * rr,
             .r = size * 0.5f,
             .a = op,
             .kind = CLOCK_DOT_SPHERE,
@@ -105,7 +105,8 @@ void clock_face_build(clock_frame_t *f, float t, int hh, int mm, float ox, float
     f->n = 0;
     ring(f, CLOCK_FACE_MINUTES, CLOCK_FACE_MIN_R, MIN_BASE, mm, t, ox, oy, &f->halo[0]);
     ring(f, CLOCK_FACE_HOURS, CLOCK_FACE_HOUR_R, HOUR_BASE, hh % 12, t, ox, oy, &f->halo[1]);
-    sphere(f, t, ox, oy);
+    clock_face_sphere(&f->dot[f->n], t, CLOCK_FACE_C + ox, CLOCK_FACE_C + oy, CLOCK_FACE_SPHERE_R);
+    f->n += CLOCK_FACE_SPHERE;
 }
 
 float clock_face_text_fade(float x, float y, float x0, float y0, float x1, float y1, float soft)

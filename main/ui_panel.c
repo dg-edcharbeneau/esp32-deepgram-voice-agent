@@ -372,16 +372,11 @@ static void arc(lv_layer_t *L, uint32_t rgb, int32_t cx, int32_t cy, uint16_t r,
     lv_draw_arc(L, &d);
 }
 
-typedef enum {
-    ICON_MIC, ICON_SPEAKER_HI, ICON_SPEAKER_LO, ICON_PLUS, ICON_MINUS, ICON_X,
-    ICON_LEFT, ICON_RIGHT, ICON_CHECK, ICON_WAVE, ICON_CLOCK,
-} icon_t;
-
 /* Outline icons about 28 px across, in the reference sheet's stroked style. */
-static void icon(lv_layer_t *L, icon_t which, uint32_t rgb, int32_t x, int32_t y)
+static void icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_t y)
 {
     switch (which) {
-    case ICON_MIC: {
+    case UI_ICON_MIC: {
         lv_draw_rect_dsc_t r;
         lv_draw_rect_dsc_init(&r);
         r.bg_opa = LV_OPA_TRANSP;
@@ -395,8 +390,8 @@ static void icon(lv_layer_t *L, icon_t which, uint32_t rgb, int32_t x, int32_t y
         line(L, rgb, x, y + 9, x, y + 14);
         break;
     }
-    case ICON_SPEAKER_HI:
-    case ICON_SPEAKER_LO:
+    case UI_ICON_SPEAKER_HI:
+    case UI_ICON_SPEAKER_LO:
         line(L, rgb, x - 12, y - 5, x - 6, y - 5);
         line(L, rgb, x - 6, y - 5, x + 1, y - 11);
         line(L, rgb, x + 1, y - 11, x + 1, y + 11);
@@ -404,34 +399,34 @@ static void icon(lv_layer_t *L, icon_t which, uint32_t rgb, int32_t x, int32_t y
         line(L, rgb, x - 6, y + 5, x - 12, y + 5);
         line(L, rgb, x - 12, y + 5, x - 12, y - 5);
         arc(L, rgb, x + 2, y, 7, 315, 45);
-        if (which == ICON_SPEAKER_HI) {
+        if (which == UI_ICON_SPEAKER_HI) {
             arc(L, rgb, x + 2, y, 13, 315, 45);
         }
         break;
-    case ICON_PLUS:
+    case UI_ICON_PLUS:
         line(L, rgb, x - 8, y, x + 8, y);
         line(L, rgb, x, y - 8, x, y + 8);
         break;
-    case ICON_MINUS:
+    case UI_ICON_MINUS:
         line(L, rgb, x - 8, y, x + 8, y);
         break;
-    case ICON_X:
+    case UI_ICON_X:
         line(L, rgb, x - 8, y - 8, x + 8, y + 8);
         line(L, rgb, x - 8, y + 8, x + 8, y - 8);
         break;
-    case ICON_LEFT:
+    case UI_ICON_LEFT:
         line(L, rgb, x + 4, y - 8, x - 4, y);
         line(L, rgb, x - 4, y, x + 4, y + 8);
         break;
-    case ICON_RIGHT:
+    case UI_ICON_RIGHT:
         line(L, rgb, x - 4, y - 8, x + 4, y);
         line(L, rgb, x + 4, y, x - 4, y + 8);
         break;
-    case ICON_CHECK:
+    case UI_ICON_CHECK:
         line(L, rgb, x - 8, y, x - 2, y + 6);
         line(L, rgb, x - 2, y + 6, x + 9, y - 6);
         break;
-    case ICON_WAVE: {
+    case UI_ICON_WAVE: {
         static const int8_t h[5] = {4, 9, 13, 7, 3};
         for (int i = 0; i < 5; i++) {
             const int32_t lx = x - 12 + i * 6;
@@ -439,12 +434,91 @@ static void icon(lv_layer_t *L, icon_t which, uint32_t rgb, int32_t x, int32_t y
         }
         break;
     }
-    case ICON_CLOCK:
+    case UI_ICON_CLOCK:
         arc(L, rgb, x, y, 12, 0, 360);
         line(L, rgb, x, y, x, y - 7);
         line(L, rgb, x, y, x + 5, y + 3);
         break;
+    case UI_ICON_BELL_OFF:
+        /* A bell -- dome, flared sides, rim, clapper -- struck through. */
+        arc(L, rgb, x, y - 3, 8, 180, 360);
+        line(L, rgb, x - 8, y - 3, x - 10, y + 6);
+        line(L, rgb, x + 8, y - 3, x + 10, y + 6);
+        line(L, rgb, x - 12, y + 6, x + 12, y + 6);
+        arc(L, rgb, x, y + 9, 3, 0, 180);
+        line(L, rgb, x - 12, y - 12, x + 12, y + 12);
+        break;
+    case UI_ICON_ALARM:
+        /* An alarm clock: a face with hands, two bells, two feet. */
+        arc(L, rgb, x, y + 2, 10, 0, 360);
+        line(L, rgb, x, y + 2, x, y - 4);
+        line(L, rgb, x, y + 2, x + 4, y + 5);
+        line(L, rgb, x - 13, y - 8, x - 8, y - 13);
+        line(L, rgb, x + 13, y - 8, x + 8, y - 13);
+        line(L, rgb, x - 7, y + 11, x - 9, y + 14);
+        line(L, rgb, x + 7, y + 11, x + 9, y + 14);
+        break;
+    case UI_ICON_RESET:
+        /* An arrow coming round anticlockwise to its start: most of a circle,
+         * open at the top left, the head at its end. */
+        arc(L, rgb, x, y, 8, 270, 180);
+        line(L, rgb, x - 8, y, x - 11, y - 4);
+        line(L, rgb, x - 8, y, x - 4, y - 3);
+        break;
+    case UI_ICON_FLAG:
+        line(L, rgb, x - 6, y - 9, x - 6, y + 9);
+        line(L, rgb, x - 6, y - 8, x + 7, y - 4);
+        line(L, rgb, x + 7, y - 4, x - 6, y);
+        break;
+    case UI_ICON_PLAY: {
+        /* Filled, as the design draws it. */
+        lv_draw_triangle_dsc_t t;
+        lv_draw_triangle_dsc_init(&t);
+        t.color = lv_color_hex(rgb);
+        t.opa = LV_OPA_COVER;
+        t.p[0].x = x - 5;
+        t.p[0].y = y - 8;
+        t.p[1].x = x - 5;
+        t.p[1].y = y + 8;
+        t.p[2].x = x + 8;
+        t.p[2].y = y;
+        lv_draw_triangle(L, &t);
+        break;
     }
+    case UI_ICON_PAUSE:
+        line(L, rgb, x - 4, y - 7, x - 4, y + 7);
+        line(L, rgb, x + 4, y - 7, x + 4, y + 7);
+        break;
+    }
+}
+
+/* ---------------- the kit, for the ring screen ---------------- */
+
+void ui_panel_kit_palette(uint32_t tint, ui_panel_palette_t *out)
+{
+    set_palette(tint);
+    out->primary = s_col.primary;
+    out->primary_ink = s_col.primary_ink;
+    out->secondary = s_col.secondary;
+    out->text = s_col.text;
+    out->hint = s_col.hint;
+}
+
+bool ui_panel_kit_ready(void)
+{
+    return s_masks_ready;
+}
+
+void ui_panel_kit_fill(uint16_t *px, uint32_t stride_px, panel_seg_t seg, uint32_t rgb)
+{
+    s_px = px;
+    s_stride = stride_px;
+    fill_seg(seg, rgb);
+}
+
+void ui_panel_kit_icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_t y)
+{
+    icon(L, which, rgb, x, y);
 }
 
 /* ---------------- what each control shows ---------------- */
@@ -514,7 +588,7 @@ static bool enabled(panel_hit_t id)
  * limit the button that cannot go further turns dark, as on the reference sheet.
  */
 static void paint_pair(lv_layer_t *L, bool right, panel_hit_t up_id, panel_hit_t down_id,
-                       float level, icon_t ico, const char *value, const char *label)
+                       float level, ui_icon_t ico, const char *value, const char *label)
 {
     const style_t su = style(up_id, enabled(up_id), false);
     const style_t sd = style(down_id, enabled(down_id), false);
@@ -550,9 +624,9 @@ static void paint_sound(lv_layer_t *L)
      * range the codec allows, so empty is the lowest gain and full the highest. */
     paint_pair(L, false, PANEL_HIT_MIC_UP, PANEL_HIT_MIC_DOWN,
                (float)(g - AUDIO_MIC_GAIN_MIN_DB) / (float)(AUDIO_MIC_GAIN_MAX_DB - AUDIO_MIC_GAIN_MIN_DB),
-               ICON_MIC, mic, "MIC GAIN");
+               UI_ICON_MIC, mic, "MIC GAIN");
     paint_pair(L, true, PANEL_HIT_VOL_UP, PANEL_HIT_VOL_DOWN, (float)v / (float)AUDIO_VOLUME_MAX,
-               ICON_SPEAKER_HI, vol, "VOLUME");
+               UI_ICON_SPEAKER_HI, vol, "VOLUME");
 }
 
 static int color_index_of(uint32_t rgb)
@@ -583,7 +657,7 @@ static void paint_color(lv_layer_t *L, uint32_t tint_rgb)
                 snprintf(more, sizeof(more), "+%d", count - (PANEL_SLOTS - 1));
                 text(L, &font_panel_18, ink, (int32_t)x, (int32_t)y, more);
             } else {
-                icon(L, ICON_LEFT, ink, (int32_t)x, (int32_t)y);
+                icon(L, UI_ICON_LEFT, ink, (int32_t)x, (int32_t)y);
             }
         } else if (idx < 0) {
             fill_circle(x, y, 3.0f, 0.0f, s_col.dot_off);
@@ -593,7 +667,7 @@ static void paint_color(lv_layer_t *L, uint32_t tint_rgb)
             fill_circle(x, y, PANEL_SWATCH_R - (pressed ? 3.0f : 0.0f), 0.0f, rgb);
             if (idx == current) {
                 fill_circle(x, y, PANEL_SWATCH_R + 6.0f, 3.0f, rgb);
-                icon(L, ICON_CHECK, s_col.primary_ink, (int32_t)x, (int32_t)y);
+                icon(L, UI_ICON_CHECK, s_col.primary_ink, (int32_t)x, (int32_t)y);
             }
         }
     }
@@ -622,7 +696,7 @@ static void paint_toggles(lv_layer_t *L)
     const style_t st = style(PANEL_HIT_NS, ns_ok, !ns_on);
     fill_seg(PANEL_SEG_HALF_TOP, fill_of(st));
     const uint32_t ink = ink_of(st, !ns_on);
-    icon(L, ICON_WAVE, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - 128);
+    icon(L, UI_ICON_WAVE, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - 128);
     text(L, &font_panel_28, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - 84, "Noise reduction");
     text(L, &font_panel_18, st == ST_PRIMARY ? s_col.primary_label : (ns_ok ? s_col.hint : s_col.disabled_ink),
          (int32_t)PANEL_C, (int32_t)PANEL_C - 50, ns_ok ? (ns_on ? "On" : "Off") : "Unavailable");
@@ -637,7 +711,7 @@ static void paint_toggles(lv_layer_t *L)
     text(L, &font_panel_28, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + 62, h12 ? "12-hour" : "24-hour");
     text(L, &font_panel_18, sb == ST_PRIMARY ? s_col.primary_label : (clk_ok ? s_col.hint : s_col.disabled_ink),
          (int32_t)PANEL_C, (int32_t)PANEL_C + 96, h12 ? "tap for 24-hour" : "tap for 12-hour");
-    icon(L, ICON_CLOCK, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + 136);
+    icon(L, UI_ICON_CLOCK, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + 136);
 }
 
 static void fmt_countdown(int64_t s, char *out, size_t n)
@@ -690,7 +764,7 @@ static void paint_alarms(lv_layer_t *L, uint32_t now)
         const style_t st = style(id, enabled(id), true);
         const float x = PANEL_C + (side ? PANEL_NAV_X : -PANEL_NAV_X);
         fill_circle(x, PANEL_NAV_Y, PANEL_NAV_R, 0.0f, fill_of(st));
-        icon(L, side ? ICON_RIGHT : ICON_LEFT, ink_of(st, true), (int32_t)x, (int32_t)PANEL_NAV_Y);
+        icon(L, side ? UI_ICON_RIGHT : UI_ICON_LEFT, ink_of(st, true), (int32_t)x, (int32_t)PANEL_NAV_Y);
     }
 
     /* Cancel, in two taps: the first arms it and says so, white. */
@@ -700,7 +774,7 @@ static void paint_alarms(lv_layer_t *L, uint32_t now)
     fill_seg(PANEL_SEG_HALF_BOTTOM, fill_of(sc));
     const uint32_t ink = ink_of(sc, !armed);
     text(L, &font_panel_28, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + 62, armed ? "Cancel?" : "Cancel");
-    icon(L, ICON_X, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + 104);
+    icon(L, UI_ICON_X, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + 104);
     if (armed) {
         text(L, &font_panel_18, s_col.primary_label, (int32_t)PANEL_C, (int32_t)PANEL_C + 140, "tap again");
     }

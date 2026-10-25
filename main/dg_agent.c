@@ -1345,6 +1345,8 @@ static bool __attribute__((noinline)) clock_tool(const char *name, const cJSON *
     const bool timer = cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(args, "seconds"));
     const cJSON *cancel = cJSON_GetObjectItemCaseSensitive(args, "cancel");
     const bool cancelling = cJSON_IsString(cancel) && cancel->valuestring[0] != '\0';
+    const cJSON *sw = cJSON_GetObjectItemCaseSensitive(args, "stopwatch");
+    const bool stopwatch = cJSON_IsString(sw) && sw->valuestring[0] != '\0';
     switch (which) {
     case GET_TIME:  clock_fn_get_time(out, CLOCK_REPLY_LEN); break;
     case SET_TZ:    clock_fn_set_clock(args, out, CLOCK_REPLY_LEN); break;
@@ -1356,7 +1358,9 @@ static bool __attribute__((noinline)) clock_tool(const char *name, const cJSON *
         }
         break;
     case ALARMS:
-        if (cancelling) {
+        if (stopwatch) {
+            alarms_fn_stopwatch(args, out, CLOCK_REPLY_LEN);
+        } else if (cancelling) {
             alarms_fn_cancel(args, out, CLOCK_REPLY_LEN);
         } else {
             alarms_fn_list(out, CLOCK_REPLY_LEN);
@@ -1903,6 +1907,7 @@ static void handle_function_call(const cJSON *root)
  * past the 20 kB at which sessions flapped before (HISTORY_REPLAY_BYTES), and a
  * sixth 4 kB TLS record. Timer and alarm share one tool, listing and cancelling
  * another, and a parameter whose name says what it is carries no description.
+ * The stopwatch rides on `alarms` too, as one more string, for the same reason.
  */
 static const char *const CLOCK_TOOLS[] = {
     "{\"name\":\"get_time\",\"description\":\"Current local time, weekday and date. "
@@ -1922,8 +1927,9 @@ static const char *const CLOCK_TOOLS[] = {
     "\"label\":{\"type\":\"string\"}}}}",
 
     "{\"name\":\"alarms\",\"description\":\"List pending alarms and timers. To cancel, "
-    "pass an id, a label, or all.\",\"parameters\":{\"type\":\"object\",\"properties\":"
-    "{\"cancel\":{\"type\":\"string\"}}}}",
+    "pass an id, a label, or all. stopwatch: start, pause, lap, reset or read.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{\"cancel\":{\"type\":"
+    "\"string\"},\"stopwatch\":{\"type\":\"string\"}}}}",
 };
 
 /*

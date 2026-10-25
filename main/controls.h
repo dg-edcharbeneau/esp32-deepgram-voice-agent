@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "alarms.h"
+#include "stopwatch.h"
 
 /* Speaker volume, AUDIO_VOLUME_MIN..MAX in steps of 10. */
 int controls_volume(void);
@@ -38,6 +39,20 @@ void controls_clock_toggle_12h(void);
 /* Pending timers and alarms, soonest first, and cancelling one. */
 int controls_alarms(alarm_view_t *out, int max);
 bool controls_alarm_cancel(uint8_t id);
+
+/*
+ * The device's one stopwatch, RAM only. Safe from ANY task -- unlike the rest of
+ * this file -- because voice (the agent's tool, on the WebSocket task) and touch
+ * (the stopwatch screen, on the LVGL task) both drive it.
+ */
+void controls_stopwatch_get(sw_t *out);
+void controls_stopwatch_toggle(void);
+bool controls_stopwatch_lap(void);
+bool controls_stopwatch_reset(void);
+
+/* The ring screen's buttons: stop what is ringing, or snooze it `minutes`. */
+void controls_alarm_stop(void);
+void controls_alarm_snooze(int minutes);
 
 /*
  * Ask for the save of anything still unsaved once `quiet_ms` has passed since the

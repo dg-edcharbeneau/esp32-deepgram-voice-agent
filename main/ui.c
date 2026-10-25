@@ -55,9 +55,12 @@
 #include "arc_text.h"
 #include "ui_face.h"
 #include "ui_clock.h"
+#include "ui_ring.h"
+#include "controls.h"
 #include "ui_panel.h"
 #include "ui_tone.h"
-#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
+    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST
 #include "screenshot.h"
 #endif
 
@@ -530,23 +533,65 @@ static bool s_clock_swipe;       /* this press began on the bottom edge */
 static int32_t s_clock_swipe_x0, s_clock_swipe_y0;
 static bool s_clock_shown;       /* the clock owns the frame */
 static bool s_clock_ok;          /* ui_clock_init() found its PSRAM */
+static bool s_ring_shown;        /* the ring screen owns the frame */
+
+/*
+ * THE STOPWATCH SCREEN: reached by a sideways swipe on the orb clock, or by
+ * voice; a swipe back returns to the clock. The stopwatch itself lives in
+ * controls.c and runs on whether or not this is up. LVGL task only, apart from
+ * the request flag.
+ */
+static bool s_sw_shown;
+static volatile bool s_sw_want;  /* ui_show_stopwatch(), from any task */
+static int s_sw_pressed = -1;    /* the button showing pressed, 0 left, 1 right */
+static uint32_t s_sw_pressed_ms;
+#define SW_PRESSED_MS 150
+/* A press that began on the clock or the stopwatch screen: what it becomes --
+ * a tap, a sideways swipe -- is decided on release. */
+static bool s_screen_press;
+static int32_t s_screen_x0, s_screen_y0;
+#define SCREEN_SWIPE_PX 80
+#define SCREEN_TAP_PX   20
 /* A session started: the on-demand clock gives the face back. Set by
  * ui_set_stopped() on the session worker, consumed on the LVGL task. */
 static volatile bool s_clock_cancel;
 static lv_timer_t *s_frame_timer;
 
+/* The ring screen's rate: its motion is slow, and the session may be live on
+ * the core it shares with the echo canceller. 10 fps keeps the snooze fade
+ * smooth enough to read. */
+#define RING_FRAME_MS 100
+
 /*
  * The frame period, from the one rule: the sleep rate while asleep or while the
- * clock is up on demand, the full rate otherwise. A clock frame costs 25-60 ms,
- * which at the awake 33 ms period would hold the LVGL task busy on the core the
- * echo canceller shares. Called wherever either input changes, on the event that
- * changed it -- never a frame later, which is the lag a woken panel must not have.
+ * clock is up on demand, the ring rate under the ring screen, the full rate
+ * otherwise. A clock frame costs 25-60 ms, which at the awake 33 ms period would
+ * hold the LVGL task busy on the core the echo canceller shares. Called wherever
+ * an input changes, on the event that changed it -- never a frame later, which
+ * is the lag a woken panel must not have.
  */
+static bool sw_running(void)
+{
+    sw_t sw;
+    controls_stopwatch_get(&sw);
+    return sw.state == SW_RUNNING;
+}
+
 static void set_frame_period(void)
 {
-    if (s_frame_timer != NULL) {
-        lv_timer_set_period(s_frame_timer,
-                            (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS : FRAME_MS);
+    static uint32_t set;
+    if (s_frame_timer == NULL) {
+        return;
+    }
+    /* The stopwatch runs at the ring rate while it counts -- its centiseconds
+     * want frames -- and at the sleep rate while it stands still. */
+    const uint32_t want = (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
+                          : s_ring_shown               ? RING_FRAME_MS
+                          : s_sw_shown                 ? (sw_running() ? RING_FRAME_MS : SLEEP_FRAME_MS)
+                                                       : FRAME_MS;
+    if (want != set) {
+        set = want;
+        lv_timer_set_period(s_frame_timer, want);
     }
 }
 
@@ -885,7 +930,11 @@ static volatile int  s_clk_hh, s_clk_mm;
 static volatile int  s_next_day = -1;
 static volatile int  s_next_hh, s_next_mm;
 static volatile bool s_clk_h12;
-static volatile bool s_ringing;
+/* What is ringing, from alarms.c on the main loop: copied whole under the lock,
+ * since it carries a string. s_ringing is the LVGL task's copy of .ringing. */
+static portMUX_TYPE s_ring_lock = portMUX_INITIALIZER_UNLOCKED;
+static ui_ring_t s_ring_in;
+static bool s_ringing;
 
 /*
  * The connection phase the session layer last reported, or NONE.
@@ -1163,9 +1212,28 @@ void ui_set_clock(bool valid, int hh, int mm, int next_day, int next_hh, int nex
     s_clk_valid = valid;
 }
 
-void ui_set_ringing(bool ringing)
+void ui_show_stopwatch(void)
 {
-    s_ringing = ringing;
+    s_sw_want = true;
+}
+
+bool ui_stopwatch_holds_awake(void)
+{
+    return s_sw_shown && sw_running();
+}
+
+void ui_set_ring(const ui_ring_t *ring)
+{
+    portENTER_CRITICAL(&s_ring_lock);
+    s_ring_in = *ring;
+    portEXIT_CRITICAL(&s_ring_lock);
+}
+
+static void ring_snapshot(ui_ring_t *out)
+{
+    portENTER_CRITICAL(&s_ring_lock);
+    *out = s_ring_in;
+    portEXIT_CRITICAL(&s_ring_lock);
 }
 
 void ui_set_battery(int percent, bool charging, bool low, bool valid)
@@ -1592,6 +1660,13 @@ static bool clock_wanted(uint32_t now)
         s_clock_forced = false;
         set_frame_period();
     }
+    /* The stopwatch screen goes for the same, and for sleep while it stands
+     * still -- it holds the panel awake only while it runs. It runs on. */
+    if (s_sw_shown && (cancel || s_ringing || s_test_active || s_qr_payload != NULL ||
+                       (s_asleep && !sw_running()))) {
+        s_sw_shown = false;
+        set_frame_period();
+    }
     /*
      * Asleep, only while STOPPED: the battery-critical sleep keeps a live
      * conversation's face, dim, with its caption -- main.c holds the panel asleep
@@ -1600,6 +1675,94 @@ static bool clock_wanted(uint32_t now)
      */
     return s_clock_ok && ((s_asleep && s_stopped) || s_clock_forced) && s_clk_valid &&
            !s_ringing && !s_test_active && s_qr_payload == NULL;
+}
+
+/* A press on the stopwatch screen at (x, y): its buttons act on the press, as
+ * the ring screen's do -- the right plays or pauses, the left laps while it
+ * runs and resets otherwise. True if it landed on one. */
+static bool stopwatch_press(int32_t x, int32_t y)
+{
+    const int hit = ui_clock_stopwatch_hit(x, y);
+    if (hit < 0) {
+        return false;
+    }
+    s_sw_pressed = hit;
+    s_sw_pressed_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (hit == 1) {
+        controls_stopwatch_toggle();
+    } else if (sw_running()) {
+        controls_stopwatch_lap();
+    } else {
+        controls_stopwatch_reset();
+    }
+    set_frame_period();
+    return true;
+}
+
+#if CONFIG_UI_STOPWATCH_SELFTEST
+/*
+ * BENCH AID, NOT A FEATURE: 10 s after boot, opens the stopwatch screen and
+ * presses its buttons through the same hit test a finger uses -- play, lap,
+ * pause, reset -- capturing it ready, running, running with a lap, and paused,
+ * then hands back to the face.
+ */
+static void stopwatch_selftest(uint32_t now)
+{
+    static const struct { uint32_t at; char what; } STEPS[] = {
+        {10000, 'o'}, {11500, 's'}, {12000, 'R'}, {14000, 's'}, {15000, 'L'},
+        {16500, 's'}, {18000, 'R'}, {19500, 's'}, {21000, 'L'}, {22500, 's'},
+        {24000, 'c'},
+    };
+    static size_t k;
+    if (k >= sizeof(STEPS) / sizeof(STEPS[0]) || now < STEPS[k].at) {
+        return;
+    }
+    const int32_t c = BSP_LCD_H_RES / 2;
+    switch (STEPS[k].what) {
+    case 'o': s_sw_shown = true; ESP_LOGI(TAG, "EVT stopwatch selftest open"); break;
+    case 'c': s_sw_shown = false; ESP_LOGI(TAG, "EVT stopwatch selftest done"); break;
+    case 'R': stopwatch_press(c + 35, c + 143); break;   /* the right button */
+    case 'L': stopwatch_press(c - 35, c + 143); break;   /* the left */
+    case 's': {
+        static unsigned n;
+        char tag[24];
+        snprintf(tag, sizeof(tag), "sw-%u", n);
+        lv_draw_buf_t *buf = lv_canvas_get_draw_buf(canvas_obj);
+        if (!screenshot_capture((const uint16_t *)buf->data,
+                                buf->header.stride / sizeof(uint16_t), BSP_LCD_H_RES,
+                                BSP_LCD_V_RES, tag)) {
+            return;   /* the last one still printing: try again next frame */
+        }
+        n++;
+        break;
+    }
+    }
+    k++;
+}
+#endif
+
+/* The stopwatch screen: the clock's status row and colour, its own state. */
+static void paint_stopwatch(uint32_t now)
+{
+    const ui_clock_state_t st = {
+        .now_ms = now,
+        .tint_rgb = s_tint_rgb,
+#if CONFIG_BATTERY
+        .bat_valid = s_bat_valid,
+        .bat_low = s_bat_low,
+        .bat_charging = s_bat_charging,
+        .bat_percent = s_bat_percent,
+#endif
+#if CONFIG_WIFI_SIGNAL
+        .sig_valid = s_sig_valid,
+        .sig_bars = s_sig_bars,
+#endif
+    };
+    sw_t sw;
+    controls_stopwatch_get(&sw);
+    const int pressed = (s_sw_pressed >= 0 && now - s_sw_pressed_ms < SW_PRESSED_MS) ? s_sw_pressed
+                                                                                     : -1;
+    ui_clock_stopwatch_frame(&st, &sw, pressed);
 }
 
 static void paint_clock(uint32_t now)
@@ -2483,34 +2646,69 @@ static void frame_timer_cb(lv_timer_t *timer)
     update_qr();
 
     /*
-     * THE TOUCH PANEL, when it is open, owns the frame: the face, its overlays
-     * and the labels all stand down, and nothing below runs. Anything that owns
-     * the whole screen by design closes it first -- an alarm ringing (a press
-     * anywhere must dismiss it, as it always has), the setup QR code, the display
-     * test. Called every frame regardless, because the panel's deferred save of
-     * volume and mic gain runs from it even after the panel has closed.
+     * THREE THINGS CAN OWN THE FRAME, and when one does the face, its overlays
+     * and the labels all stand down and nothing below runs:
+     *
+     *   the ring screen, while a timer or alarm rings -- first, because it is
+     *     the one that must be answered;
+     *   the touch panel, while it is open;
+     *   the orb clock, asleep or on demand.
+     *
+     * Anything that owns the whole screen by design closes the panel first -- a
+     * ring, the setup QR code, the display test. The panel's frame is called
+     * every frame regardless, because its deferred save of volume and mic gain
+     * runs from it even after it has closed.
      */
+    ui_ring_t ring;
+    ring_snapshot(&ring);
+    s_ringing = ring.ringing;
     if (s_ringing || s_test_active || s_qr_payload != NULL) {
         ui_panel_close(s_ringing ? "alarm" : "screen taken");
     }
     const uint32_t now_ms = (uint32_t)(draw_start_us / 1000);
     static bool s_panel_shown;
+#if CONFIG_UI_STOPWATCH_SELFTEST
+    stopwatch_selftest((uint32_t)(draw_start_us / 1000));
+#endif
+    if (s_sw_want) {
+        s_sw_want = false;
+        if (s_clock_ok) {
+            s_sw_shown = true;
+            s_clock_forced = false;
+            ESP_LOGI(TAG, "EVT stopwatch shown");
+        }
+    }
+    const bool ring_up = !s_test_active && s_qr_payload == NULL && ui_ring_wanted(&ring);
     const bool panel = ui_panel_frame(now_ms, s_tint_rgb, s_session_live);
-    /* The panel cannot be open asleep (apply_sleep refuses), so the two never
-     * both want the frame; the panel is asked first all the same. */
-    const bool clock = !panel && clock_wanted(now_ms);
-    if (panel != s_panel_shown || clock != s_clock_shown) {
-        const bool was_taken = s_panel_shown || s_clock_shown;
-        if (s_clock_shown && !clock) {
-            /* Hand the face a black canvas, as the panel's close does -- unless
-             * the panel is what took over, in which case it has already painted
-             * the whole canvas this frame and blacking it would leave it black
-             * until something changed. */
-            ui_clock_leave(!panel);
+    /* The order decides, though little overlaps: the panel cannot be open
+     * asleep or under a ring, and clock_wanted() closes the stopwatch screen
+     * for the ring, the QR code and the test. */
+    const bool clock_now = clock_wanted(now_ms);
+    const bool sw_up = !ring_up && !panel && s_sw_shown && s_clock_ok;
+    const bool clock = !panel && !ring_up && !sw_up && clock_now;
+    static bool s_sw_up;
+    if (panel != s_panel_shown || clock != s_clock_shown || ring_up != s_ring_shown ||
+        sw_up != s_sw_up) {
+        const bool was_taken = s_panel_shown || s_clock_shown || s_ring_shown || s_sw_up;
+        if (s_ring_shown && !ring_up) {
+            ui_ring_leave();
+        }
+        if ((s_clock_shown && !clock) || (s_sw_up && !sw_up) || (clock && s_sw_up) ||
+            (sw_up && s_clock_shown)) {
+            /* The clock and the stopwatch share a painter: one handing over to
+             * the other restarts it, and to anything else blacks the canvas for
+             * the face -- unless the panel or the ring took over, having
+             * already painted the whole canvas this frame. */
+            ui_clock_leave(!panel && !ring_up && !clock && !sw_up);
         }
         s_panel_shown = panel;
         s_clock_shown = clock;
-        if ((panel || clock) && !was_taken) {
+        s_sw_up = sw_up;
+        if (ring_up != s_ring_shown) {
+            s_ring_shown = ring_up;
+            set_frame_period();
+        }
+        if ((panel || clock || ring_up || sw_up) && !was_taken) {
             /* Painted over everything, so no overlay's record of what it last
              * drew is true any more; each draws afresh once it is gone.
              * update_status_shown() puts the status word back on the first
@@ -2526,12 +2724,23 @@ static void frame_timer_cb(lv_timer_t *timer)
             s_arc_shown = NULL;
         }
 #if CONFIG_UI_SHOW_INDICATORS
-        if (panel || clock) {
+        if (panel || clock || ring_up || sw_up) {
             lv_obj_add_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
         }
 #endif
+    }
+    set_frame_period();   /* cheap when nothing changed; the stopwatch's rate moves */
+    if (ring_up) {
+        ui_ring_frame(&ring, now_ms, s_tint_rgb, s_clk_h12);
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
+    if (sw_up) {
+        paint_stopwatch(now_ms);
+        tlm_accumulate_frame(draw_start_us);
+        return;
     }
     if (panel) {
         tlm_accumulate_frame(draw_start_us);
@@ -2720,35 +2929,64 @@ static void gesture_event_cb(lv_event_t *e)
          */
         s_sleep_want = false;
         s_clock_swipe = false;
-        /* The on-demand clock goes on any press, and the press goes with it.
-         * Cleared BEFORE the wake below, so the frame period it sets is the
-         * full rate on this very event. */
-        const bool was_forced = s_clock_forced;
-        s_clock_forced = false;
+        s_screen_press = false;
+        {
+            lv_point_t sp = {0};
+            lv_indev_t *sin = lv_event_get_indev(e);
+            if (sin != NULL) {
+                lv_indev_get_point(sin, &sp);
+            }
+            s_screen_x0 = sp.x;
+            s_screen_y0 = sp.y;
+        }
+        /*
+         * A press on the CLOCK -- asleep or on demand -- keeps it up until the
+         * release says what the press was: a tap puts the face back, a sideways
+         * swipe brings the stopwatch. So a press on a sleeping clock wakes the
+         * panel and holds the clock up on demand, for the swipe it may become.
+         * Set BEFORE the wake below, so the frame period it sets is right on
+         * this very event.
+         */
+        const bool on_clock = s_clock_shown;
+        if (on_clock) {
+            s_clock_forced = true;
+        }
         apply_sleep(false);
         set_frame_period();
-        if (was_forced) {
+        if (on_clock || s_sw_shown) {
             s_press_in_button = false;
             s_press_active = false;
-            /* A press that can open nothing, so the panel's drag state is not
-             * left over from the one before. */
-            ui_panel_pressed(-1, -1, false);
-            ESP_LOGI(TAG, "EVT clock dismissed");
+            s_screen_press = true;
+            /* The panel still sees the press: a drag down from the top edge
+             * opens it over the clock or the stopwatch, as over the face. */
+            ui_panel_pressed(s_screen_x0, s_screen_y0, s_qr_payload == NULL && !s_test_active);
+            if (s_sw_shown && !on_clock) {
+                /* The stopwatch's buttons act on the press, as the ring
+                 * screen's do. */
+                if (stopwatch_press(s_screen_x0, s_screen_y0)) {
+                    s_screen_press = false;   /* a button press is not a swipe */
+                }
+            }
             break;
         }
         /*
-         * A ringing alarm takes the whole panel. A press anywhere dismisses it,
-         * and the press is then nobody else's: clearing the button gate here is
+         * The ring screen takes every press while it is up: its Stop and snooze
+         * buttons are the only targets, and a press on neither does nothing.
+         * The press is then nobody else's -- clearing the button gate here is
          * what stops the release turning into a tap that toggles the session,
-         * or a hold that offers to forget it. The display test cannot be
-         * running -- main.c never rings into it, and it owns the screen anyway.
+         * or a hold that offers to forget it.
          */
-        if (s_ringing) {
+        if (s_ring_shown) {
             s_press_in_button = false;
             s_press_active = false;
-            if (s_gesture_handler) {
-                s_gesture_handler(UI_DISMISS);
+            lv_point_t rp = {0};
+            lv_indev_t *rin = lv_event_get_indev(e);
+            if (rin != NULL) {
+                lv_indev_get_point(rin, &rp);
             }
+            ui_ring_t ring;
+            ring_snapshot(&ring);
+            ui_ring_pressed(&ring, rp.x, rp.y, (uint32_t)(esp_timer_get_time() / 1000));
             break;
         }
         /*
@@ -2819,7 +3057,44 @@ static void gesture_event_cb(lv_event_t *e)
         s_press_active = false;
         /* The drag that opened the panel began off the button, so its click is
          * already gated out; this only has to finish the panel's own gesture. */
-        ui_panel_released(lv_event_get_code(e) == LV_EVENT_PRESS_LOST);
+        const bool panel_took = ui_panel_released(lv_event_get_code(e) == LV_EVENT_PRESS_LOST) ||
+                                ui_panel_is_open();
+        if (s_screen_press && panel_took) {
+            /* The press opened the panel. The on-demand clock it began on is
+             * done with; the stopwatch screen comes back when the panel goes. */
+            s_screen_press = false;
+            s_clock_forced = false;
+            set_frame_period();
+        }
+        if (s_screen_press) {
+            s_screen_press = false;
+            lv_point_t rp = {0};
+            lv_indev_t *rin = lv_event_get_indev(e);
+            if (rin != NULL) {
+                lv_indev_get_point(rin, &rp);
+            }
+            const int32_t dx = rp.x - s_screen_x0, dy = rp.y - s_screen_y0;
+            const int32_t adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+            const bool swipe = adx >= SCREEN_SWIPE_PX && adx > 2 * ady;
+            const bool tap = adx <= SCREEN_TAP_PX && ady <= SCREEN_TAP_PX;
+            if (s_sw_shown) {
+                if (swipe) {
+                    s_sw_shown = false;
+                    s_clock_forced = true;
+                    ESP_LOGI(TAG, "EVT stopwatch -> clock");
+                }
+            } else if (s_clock_forced) {
+                if (swipe && s_clock_ok) {
+                    s_clock_forced = false;
+                    s_sw_shown = true;
+                    ESP_LOGI(TAG, "EVT clock -> stopwatch");
+                } else if (tap) {
+                    s_clock_forced = false;
+                    ESP_LOGI(TAG, "EVT clock dismissed");
+                }
+            }
+            set_frame_period();
+        }
         break;
 
     case LV_EVENT_SHORT_CLICKED:
@@ -3175,7 +3450,9 @@ static esp_err_t build_ui(void)
 
     ui_panel_init(canvas_obj);
     s_clock_ok = ui_clock_init(canvas_obj);
-#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW
+    ui_ring_init(canvas_obj);
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
+    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST
     screenshot_init();
 #endif
 

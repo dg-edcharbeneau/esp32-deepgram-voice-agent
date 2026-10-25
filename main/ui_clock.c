@@ -28,12 +28,14 @@
 #include "clock_face.h"
 #include "panel_geom.h"
 #include "ui_paint.h"
+#include "ui_panel.h"
 #include "ui_tone.h"
 
 static const char *TAG = "clock";
 
 LV_FONT_DECLARE(font_clock_52);
 LV_FONT_DECLARE(font_clock_15);
+LV_FONT_DECLARE(font_panel_28);
 
 /* ---------------- the mockup's palette, on a white orb ---------------- */
 
@@ -76,73 +78,24 @@ LV_FONT_DECLARE(font_clock_15);
 /* ---------------- state ---------------- */
 
 static lv_obj_t *s_canvas;
-static uint16_t *s_px;
-static uint32_t s_stride;
-static int s_w, s_h;
+static ui_paint_target_t s_t;   /* the canvas, set each frame */
 static clock_frame_t *s_frame;   /* PSRAM: 5 kB is too much for the LVGL stack */
 static bool s_running;
 static uint32_t s_t0_ms;
 
 /* ---------------- pixels ---------------- */
 
-/* Source-over, `a` of 0..255, clipped to the canvas. */
 static inline void blend(int x, int y, uint32_t rgb, uint32_t a)
 {
-    if (a == 0 || x < 0 || y < 0 || x >= s_w || y >= s_h) {
-        return;
-    }
-    uint16_t *p = s_px + (size_t)y * s_stride + x;
-    *p = ui_paint_blend(*p, rgb, a);
+    ui_paint_plot(&s_t, x, y, rgb, a);
 }
 
-static inline uint32_t a8(float a)
-{
-    return a <= 0.0f ? 0 : (a >= 1.0f ? 255 : (uint32_t)(a * 255.0f + 0.5f));
-}
-
-/*
- * A filled disc, or with r_in > 0 an annulus. Squared distance first, as the
- * panel's fill_circle does: inside the edge band a pixel is wholly covered,
- * outside it wholly not, and only the one-pixel band takes a sqrtf -- a library
- * call on this FPU, and most of what a clock frame used to cost. The bands are
- * exactly where panel_coverage() would return 1 or 0, so the result is the same.
- */
 static void disc(float cx, float cy, float r_in, float r_out, uint32_t rgb, float alpha)
 {
-    const float out_lo = r_out - 0.5f, out_hi = r_out + 0.5f;
-    const float in_lo = r_in - 0.5f, in_hi = r_in + 0.5f;
-    const float solid2 = out_lo > 0.0f ? out_lo * out_lo : -1.0f;   /* d2 <= this: covered */
-    const float none2 = out_hi * out_hi;                            /* d2 >= this: not */
-    const float hole2 = in_lo > 0.0f ? in_lo * in_lo : -1.0f;       /* d2 <= this: in the hole */
-    const float rim2 = in_hi * in_hi;                               /* d2 >= this: clear of it */
-    const uint32_t a_full = a8(alpha);
-
-    const int x0 = (int)floorf(cx - r_out - 1.0f), x1 = (int)ceilf(cx + r_out + 1.0f);
-    const int y0 = (int)floorf(cy - r_out - 1.0f), y1 = (int)ceilf(cy + r_out + 1.0f);
-    for (int y = y0; y <= y1; y++) {
-        const float dy = (float)y + 0.5f - cy;
-        for (int x = x0; x <= x1; x++) {
-            const float dx = (float)x + 0.5f - cx;
-            const float d2 = dx * dx + dy * dy;
-            if (d2 >= none2 || (r_in > 0.0f && d2 <= hole2)) {
-                continue;
-            }
-            const bool solid_out = d2 <= solid2;
-            const bool solid_in = r_in <= 0.0f || d2 >= rim2;
-            if (solid_out && solid_in) {
-                blend(x, y, rgb, a_full);
-                continue;
-            }
-            const float dist = sqrtf(d2);
-            float cov = solid_out ? 1.0f : panel_coverage(dist - r_out);
-            if (!solid_in) {
-                cov = fminf(cov, 1.0f - panel_coverage(dist - r_in));
-            }
-            blend(x, y, rgb, a8(cov * alpha));
-        }
-    }
+    ui_paint_disc(&s_t, cx, cy, r_in, r_out, rgb, alpha);
 }
 
+/* A stroked arc about straight up, +-half radians, round caps. */
 static void arc_up(float cx, float cy, float r, float half, float w, uint32_t rgb)
 {
     const float ex = r * sinf(half), ey = r * cosf(half);   /* the right-hand end */
@@ -159,7 +112,7 @@ static void arc_up(float cx, float cy, float r, float half, float w, uint32_t rg
                 const float ax = fabsf(px) - ex, ay = py + ey;   /* nearer end */
                 d = sqrtf(ax * ax + ay * ay);
             }
-            blend(x, y, rgb, a8(panel_coverage(d - w * 0.5f)));
+            blend(x, y, rgb, ui_paint_a8(panel_coverage(d - w * 0.5f)));
         }
     }
 }
@@ -183,7 +136,7 @@ static void box(float x0, float y0, float x1, float y1, float rad, float border,
             if (border > 0.0f) {
                 d = fabsf(d + border * 0.5f) - border * 0.5f;
             }
-            blend(x, y, rgb, a8(panel_coverage(d)));
+            blend(x, y, rgb, ui_paint_a8(panel_coverage(d)));
         }
     }
 }
@@ -208,7 +161,7 @@ static void tri(float ax, float ay, float bx, float by, float cx, float cy, uint
                 const float d = wind * (ex * ((float)y + 0.5f - py[e]) - ey * ((float)x + 0.5f - px[e])) / len;
                 inside = fminf(inside, d);
             }
-            blend(x, y, rgb, a8(panel_coverage(-inside)));
+            blend(x, y, rgb, ui_paint_a8(panel_coverage(-inside)));
         }
     }
 }
@@ -328,11 +281,13 @@ void ui_clock_frame(const ui_clock_state_t *st)
     const float t = (float)(st->now_ms - s_t0_ms) / 1000.0f;
 
     lv_draw_buf_t *buf = lv_canvas_get_draw_buf(s_canvas);
-    s_px = (uint16_t *)buf->data;
-    s_stride = buf->header.stride / sizeof(uint16_t);
-    s_w = (int)buf->header.w;
-    s_h = (int)buf->header.h;
-    memset(s_px, 0, (size_t)buf->header.stride * buf->header.h);
+    s_t = (ui_paint_target_t){
+        .px = (uint16_t *)buf->data,
+        .stride = buf->header.stride / sizeof(uint16_t),
+        .w = (int)buf->header.w,
+        .h = (int)buf->header.h,
+    };
+    memset(s_t.px, 0, (size_t)buf->header.stride * buf->header.h);
     const int64_t t_clear = esp_timer_get_time();
 
     /*
@@ -427,4 +382,169 @@ void ui_clock_frame(const ui_clock_state_t *st)
                  (long long)((t_end - t0) / 1000), (long long)((t_clear - t0) / 1000),
                  (long long)((t_dots - t_clear) / 1000), (long long)((t_end - t_dots) / 1000));
     }
+}
+
+/* ---------------- the stopwatch ---------------- */
+
+/*
+ * Ed's "Orb stopwatch": the clock with its hour ring gone, the minute ring
+ * counting seconds, the sphere spinning only while it runs, and two round
+ * buttons under the time. Everything else -- the status row, the drift, the
+ * text fade -- is the clock's.
+ */
+#define SW_TIME_DY      (-10)   /* the digits' centre, from the panel's */
+#define SW_LINE_DY      29
+#define SW_BTN_DX       35
+#define SW_BTN_DY       143
+#define SW_BTN_R        25.0f
+#define SW_PAUSED_A     0.5f    /* "the orb stops and dims" */
+
+void ui_clock_stopwatch_frame(const ui_clock_state_t *st, const sw_t *sw, int pressed)
+{
+    if (s_frame == NULL) {
+        return;
+    }
+    /* The sphere's own clock, which only moves while it runs. */
+    static float spin;
+    static uint32_t last_ms;
+    if (!s_running) {
+        s_running = true;
+        last_ms = st->now_ms;
+    }
+    if (sw->state == SW_RUNNING) {
+        spin += (float)(st->now_ms - last_ms) / 1000.0f;
+    }
+    last_ms = st->now_ms;
+
+    lv_draw_buf_t *buf = lv_canvas_get_draw_buf(s_canvas);
+    s_t = (ui_paint_target_t){
+        .px = (uint16_t *)buf->data,
+        .stride = buf->header.stride / sizeof(uint16_t),
+        .w = (int)buf->header.w,
+        .h = (int)buf->header.h,
+    };
+    memset(s_t.px, 0, (size_t)buf->header.stride * buf->header.h);
+
+    const float two_pi = 2.0f * (float)M_PI;
+    const float ox = DRIFT_PX * sinf(two_pi * (float)(st->now_ms % DRIFT_X_MS) / (float)DRIFT_X_MS);
+    const float oy = DRIFT_PX * sinf(two_pi * (float)(st->now_ms % DRIFT_Y_MS) / (float)DRIFT_Y_MS);
+
+    const uint32_t tint = st->tint_rgb;
+    const uint32_t c_sphere = ui_tone_mul(tint, COL_SPHERE);
+    const uint32_t c_ring = ui_tone_mul(tint, COL_RING);
+    const uint32_t c_digits = ui_tone_ink(ui_tone_mul(tint, COL_DIGITS));
+    const uint32_t c_status = ui_tone_ink(ui_tone_mul(tint, COL_STATUS));
+    const uint32_t c_status_off = ui_tone_mul(c_status, 0x404040);
+    const uint32_t c_fill = st->bat_low ? COL_LOW : c_digits;
+
+    const uint32_t ms = sw_elapsed(sw, st->now_ms);
+    char big[12], small[12];
+    sw_fmt(ms, big, sizeof(big), small, sizeof(small));
+
+    /* The digits and their smaller centiseconds as one line, centred, the two
+     * sitting on the same ink bottom. */
+    const int32_t cx = (int32_t)lroundf(CLOCK_FACE_C + ox);
+    const int32_t cy = (int32_t)lroundf(CLOCK_FACE_C + oy);
+    const int32_t wb = ui_paint_text_width(&font_clock_52, 0, big);
+    const int32_t ws = small[0] ? ui_paint_text_width(&font_panel_28, 0, small) : 0;
+    const int32_t x0 = cx - (wb + ws) / 2;
+    int32_t bt, bb, stp, sbt;
+    ui_paint_ink_rows(&font_clock_52, '0', &bt, &bb);
+    ui_paint_ink_rows(&font_panel_28, '0', &stp, &sbt);
+    const int32_t time_cy = cy + SW_TIME_DY;
+    const int32_t ink_bottom = time_cy + (bb - bt) / 2;
+    const int32_t small_cy = ink_bottom - (sbt - stp) / 2;
+
+    char line[32] = "";
+    char lap_big[12], lap_small[12];
+    if (sw->laps > 0) {
+        sw_fmt(sw->lap_ms, lap_big, sizeof(lap_big), lap_small, sizeof(lap_small));
+        snprintf(line, sizeof(line), "LAP %u", (unsigned)sw->laps);
+    } else {
+        strlcpy(line, sw->state == SW_READY     ? "READY"
+                      : sw->state == SW_RUNNING ? "RUNNING"
+                                                : "PAUSED",
+                sizeof(line));
+    }
+    const int32_t line_cy = cy + SW_LINE_DY;
+
+    /* The dots stay off the digits and the line under them. */
+    const float fx0 = (float)(x0 - 4), fx1 = (float)(x0 + wb + ws + 4);
+    const float fy0 = (float)(time_cy - (bb - bt) / 2), fy1 = (float)(line_cy + 8);
+
+    /* The seconds ring is the clock's minute ring, counting seconds; the hour
+     * ring (dots 60..71 and its halo) is not drawn. */
+    const int secs = (int)((ms / 1000) % 60);
+    clock_face_build(s_frame, spin, 0, secs, ox, oy);
+    const float sphere_a = sw->state == SW_PAUSED ? SW_PAUSED_A : 1.0f;
+    disc(s_frame->halo[0].x, s_frame->halo[0].y, s_frame->halo[0].r_in, s_frame->halo[0].r_out,
+         c_ring, s_frame->halo[0].a);
+    for (int i = 0; i < s_frame->n; i++) {
+        if (i >= CLOCK_FACE_MINUTES && i < CLOCK_FACE_MINUTES + CLOCK_FACE_HOURS) {
+            continue;
+        }
+        const clock_dot_t *d = &s_frame->dot[i];
+        const float fade = clock_face_text_fade(d->x, d->y, fx0, fy0, fx1, fy1, TEXT_SOFT);
+        if (fade > 0.0f) {
+            const bool orb = d->kind == CLOCK_DOT_SPHERE;
+            disc(d->x, d->y, 0.0f, d->r, orb ? c_sphere : c_ring,
+                 d->a * fade * (orb ? sphere_a : 1.0f));
+        }
+    }
+
+    /* The buttons: dark left -- reset, or the lap flag while running -- and
+     * white right, play or pause. A press shows for a moment in the pressed
+     * shade, as the touch panel's buttons do. */
+    ui_panel_palette_t pal;
+    ui_panel_kit_palette(tint, &pal);
+    const float by = (float)cy + SW_BTN_DY;
+    const float lx = (float)cx - SW_BTN_DX, rx = (float)cx + SW_BTN_DX;
+    disc(lx, by, 0.0f, SW_BTN_R, pressed == 0 ? pal.hint : pal.secondary, 1.0f);
+    disc(rx, by, 0.0f, SW_BTN_R, pressed == 1 ? ui_tone_mul(pal.primary, 0xC8C8C8) : pal.primary,
+         1.0f);
+
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_canvas, &layer);
+    status_row(&layer, st, ox, oy, c_status, c_status_off, c_fill);
+    ui_paint_text(&layer, &font_clock_52, c_digits, x0 + wb / 2, time_cy, 0, true, big);
+    if (small[0]) {
+        ui_paint_text(&layer, &font_panel_28, c_status, x0 + wb + ws / 2, small_cy, 0, true, small);
+    }
+    if (sw->laps > 0) {
+        /* "LAP 1 · 11:53.36", the dot drawn: the 14 px face has no U+00B7. */
+        char lap_t[24];
+        snprintf(lap_t, sizeof(lap_t), "%s%s", lap_big, lap_small);
+        const lv_font_t *f = &lv_font_montserrat_14;
+        const int32_t wl = ui_paint_text_width(f, AMPM_SPACE, line);
+        const int32_t wr = ui_paint_text_width(f, AMPM_SPACE, lap_t);
+        const int32_t lx0 = cx - (wl + 18 + wr) / 2;
+        ui_paint_text(&layer, f, c_status, lx0 + wl / 2, line_cy, AMPM_SPACE, true, line);
+        disc((float)(lx0 + wl + 9), (float)line_cy + 0.5f, 0.0f, 1.5f, c_status, 1.0f);
+        ui_paint_text(&layer, f, c_status, lx0 + wl + 18 + wr / 2, line_cy, AMPM_SPACE, true,
+                      lap_t);
+    } else {
+        ui_paint_text(&layer, &lv_font_montserrat_14, c_status, cx, line_cy, AMPM_SPACE, true,
+                      line);
+    }
+    ui_panel_kit_icon(&layer, sw->state == SW_RUNNING ? UI_ICON_FLAG : UI_ICON_RESET, pal.text,
+                      (int32_t)lx, (int32_t)by);
+    ui_panel_kit_icon(&layer, sw->state == SW_RUNNING ? UI_ICON_PAUSE : UI_ICON_PLAY,
+                      pal.primary_ink, (int32_t)rx, (int32_t)by);
+    lv_canvas_finish_layer(s_canvas, &layer);
+    lv_obj_invalidate(s_canvas);
+}
+
+int ui_clock_stopwatch_hit(int32_t x, int32_t y)
+{
+    /* The buttons drift with the clock by at most 3 px; the 8 px slop covers
+     * that, so the hit test can use the undrifted centres. */
+    const float c = CLOCK_FACE_C, by = c + SW_BTN_DY;
+    const float px = (float)x + 0.5f, py = (float)y + 0.5f;
+    if (panel_circle_sdf(c - SW_BTN_DX, by, SW_BTN_R + PANEL_HIT_SLOP, px, py) <= 0.0f) {
+        return 0;
+    }
+    if (panel_circle_sdf(c + SW_BTN_DX, by, SW_BTN_R + PANEL_HIT_SLOP, px, py) <= 0.0f) {
+        return 1;
+    }
+    return -1;
 }
