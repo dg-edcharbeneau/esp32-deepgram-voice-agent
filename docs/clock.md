@@ -277,9 +277,11 @@ sync there is nothing for the rings to show, so the panel keeps the plain orb.
   the text fade out instead.
 - **Full brightness, 5 fps** -- awake on demand too. A frame costs 25-60 ms,
   which at the awake 33 ms period would hold the LVGL task busy on the core the
-  echo canceller shares. It is there to be read across a room, and at the old
-  15 % brightness it was not. The frame rate and the radio's power save are what sleep
-  still saves. The one sleep that dims is the battery-critical one.
+  echo canceller shares. It comes up at full brightness, to be read across a
+  room -- at the old 15 % it was not -- then dims to 40 % after 2 minutes asleep,
+  and the panel goes off after 5 (`CONFIG_UI_SLEEP_DIM_AFTER_MIN`,
+  `CONFIG_UI_SLEEP_OFF_AFTER_MIN`); a touch brings it back. See
+  [power.md](power.md).
 - **Burn-in.** The whole clock drifts round a 3 px Lissajous, 17 minutes across
   and 23 down, so no pixel holds the same ink for hours. Continuous, not stepped:
   the old clock's 3 px jump a minute (12 back every fifth) made a screen-wide

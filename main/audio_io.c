@@ -14,6 +14,7 @@
 #include "nvs.h"
 
 #include "bsp/esp-bsp.h"
+#include "driver/gpio.h"
 
 #include "audio_codecs.h"
 #include "audio_io.h"
@@ -589,6 +590,44 @@ static void chime_fill(int16_t *out, size_t n, uint32_t *pos)
     }
 }
 
+/*
+ * THE SPEAKER AMPLIFIER, OFF WHEN NOTHING PLAYS. Its enable pin (GPIO46) is
+ * the codec driver's to switch on open and close, and the speaker stays open on
+ * purpose -- reopening the ES8311 per turn clicks. So only the amplifier itself
+ * is switched, here, on the pin: off once nothing has been written for
+ * CONFIG_AUDIO_PA_IDLE_OFF_MS, back on before the next write, with
+ * PA_SETTLE_MS for it to come up before the first sample reaches it. The codec
+ * keeps clocking silence throughout, so the amplifier wakes into silence.
+ * Playback task only.
+ */
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+#define PA_SETTLE_MS 20
+static bool s_pa_on = true;   /* the codec's open turned it on */
+#endif
+
+static void pa_on(void)
+{
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    if (!s_pa_on) {
+        gpio_set_level(BSP_POWER_AMP_IO, 1);
+        s_pa_on = true;
+        vTaskDelay(pdMS_TO_TICKS(PA_SETTLE_MS));
+        ESP_LOGI(TAG, "EVT pa on");
+    }
+#endif
+}
+
+static void pa_idle(void)
+{
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    if (s_pa_on && now_ms() - s_play_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS) {
+        gpio_set_level(BSP_POWER_AMP_IO, 0);
+        s_pa_on = false;
+        ESP_LOGI(TAG, "EVT pa off");
+    }
+#endif
+}
+
 static void playback_task(void *arg)
 {
     /* Mono in, stereo out: the codec is open with two channels, so every
@@ -652,6 +691,7 @@ static void playback_task(void *arg)
              * mid-ring takes over within a frame or two. */
             const size_t samples = CHUNK_MONO / sizeof(int16_t) / 2;
             chime_fill(mono, samples, &chime_pos);
+            pa_on();
             if (s_play_tap != NULL) {
                 s_play_tap(mono, samples);
             }
@@ -685,6 +725,10 @@ static void playback_task(void *arg)
             continue;
         }
 
+        if (got == 0 && !chime) {
+            pa_idle();
+        }
+
         if (total < sizeof(int16_t)) {
             carry_valid = (total == 1);
             if (carry_valid) {
@@ -701,6 +745,8 @@ static void playback_task(void *arg)
         } else {
             carry_valid = false;
         }
+
+        pa_on();
 
         /*
          * Before the write, because the write is what blocks. Note this still
@@ -2014,6 +2060,24 @@ bool audio_io_chime_active(void)
 {
     return s_chime_on;
 }
+
+#if CONFIG_POWER_STATE_WALK
+void audio_io_bench_speaker(bool on)
+{
+    /* BENCH AID: the ES8311 and its amplifier (the PA pin, switched by the
+     * codec driver on enable and close) off and back on, so the power walk can
+     * price them. Nothing may play meanwhile -- the walk runs stopped. */
+    if (on) {
+        esp_codec_dev_sample_info_t fs = s_fs;
+        int err = esp_codec_dev_open(s_spk, &fs);
+        esp_codec_dev_set_out_vol(s_spk, s_volume);
+        ESP_LOGI(TAG, "EVT bench speaker on (%d)", err);
+    } else {
+        esp_codec_dev_close(s_spk);
+        ESP_LOGI(TAG, "EVT bench speaker off");
+    }
+}
+#endif
 
 void audio_io_uplink_hold(bool hold)
 {

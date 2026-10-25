@@ -109,6 +109,8 @@ static volatile bool s_charging;
 static volatile bool s_full;
 static volatile int  s_chg_state = -1;
 static volatile bool s_low;
+static volatile bool s_vbus;
+static volatile int  s_dir;
 
 static esp_err_t reg_read(uint8_t reg, uint8_t *out, size_t len)
 {
@@ -198,6 +200,8 @@ static void sampler_task(void *arg)
         const bool active_phase = (chg <= STATUS2_CHG_CV);
         bool charging = vbus && (dir == STATUS2_DIR_CHARGE || active_phase);
         bool full = vbus && (chg == STATUS2_CHG_DONE);
+        s_vbus = vbus;
+        s_dir = (int)dir;
 
         if (gauge > 100) {
             /* 0xFF means the gauge has no answer -- typically no cell attached,
@@ -327,6 +331,23 @@ void battery_start(void)
                  (sel < (sizeof(cv_name) / sizeof(cv_name[0]))) ? cv_name[sel] : "?");
     }
 
+    /*
+     * The rails as the factory left them, read once: which of the 4 DC-DCs
+     * (REG80) and 11 LDOs (REG90/91) are on, and at what voltage (REG82-86,
+     * REG92-9A). Nothing here writes them -- this firmware has never touched
+     * a rail -- but which are on and what they feed is the first question of
+     * any power audit, and the board's documentation does not say.
+     */
+    uint8_t onoff[2] = {0}, ldo1 = 0, dcv[5] = {0}, ldov[9] = {0}, adc = 0;
+    if (reg_read(0x80, onoff, 2) == ESP_OK && reg_read(0x90, &onoff[1], 1) == ESP_OK &&
+        reg_read(0x91, &ldo1, 1) == ESP_OK && reg_read(0x82, dcv, 5) == ESP_OK &&
+        reg_read(0x92, ldov, 9) == ESP_OK && reg_read(0x30, &adc, 1) == ESP_OK) {
+        ESP_LOGI(TAG, "rails REG80=%02x REG90=%02x REG91=%02x dcdc=%02x %02x %02x %02x %02x "
+                      "ldo=%02x %02x %02x %02x %02x %02x %02x %02x %02x adc=%02x",
+                 onoff[0], onoff[1], ldo1, dcv[0], dcv[1], dcv[2], dcv[3], dcv[4], ldov[0],
+                 ldov[1], ldov[2], ldov[3], ldov[4], ldov[5], ldov[6], ldov[7], ldov[8], adc);
+    }
+
     ESP_LOGI(TAG, "AXP2101 at 0x%02x, sampling every %d ms",
              AXP2101_ADDR, CONFIG_BATTERY_SAMPLE_MS);
 }
@@ -343,6 +364,8 @@ bool battery_get(battery_status_t *out)
     out->full = s_full;
     out->chg_state = s_chg_state;
     out->low = s_low;
+    out->vbus = s_vbus;
+    out->dir = s_dir;
     return out->valid;
 }
 

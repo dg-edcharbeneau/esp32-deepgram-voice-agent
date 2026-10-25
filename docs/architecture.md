@@ -285,10 +285,10 @@ while the setup QR is up.
 flowchart LR
     tlm["main.c telemetry loop<br/><i>1 Hz</i>"] -->|"stopped > 30 s<br/>or charge < critical"| want["ui_set_sleep(true, dim)<br/><i>a request, not an act</i>"]
     want --> lvgl["LVGL task applies it<br/><i>refuses during the display test</i>"]
-    lvgl --> panel["frame timer 200 ms, the orb clock<br/>brightness 100%, 15% if critical"]
+    lvgl --> panel["frame timer 200 ms, the orb clock<br/>100%, 40% after 2 min, off after 5,<br/>15% if critical<br/>CPU free to drop to 80 MHz"]
     touch(["touch"]) -.->|"withdraws the request<br/>and wakes at once"| lvgl
     lvgl --> truth["ui_is_asleep()"]
-    truth -->|"tracked by the loop"| radio["wifi_sta_set_power_save()<br/><i>modem sleep follows the panel</i>"]
+    truth -->|"tracked by the loop"| radio["wifi_sta_set_power_save_mode()<br/><i>max modem sleep asleep, min awake,<br/>none in a session</i>"]
     mic["capture task parks itself<br/><i>independently, 30 s earlier</i>"]
 ```
 
@@ -313,11 +313,13 @@ Three things about that shape:
   device, and the LVGL worker has to stay running for touch to be as responsive
   asleep as awake — which is what rules out the adapter's own
   `AUTO_SLEEP_MODE_PAUSE`.
-- **The radio follows the panel; the microphone does not.** `wifi_sta` re-enables
-  modem sleep only while asleep, because it costs tens of ms of jitter to a live
-  stream. The microphone is absent from this entirely — `capture_task` parks the
-  ES7210 on its own as soon as nothing downstream wants samples, 30 s before the
-  panel sleeps.
+- **The radio follows the session, and sleeps deeper with the panel; the
+  microphone does neither.** No modem sleep in a session, because it costs tens
+  of ms of jitter to a live stream; minimum modem sleep with no session, maximum
+  while the panel sleeps too. The microphone is absent from this entirely —
+  `capture_task` parks the ES7210 on its own as soon as nothing downstream wants
+  samples, 30 s before the panel sleeps. The CPU, the speaker amplifier and the
+  sleeping panel's brightness have their own rules; see [power.md](power.md).
 
 ## Protocol
 

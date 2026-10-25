@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Power, by design.** No current figures -- the AXP2101 has no current
+  reading and no meter was to hand -- so each measure saves by how it works and
+  was checked for behaviour on the board. See `docs/power.md`.
+  - **The CPU drops to 80 MHz asleep** (`CONFIG_PM_ENABLE`): held at 240 while
+    the panel is awake or a session is live.
+  - **The radio follows the session:** no modem sleep in a session, minimum
+    with none, maximum while the panel sleeps too.
+  - **The speaker amplifier turns off** after 5 s of silence and back on before
+    the next sound (`CONFIG_AUDIO_PA_IDLE_OFF_MS`, 0 keeps it on).
+  - **The sleeping clock dims, then goes off:** full brightness for 2 minutes
+    asleep, 40 % for 3 more, then the panel off -- 5 minutes 45 seconds after
+    the last word (`CONFIG_UI_SLEEP_DIM_AFTER_MIN`, `_DIM_PCT`,
+    `CONFIG_UI_SLEEP_OFF_AFTER_MIN`). A touch, a session or an alarm brings it
+    back. It also flushes only its own square.
+  - The console UART is 1 Mbaud, the most it allows with power management on;
+    the USB console, which is what is read, has no baud rate.
+- **Power audit tooling:** TLM gains `slp= bri= ps= vbus= dir=`; Wi-Fi power
+  save changes are logged; `CONFIG_POWER_STATE_WALK` (bench only) holds each
+  state for a USB meter; `host/analyse.py --power` summarises a capture.
+
 ## [0.9.0] - 2026-10-24
 
 Experimental pre-release. Verified on one bench board through screen captures

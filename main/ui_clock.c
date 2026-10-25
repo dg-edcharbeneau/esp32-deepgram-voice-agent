@@ -245,6 +245,21 @@ static void status_row(lv_layer_t *L, const ui_clock_state_t *st, float ox, floa
 
 /* ---------------- the frame ---------------- */
 
+/*
+ * Flush only the clock's own square: the rings reach 186 px out, the largest
+ * halo 14.5 px past that, and the drift 3 px, so nothing the clock draws lies
+ * outside CLOCK_FACE_C +- 210 -- and the corners outside it are black for good.
+ * About a sixth less of the frame goes over the panel's bus, five times a second.
+ */
+#define CLOCK_HALF 210
+
+static void invalidate_clock(void)
+{
+    const lv_area_t a = {(int32_t)CLOCK_FACE_C - CLOCK_HALF, (int32_t)CLOCK_FACE_C - CLOCK_HALF,
+                         (int32_t)CLOCK_FACE_C + CLOCK_HALF, (int32_t)CLOCK_FACE_C + CLOCK_HALF};
+    lv_obj_invalidate_area(s_canvas, &a);
+}
+
 bool ui_clock_init(lv_obj_t *canvas)
 {
     s_canvas = canvas;
@@ -370,7 +385,7 @@ void ui_clock_frame(const ui_clock_state_t *st)
         ui_paint_text(&layer, &lv_font_montserrat_14, c_next, cx, next_cy, 0, true, st->next);
     }
     lv_canvas_finish_layer(s_canvas, &layer);
-    lv_obj_invalidate(s_canvas);
+    invalidate_clock();
     const int64_t t_end = esp_timer_get_time();
 
     /* Once a minute is plenty to see what a frame costs while it sleeps: the
@@ -531,7 +546,7 @@ void ui_clock_stopwatch_frame(const ui_clock_state_t *st, const sw_t *sw, int pr
     ui_panel_kit_icon(&layer, sw->state == SW_RUNNING ? UI_ICON_PAUSE : UI_ICON_PLAY,
                       pal.primary_ink, (int32_t)rx, (int32_t)by);
     lv_canvas_finish_layer(s_canvas, &layer);
-    lv_obj_invalidate(s_canvas);
+    invalidate_clock();
 }
 
 int ui_clock_stopwatch_hit(int32_t x, int32_t y)

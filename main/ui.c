@@ -40,8 +40,10 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 
 #include "bsp/display.h"
+#include "esp_lcd_panel_ops.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/touch.h"
 #include "esp_lv_adapter.h"
@@ -517,6 +519,17 @@ static volatile bool s_sleep_want;
 static volatile bool s_sleep_dim;   /* only the battery-critical sleep dims */
 static bool s_asleep;            /* LVGL task only */
 static bool s_dimmed;            /* LVGL task only */
+static volatile int s_bri_pct = 100;   /* the brightness last set, for the TLM line */
+static uint32_t s_asleep_ms;           /* when the panel last fell asleep */
+static bool s_display_off;             /* blanked after CONFIG_UI_SLEEP_OFF_AFTER_MIN */
+static esp_lcd_panel_handle_t s_panel; /* for the power walk's display off */
+
+#if CONFIG_POWER_STATE_WALK
+/* BENCH AID: the power walk's overrides, applied by the frame timer -- a
+ * brightness (-1 none) and the panel on or off. See ui_bench_power(). */
+static volatile int s_bench_bri = -1;
+static volatile bool s_bench_display_off;
+#endif
 
 /*
  * THE CLOCK ON DEMAND: a swipe up from the bottom edge shows the orb clock now,
@@ -577,6 +590,33 @@ static bool sw_running(void)
     return sw.state == SW_RUNNING;
 }
 
+/*
+ * The panel awake holds the CPU at full speed (CONFIG_PM_ENABLE): the face's
+ * frame budget was measured at 240 MHz, and a touch must find the panel quick.
+ * Asleep, the clock's 5 fps fits in its 200 ms at any speed, so main.c's power
+ * management may let the CPU drop to its floor. Held from boot.
+ */
+static void pm_awake(bool hold)
+{
+#if CONFIG_PM_ENABLE
+    static esp_pm_lock_handle_t lock;
+    static bool held;
+    if (lock == NULL && esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "awake", &lock) != ESP_OK) {
+        return;
+    }
+    if (hold != held) {
+        held = hold;
+        if (hold) {
+            esp_pm_lock_acquire(lock);
+        } else {
+            esp_pm_lock_release(lock);
+        }
+    }
+#else
+    (void)hold;
+#endif
+}
+
 static void set_frame_period(void)
 {
     static uint32_t set;
@@ -585,7 +625,8 @@ static void set_frame_period(void)
     }
     /* The stopwatch runs at the ring rate while it counts -- its centiseconds
      * want frames -- and at the sleep rate while it stands still. */
-    const uint32_t want = (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
+    const uint32_t want = s_display_off                ? 1000
+                          : (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
                           : s_ring_shown               ? RING_FRAME_MS
                           : s_sw_shown                 ? (sw_running() ? RING_FRAME_MS : SLEEP_FRAME_MS)
                                                        : FRAME_MS;
@@ -1211,6 +1252,19 @@ void ui_set_clock(bool valid, int hh, int mm, int next_day, int next_hh, int nex
     s_next_mm = next_mm;
     s_clk_valid = valid;
 }
+
+int ui_brightness_pct(void)
+{
+    return s_bri_pct;
+}
+
+#if CONFIG_POWER_STATE_WALK
+void ui_bench_power(int brightness_pct, bool display_off)
+{
+    s_bench_bri = brightness_pct;
+    s_bench_display_off = display_off;
+}
+#endif
 
 void ui_show_stopwatch(void)
 {
@@ -2577,13 +2631,61 @@ static void apply_sleep(bool want)
     }
     if (want != s_asleep) {
         s_asleep = want;
+        s_asleep_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!want && s_display_off && s_panel != NULL) {
+            esp_lcd_panel_disp_on_off(s_panel, true);
+            s_display_off = false;
+        }
         set_frame_period();
+        pm_awake(!want);
     }
     /* Also when only the dimming changed: a cell that turns critical while the
      * panel already sleeps dims it, and the charger un-dims it. */
     s_dimmed = dim;
-    bsp_display_brightness_set(dim ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
+    s_bri_pct = dim ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT;
+    bsp_display_brightness_set(s_bri_pct);
     ESP_LOGI(TAG, "EVT %s%s", want ? "sleep" : "wake", dim ? " dim" : "");
+}
+
+/*
+ * THE LONGER IT SLEEPS, THE LESS IT LIGHTS. The orb clock comes up at full
+ * brightness, to be read across a room; past CONFIG_UI_SLEEP_DIM_AFTER_MIN
+ * nobody has looked for a while, and it dims to CONFIG_UI_SLEEP_DIM_PCT.
+ * Past CONFIG_UI_SLEEP_OFF_AFTER_MIN (0, never, by default) the panel goes
+ * off altogether. An AMOLED's draw is its lit pixels times the brightness, and
+ * this is where the device spends its life. A touch, a session or an alarm
+ * wakes it all back up. Not over the battery-critical dim, which is lower.
+ */
+static void sleep_deepens(uint32_t now)
+{
+    if (!s_asleep || s_dimmed) {
+        return;
+    }
+#if CONFIG_POWER_STATE_WALK
+    if (s_bench_bri >= 0 || s_bench_display_off) {
+        return;   /* the walk is pricing brightness itself */
+    }
+#endif
+    const uint32_t mins = (now - s_asleep_ms) / 60000;
+#if CONFIG_UI_SLEEP_OFF_AFTER_MIN > 0
+    if (mins >= CONFIG_UI_SLEEP_OFF_AFTER_MIN && !s_display_off && s_panel != NULL) {
+        esp_lcd_panel_disp_on_off(s_panel, false);
+        s_display_off = true;
+        s_bri_pct = 0;
+        set_frame_period();
+        ESP_LOGI(TAG, "EVT sleep display off");
+        return;
+    }
+#endif
+#if CONFIG_UI_SLEEP_DIM_AFTER_MIN > 0
+    if (mins >= CONFIG_UI_SLEEP_DIM_AFTER_MIN && !s_display_off &&
+        s_bri_pct != CONFIG_UI_SLEEP_DIM_PCT) {
+        s_bri_pct = CONFIG_UI_SLEEP_DIM_PCT;
+        bsp_display_brightness_set(s_bri_pct);
+        ESP_LOGI(TAG, "EVT sleep dim %d%%", s_bri_pct);
+    }
+#endif
+    (void)mins;
 }
 
 static void frame_timer_cb(lv_timer_t *timer)
@@ -2593,6 +2695,31 @@ static void frame_timer_cb(lv_timer_t *timer)
 
     /* Before anything draws, like the face and colour switches below. */
     apply_sleep(s_sleep_want);
+    sleep_deepens((uint32_t)(esp_timer_get_time() / 1000));
+    if (s_display_off) {
+        /* Nothing to draw on a blank panel; a press turns it back on. */
+        tlm_accumulate_frame(esp_timer_get_time());
+        return;
+    }
+#if CONFIG_POWER_STATE_WALK
+    {
+        /* The power walk's overrides, on the task that owns the panel's bus. */
+        static int bri_applied = -1;
+        static bool off_applied;
+        const int bri = s_bench_bri;
+        if (bri != bri_applied) {
+            bri_applied = bri;
+            s_bri_pct = bri >= 0 ? bri : (s_dimmed ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
+            bsp_display_brightness_set(s_bri_pct);
+        }
+        const bool off = s_bench_display_off;
+        if (off != off_applied && s_panel != NULL) {
+            off_applied = off;
+            esp_lcd_panel_disp_on_off(s_panel, !off);
+            s_bri_pct = off ? 0 : s_bri_pct;
+        }
+    }
+#endif
 
     int64_t draw_start_us = esp_timer_get_time();
     bool idle = ((uint32_t)(draw_start_us / 1000) - s_last_feed_ms) > IDLE_MS;
@@ -3174,6 +3301,7 @@ static lv_display_t *display_start(void)
     if (bsp_display_new(&panel_cfg, &panel, &panel_io) != ESP_OK) {
         return NULL;
     }
+    s_panel = panel;
 
     esp_lv_adapter_display_config_t disp_cfg = {
         .panel = panel,
@@ -3449,6 +3577,7 @@ static esp_err_t build_ui(void)
     apply_tint();
 
     ui_panel_init(canvas_obj);
+    pm_awake(true);   /* the panel starts awake */
     s_clock_ok = ui_clock_init(canvas_obj);
     ui_ring_init(canvas_obj);
 #if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \

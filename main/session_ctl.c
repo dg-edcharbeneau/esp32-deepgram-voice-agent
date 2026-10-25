@@ -3,11 +3,13 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "ui.h"
+#include "wifi_sta.h"
 
 static const char *TAG = "session_ctl";
 
@@ -154,6 +156,33 @@ bool session_ctl_is_running(void)
     return s_running;
 }
 
+/*
+ * A live session holds the CPU at full speed (CONFIG_PM_ENABLE): echo
+ * cancellation, noise suppression and the uplink run on a 64 ms budget that was
+ * measured at 240 MHz. With no session, main.c's power management may let the
+ * clock drop while the panel sleeps.
+ */
+static void pm_session(bool hold)
+{
+#if CONFIG_PM_ENABLE
+    static esp_pm_lock_handle_t lock;
+    static bool held;
+    if (lock == NULL && esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "session", &lock) != ESP_OK) {
+        return;
+    }
+    if (hold != held) {
+        held = hold;
+        if (hold) {
+            esp_pm_lock_acquire(lock);
+        } else {
+            esp_pm_lock_release(lock);
+        }
+    }
+#else
+    (void)hold;
+#endif
+}
+
 static void do_stop(void)
 {
     if (!s_running) {
@@ -187,6 +216,7 @@ static void do_stop(void)
     audio_io_reset();
 
     s_running = false;
+    pm_session(false);
     ui_set_stopped(true);
     /*
      * "saved" is the only sign, while the device is quiet, that there is still
@@ -225,12 +255,21 @@ static void do_start(void)
      * conversation outlived whatever just happened, before a word is spoken. */
     ui_set_status(dg_agent_has_history() ? "resuming" : "connecting", false);
 
+    /* Full CPU speed for the session's audio before anything of it starts. */
+    pm_session(true);
+
+    /* The radio at full attention before the first packet: asleep it may be in
+     * maximum modem sleep, sleeping through beacons, and main.c's loop -- which
+     * owns the policy -- would only notice a second later. */
+    wifi_sta_set_power_save_mode(WIFI_STA_PS_NONE);
+
     esp_err_t err = dg_agent_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "start failed: %s", esp_err_to_name(err));
         s_start_failed = true;
         ui_set_stopped(true);
         ui_set_status("error", false);
+        pm_session(false);
         return;
     }
 

@@ -155,6 +155,10 @@ bool audio_io_chime_active(void);
  * echo canceller and the display tap carry on. Safe from any task. */
 void audio_io_uplink_hold(bool hold);
 
+/* BENCH AID (CONFIG_POWER_STATE_WALK): the speaker codec and its amplifier off
+ * and back on, for the power walk. Only with nothing playing. */
+void audio_io_bench_speaker(bool on);
+
 /*
  * Tell the playback path that the incoming byte stream has broken.
  *

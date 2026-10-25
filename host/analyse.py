@@ -7,6 +7,13 @@ each behaviour is ever visible, what the frame rate is per behaviour, and whethe
 the session and internal RAM held up.
 
     ./analyse.py /tmp/runA.log
+    ./analyse.py --power /tmp/walk.log
+
+--power reports instead where the time went by power state (asleep,
+brightness, radio power save, session), each CONFIG_POWER_STATE_WALK step's
+conditions, and -- for a capture taken on battery -- how fast the cell's
+voltage fell, the one on-device proxy for draw (the AXP2101 has no current
+reading).
 """
 import re, sys
 from collections import defaultdict
@@ -202,9 +209,88 @@ def report_health(tlm, evt, faults):
     if len(faults) > 8:
         print(f"    ... and {len(faults) - 8} more")
 
+# --- power -------------------------------------------------------------------
+
+PS_NAME = {0: 'none', 1: 'min modem', 2: 'max modem', -1: '?'}
+
+def report_power(path):
+    """Time per power state, the walk's steps, and the cell's voltage slope."""
+    rows, steps, step = [], [], None
+    for line in open(path, 'rb').read().decode('utf-8', 'replace').splitlines():
+        m = re.search(r'EVT power step (\d+) (.*?) -- read the meter', line)
+        if m:
+            step = {'n': int(m.group(1)), 'name': m.group(2), 'rows': []}
+            steps.append(step)
+            continue
+        if 'EVT power walk done' in line:
+            step = None
+            continue
+        if 'TLM ' not in line:
+            continue
+        row = {}
+        for tok in line.split('TLM ', 1)[1].split():
+            if '=' in tok:
+                k, v = tok.split('=', 1)
+                row[k] = v
+        if 'slp' not in row:
+            continue   # a build from before the power fields
+        rows.append(row)
+        if step is not None:
+            step['rows'].append(row)
+
+    print(f"\npower: {len(rows)} TLM samples with power fields")
+    if not rows:
+        print("  (none: flash a build with the slp/bri/ps fields)")
+        return
+
+    by = defaultdict(list)
+    for r in rows:
+        key = (r.get('sess', '?'), num(r, 'slp', int), num(r, 'bri', int), num(r, 'ps', int))
+        by[key].append(r)
+    print("  seconds  session    asleep  bright  radio ps     fps   draw avg")
+    for (sess, slp, bri, ps), rs in sorted(by.items(), key=lambda kv: -len(kv[1])):
+        fps = sum(num(r, 'fps') for r in rs) / len(rs)
+        draw = sum(pair(r, 'draw')[0] for r in rs) / len(rs)
+        print(f"  {len(rs):7d}  {sess:9s}  {slp:6d}  {bri:5d}%  {PS_NAME.get(ps, ps):10s}"
+              f"  {fps:5.1f}  {draw:6.1f} ms")
+
+    if steps:
+        print("\n  walk steps (read the meter's average over each):")
+        for st in steps:
+            rs = st['rows']
+            if not rs:
+                print(f"    {st['n']}. {st['name']}: no samples")
+                continue
+            vb = {num(r, 'vbus', int) for r in rs}
+            cs = {num(r, 'chgst', int) for r in rs}
+            ok = vb == {1} and cs == {4}
+            print(f"    {st['n']}. {st['name']:38s} {len(rs):3d} s  bri={rs[-1].get('bri')}"
+                  f" ps={PS_NAME.get(num(rs[-1], 'ps', int))}"
+                  f"  {'cell full on USB' if ok else 'NOT full on USB: meter reads charging too'}")
+
+    # On battery: the voltage slope, by least squares over the discharging rows.
+    pts = [(num(r, 'up'), num(r, 'mv')) for r in rows
+           if num(r, 'vbus', int) == 0 and num(r, 'mv') > 0]
+    if len(pts) >= 600:
+        n = len(pts)
+        mx = sum(p[0] for p in pts) / n
+        my = sum(p[1] for p in pts) / n
+        sxx = sum((p[0] - mx) ** 2 for p in pts)
+        sxy = sum((p[0] - mx) * (p[1] - my) for p in pts)
+        slope = sxy / sxx * 3600 if sxx else 0
+        print(f"\n  on battery: {n} s, cell {pts[0][1]:.0f} -> {pts[-1][1]:.0f} mV,"
+              f" {slope:+.1f} mV/hour (least squares)")
+    elif pts:
+        print(f"\n  on battery: only {len(pts)} s -- too short for a slope (needs 10 min)")
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == '--power':
+        if len(sys.argv) < 3:
+            sys.exit(__doc__)
+        report_power(sys.argv[2])
+        return
     tlm, evt, faults = parse(sys.argv[1])
     print(f"parsed {len(tlm)} TLM samples, {len(evt)} events, {len(faults)} faults")
     if tlm:

@@ -211,6 +211,13 @@ void ui_set_ring(const ui_ring_t *ring);
  * task: applied by the frame timer. */
 void ui_show_stopwatch(void);
 
+/* The panel brightness last set, 0 with the panel off, for the TLM line. */
+int ui_brightness_pct(void);
+
+/* BENCH AID (CONFIG_POWER_STATE_WALK): override the brightness (-1 none) and
+ * switch the panel off, so the power walk can price each. Safe from any task. */
+void ui_bench_power(int brightness_pct, bool display_off);
+
 /* The stopwatch screen is up and counting: main.c holds sleep off for it. */
 bool ui_stopwatch_holds_awake(void);
 
