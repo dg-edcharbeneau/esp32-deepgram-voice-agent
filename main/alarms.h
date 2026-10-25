@@ -37,6 +37,8 @@
 
 #include "cJSON.h"
 
+#include "alarm_sched.h"
+
 /* Load the saved table. Call after nvs_flash_init(). No-op when CONFIG_CLOCK is
  * off. Nothing is scheduled until alarms_tick() first sees a valid clock. */
 void alarms_init(void);
@@ -44,13 +46,18 @@ void alarms_init(void);
 /* Main loop, once per pass. */
 void alarms_tick(void);
 
-/* The chime phase is under way: the panel stays awake and a touch anywhere
- * dismisses rather than doing what it would normally do. */
+/* Something is ringing -- from the first chime until it is stopped or snoozed:
+ * the panel stays awake and shows the ring screen. */
 bool alarms_ringing(void);
 
-/* Stop the chime. The announcement still follows -- it is how the user learns
- * which alarm it was. Safe from any task. */
+/* Stop it. If the agent has not yet said what it was, it still does, once --
+ * that is how the user learns which alarm it was. Safe from any task. */
 void alarms_dismiss(void);
+
+/* Snooze the ringing alarm for `minutes` (clamped to ALARM_SNOOZE_MAX_MIN): it
+ * goes quiet, and a one-shot copy rings that many minutes on. Timers do not
+ * snooze; a full table refuses and it keeps ringing. Safe from any task. */
+void alarms_snooze(int minutes);
 
 /* Pending entries, for the TLM line. */
 int alarms_count(void);
@@ -58,6 +65,27 @@ int alarms_count(void);
 /* The soonest pending alarm's instant, or false if there is none with a known
  * wall-clock time. For the face. */
 bool alarms_next(int64_t *epoch);
+
+/*
+ * One pending entry as the touch panel shows it, already formatted: the panel
+ * draws strings and does no calendar arithmetic of its own.
+ */
+typedef struct {
+    uint8_t id;
+    bool timer;
+    int64_t secs_left;           /* timers only; counted from the snapshot */
+    char time[12];               /* alarms: "7:30 AM" / "07:30", per clock_12h() */
+    char when[28];               /* alarms: "today", "tomorrow", "weekdays", ... */
+    char label[ALARM_LABEL_MAX];
+} alarm_view_t;
+
+/* Up to `max` pending entries, soonest first. Returns how many. Safe from any
+ * task; holds the table's lock for a copy. */
+int alarms_snapshot(alarm_view_t *out, int max);
+
+/* Cancel one entry by id, as the alarms tool does. True if it existed. The
+ * table is saved by the next alarms_tick(), not here. Safe from any task. */
+bool alarms_cancel_id(uint8_t id);
 
 /*
  * Agent tools. Each writes a phrasing instruction for the model into `out`.
@@ -68,3 +96,6 @@ void alarms_fn_set_timer(const cJSON *args, char *out, size_t n);
 void alarms_fn_set_alarm(const cJSON *args, char *out, size_t n);
 void alarms_fn_list(char *out, size_t n);
 void alarms_fn_cancel(const cJSON *args, char *out, size_t n);
+/* The stopwatch rides on the alarms tool: `stopwatch` is start, pause, lap,
+ * reset or read. A start or a lap brings its screen up. */
+void alarms_fn_stopwatch(const cJSON *args, char *out, size_t n);

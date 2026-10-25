@@ -488,6 +488,11 @@ void clock_fn_get_time(char *out, size_t n)
              hm, WDAY[lt.tm_wday], MONTH[lt.tm_mon], lt.tm_mday, lt.tm_year + 1900, zone);
 }
 
+void clock_set_12h(bool h12)
+{
+    s_fmt_pending = h12 ? FMT_12 : FMT_24;
+}
+
 /*
  * Either argument or both. Both are checked before either is applied, so a good
  * zone beside a bad format changes nothing -- the model is told what was wrong
@@ -524,7 +529,7 @@ void clock_fn_set_clock(const cJSON *args, char *out, size_t n)
         portEXIT_CRITICAL(&s_tz_lock);
     }
     if (has_hours) {
-        s_fmt_pending = (hours->valueint == 12) ? FMT_12 : FMT_24;
+        clock_set_12h(hours->valueint == 12);
     }
 
     if (has_zone && has_hours) {
@@ -552,6 +557,7 @@ bool clock_now(int64_t *epoch, struct tm *local)
 clock_source_t clock_source(void) { return CLOCK_SRC_NONE; }
 uint32_t clock_tz_generation(void) { return 0; }
 bool clock_12h(void) { return false; }
+void clock_set_12h(bool h12) { (void)h12; }
 void clock_lock(void) {}
 void clock_unlock(void) {}
 bool clock_tz_saved(char *out, size_t cap)

@@ -634,6 +634,76 @@ menu "Deepgram Agent Device"
             log volume for long unattended runs; note that a window shorter than a
             frame period will report frames=0.
 
+    config UI_SCREENSHOT_TOUR
+        bool "Capture every orb state over serial (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, runs the display
+            test on its own -- every orb state, then frozen -- and prints three
+            captures of the screen per step over the serial console, 1.5, 2.5
+            and 3.5 s into it. host/shot2png.py turns the log into PNGs.
+
+            What is captured is the face's canvas: LVGL labels on top of it,
+            such as the status word, are not in the images. The microphone is
+            live throughout (monitor mode), so the states that respond to sound
+            show the room as it was. Costs 434 kB of PSRAM for the copy.
+
+    config UI_CLOCK_PREVIEW
+        bool "Orb clock preview (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, shows the orb
+            clock -- the sleeping panel's face -- in four set states for 3 s
+            each, whether or not the device is asleep or the time is known:
+            the mockup's own 2:38 PM in white, the same in purple, 9:05 AM with
+            an alarm set and a low battery, and 21:52 in 24-hour while
+            charging. Prints two captures of each over serial, a second apart;
+            host/shot2png.py turns the log into PNGs. Then the face carries on
+            as normal. Costs 434 kB of PSRAM for the capture copy.
+
+    config UI_RING_SELFTEST
+        bool "Ring screen self-test (bench only)"
+        depends on CLOCK
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Sets a real "Tea timer" 25 s after boot
+            and a real "Wake up" alarm 90 s after the clock is known, then
+            drives the ring screen through the same hit tests a finger uses:
+            the timer is left to cycle (chime, announcement, chime) and stopped
+            after 40 s; the alarm is snoozed three minutes with three taps,
+            rings again, and is stopped. Prints captures of each step over
+            serial for host/shot2png.py. Costs 434 kB of PSRAM for the copy.
+
+    config UI_STOPWATCH_SELFTEST
+        bool "Stopwatch screen self-test (bench only)"
+        depends on CLOCK
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, opens the
+            stopwatch screen and presses its buttons through the same hit test
+            a finger uses -- play, lap, pause, reset -- printing captures of it
+            ready, running, running with a lap, and paused over serial for
+            host/shot2png.py. Then hands back to the face. Costs 434 kB of
+            PSRAM for the capture copy.
+
+    config UI_PANEL_SELFTEST
+        bool "Touch panel self-test (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds into the first live session,
+            drives the touch panel through every page and control -- volume and
+            mic gain up and down, three colours, noise reduction and the clock
+            format there and back, the alarm page's buttons -- through the same
+            hit tests a finger uses, 1.5 s apart, then closes it. Everything it
+            changes it puts back; an alarm's cancel is only armed, never
+            confirmed.
+
+            It exists so the panel's draw time ("EVT panel draw"), its effect on
+            internal RAM (TLM int=/intmax=/dma=) and every action ("EVT ctl")
+            can be read off the serial log with nobody touching the board. Every
+            repaint is also printed as a screen capture, for host/shot2png.py
+            (434 kB of PSRAM for the copy).
+
     config UI_SHOW_INDICATORS
         bool "Draw the touch target and what a tap will do"
         default n
@@ -683,8 +753,10 @@ menu "Deepgram Agent Device"
         prompt "Default orb colour"
         default UI_DEFAULT_ORB_COLOR_WHITE
         help
-            What colour the orb's dots boot as. Any of these can be asked for at
-            runtime ("change the colour to teal"), so this only picks the default.
+            What colour the orb's dots boot as until one is chosen. Any of these
+            can be asked for at runtime ("change the colour to teal") or picked
+            on the touch panel, and the last one chosen is saved and booted in
+            from then on, so this only picks the out-of-box look.
 
             Named colours rather than a raw hex on purpose: every colour the
             device can boot in is then also one the agent can be asked to return
@@ -790,9 +862,14 @@ menu "Deepgram Agent Device"
     config BATTERY_SHOW_DOTS
         bool "Show the charge dots on screen"
         depends on BATTERY
-        default y
+        default n
         help
-            Four dots following the display's outer curve from 1 to 2 o'clock,
+            OFF BY DEFAULT: the orb clock's status row shows the charge -- a
+            battery whose fill is the level, red when low, the percentage and
+            a bolt while charging -- whenever the device sleeps or the clock is
+            swiped up. These dots predate it and are kept as an option.
+
+            Four dots following the display's outer curve round 3 o'clock,
             each worth a quarter of the charge, filling clockwise. Dots still
             held go bright, spent ones go dim, so 50% reads as two bright then
             two dim. A bolt continues the arc past them while current is going
@@ -880,20 +957,21 @@ menu "Deepgram Agent Device"
             Off costs nothing: no code, no event handler.
 
     config WIFI_SIGNAL_SHOW_BARS
-        bool "Show the signal icon on screen"
+        bool "Show the weak-signal icon on screen"
         depends on WIFI_SIGNAL
         default y
         help
+            A WARNING ONLY: shown while the signal is weak (WIFI_SIGNAL_WEAK_DBM,
+            with wifi_sta.c's hysteresis), conversation or not, and not
+            otherwise. The orb clock's status row is where the signal is read
+            at rest, whenever the device sleeps or the clock is swiped up.
+
             The familiar wifi glyph -- a dot with three arcs fanning out above
-            it -- at 10 to 11 o'clock, balancing the battery dots across the
-            panel. Four elements for four bars: the dot alone is one, each arc
-            past it is one more, which is the progression every phone draws.
+            it -- at 9 o'clock. Four elements for four bars: the dot alone is
+            one, each arc past it is one more, which is the progression every
+            phone draws.
             Lit parts go bright, the rest go dim. It takes the orb's colour, so
             set_color moves it too.
-
-            Shown while the session is stopped, the display is asleep, or the
-            signal is weak. Not during a conversation: the face is the point
-            then, and a permanent gauge over it is clutter.
 
     config WIFI_SIGNAL_WEAK_DBM
         int "Weak-signal warning threshold (dBm)"
@@ -923,7 +1001,9 @@ menu "Deepgram Agent Device"
             voice or in the setup portal, and 12 or 24-hour time; four agent
             tools (get_time, set_clock, set_alarm, alarms); timers and alarms
             that chime, wake the panel and then have the agent say what they
-            were; and a large digital clock on the panel while it sleeps.
+            were; and the orb clock on the panel while it sleeps -- hour and
+            minute rings round a small turning orb, with the time, the next
+            alarm, Wi-Fi and battery.
 
             Off removes all of it, tools included -- a tool that can only ever
             answer "no clock" is worse than no tool.
@@ -961,15 +1041,27 @@ menu "Deepgram Agent Device"
             is saved and wins from then on.
 
     config ALARM_CHIME_S
-        int "Seconds an alarm chimes before the agent announces it"
+        int "Seconds of each chime while an alarm rings"
         depends on CLOCK
         default 8
         range 2 60
         help
-            The chime is local and needs no network, so it is what actually
-            gets someone's attention; the session that announces the alarm
-            opens only once it stops, because the microphone must not hear it.
-            A tap anywhere, or the BOOT button, stops it early.
+            A timer or alarm rings until it is stopped or snoozed: a chime this
+            long, the agent saying what it is, a chime again, and so on. The
+            chime is local and needs no network, so it is what actually gets
+            someone's attention. While it sounds into a live session the
+            microphone uplink is held, so the tone never reaches the agent as
+            speech. The ring screen's Stop button, or the BOOT button, stops it.
+
+    config ALARM_RING_MAX_S
+        int "Seconds a ring may sound before it falls silent (0 = never)"
+        depends on CLOCK
+        default 600
+        range 0 3600
+        help
+            After this long the chimes and announcements stop, but the ring
+            screen stays up, its overtime counting, until Stop or snooze. A
+            device left ringing in an empty room should not go on all day.
 
     config CLOCK_TEST_TIMER_S
         int "Bench aid: start a timer this many seconds after boot (0 = off)"

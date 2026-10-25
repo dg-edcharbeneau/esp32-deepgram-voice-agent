@@ -86,3 +86,12 @@ jobs:
       # during an alarm must never reach the 3-second forget-wi-fi hold.
       - name: BOOT button during an alarm
         run: ./host/button.sh
+
+      # Pure geometry over libm: every touch-panel control is hit where it is
+      # drawn, and the tile and mirror shortcuts its painter takes are exact.
+      - name: Touch panel geometry
+        run: ./host/panel.sh
+      # The orb clock lights the right dots for a time, its rings sit where the
+      # mockup puts them, and the meridian and the text fade behave.
+      - name: Orb clock geometry
+        run: ./host/clock.sh

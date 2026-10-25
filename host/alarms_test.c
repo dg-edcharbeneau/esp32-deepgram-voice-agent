@@ -291,6 +291,160 @@ static void table(void)
           !tz_default_12h("EST5EDT,M3.2.0,M11.1.0"));
 }
 
+/*
+ * A snooze is a one-shot alarm `n` minutes on, to the second, labelled as the
+ * alarm that rang -- including across midnight and across the spring-forward
+ * gap, where hh:mm must be the wall time that instant really has.
+ */
+static void snooze(void)
+{
+    use_tz("CST6CDT,M3.2.0,M11.1.0");
+    alarm_entry_t rang = {.id = 3, .kind = ALARM_WEEKLY, .hh = 7, .mm = 30, .dow_mask = 0x3E};
+    strcpy(rang.label, "Wake up");
+    alarm_entry_t e;
+
+    /* 7:30:20 CDT on Wed 15 Apr 2026 is 12:30:20 UTC. */
+    const int64_t now = utc(2026, 4, 15, 12, 30) + 20;
+    check("snooze: 3 min is a one-shot at 7:33, to the second",
+          alarm_snooze_entry(&rang, now, 3, &e) && e.kind == ALARM_ONCE && e.hh == 7 &&
+              e.mm == 33 && e.fire_epoch == now + 180 && e.dow_mask == 0 && e.id == 0);
+    check("snooze: keeps the alarm's label", strcmp(e.label, "Wake up") == 0);
+
+    /* 23:59 CDT -> 00:01 the next day. */
+    const int64_t late = utc(2026, 4, 16, 4, 59);
+    check("snooze: across midnight reads 0:01",
+          alarm_snooze_entry(&rang, late, 2, &e) && e.hh == 0 && e.mm == 1);
+
+    /* 1:59 CST on 8 Mar is 07:59 UTC; 2 min later the clocks read 3:01 CDT. */
+    const int64_t gap = utc(2026, 3, 8, 7, 59);
+    check("snooze: across the spring-forward gap reads 3:01",
+          alarm_snooze_entry(&rang, gap, 2, &e) && e.hh == 3 && e.mm == 1);
+
+    alarm_entry_t timer = {.kind = ALARM_TIMER};
+    check("snooze: a timer cannot", !alarm_snooze_entry(&timer, now, 3, &e));
+    check("snooze: 0 and past the max are refused",
+          !alarm_snooze_entry(&rang, now, 0, &e) &&
+              !alarm_snooze_entry(&rang, now, ALARM_SNOOZE_MAX_MIN + 1, &e));
+    check("snooze: the max itself is allowed",
+          alarm_snooze_entry(&rang, now, ALARM_SNOOZE_MAX_MIN, &e));
+}
+
+/* Steps a ring at 100 ms until `until`, the speaker as `play` says. */
+static unsigned run(alarm_ring_t *r, const alarm_ring_cfg_t *c, uint32_t *t, uint32_t until,
+                    bool (*play)(uint32_t))
+{
+    unsigned acts = 0;
+    for (; *t < until; *t += 100) {
+        acts |= alarm_ring_step(r, c, *t, play ? play(*t) : false, false, false);
+    }
+    return acts;
+}
+
+/* The agent talks from 3 s to 6 s into each announcement it is asked for. */
+static uint32_t s_speak_at;
+static bool talking(uint32_t t)
+{
+    return s_speak_at != 0 && t >= s_speak_at + 3000 && t < s_speak_at + 6000;
+}
+
+static void ring(void)
+{
+    s_tz = "";
+    const alarm_ring_cfg_t c = {.chime_ms = 8000, .drain_max_ms = 3000, .speak_max_ms = 30000,
+                                .quiet_ms = 1000, .cap_ms = 600000};
+    alarm_ring_t r;
+    uint32_t t = 1000;
+    unsigned a;
+
+    /* Stopped: it chimes first, holding the microphone. */
+    a = alarm_ring_begin(&r, t, false);
+    check("ring: stopped session chimes first, uplink held",
+          r.phase == ALARM_RING_CHIME && (a & ALARM_RING_CHIME_ON) && (a & ALARM_RING_HOLD_ON));
+    a = run(&r, &c, &t, 1000 + 7900, NULL);
+    check("ring: still chiming at 7.9 s", r.phase == ALARM_RING_CHIME && a == 0);
+    a = run(&r, &c, &t, 1000 + 8100, NULL);
+    check("ring: chime stops at 8 s", r.phase != ALARM_RING_CHIME && (a & ALARM_RING_CHIME_OFF));
+    a = run(&r, &c, &t, t + 200, NULL);
+    check("ring: a silent speaker goes straight to the announcement",
+          r.phase == ALARM_RING_SPEAK && (a & ALARM_RING_ANNOUNCE) && (a & ALARM_RING_HOLD_OFF));
+    s_speak_at = r.phase_ms;
+    a = run(&r, &c, &t, s_speak_at + 6900, talking);
+    check("ring: waits while the agent speaks, and a beat after", r.phase == ALARM_RING_SPEAK);
+    a = run(&r, &c, &t, s_speak_at + 7200, talking);
+    check("ring: then chimes again, uplink held again",
+          r.phase == ALARM_RING_CHIME && (a & ALARM_RING_CHIME_ON) && (a & ALARM_RING_HOLD_ON));
+
+    /* Stop after an announcement: it simply ends. */
+    a = alarm_ring_step(&r, &c, t, false, true, false);
+    check("ring: stop after an announcement ends it at once",
+          r.phase == ALARM_RING_IDLE && (a & ALARM_RING_ENDED) && (a & ALARM_RING_CHIME_OFF) &&
+              !(a & ALARM_RING_ANNOUNCE));
+    check("ring: idle stays idle", alarm_ring_step(&r, &c, t + 100, false, true, true) == 0);
+
+    /* Stop during the first chime: the old contract, announced once, then over. */
+    t = 50000;
+    s_speak_at = 0;
+    alarm_ring_begin(&r, t, false);
+    run(&r, &c, &t, t + 2000, NULL);
+    a = alarm_ring_step(&r, &c, t, false, true, false);
+    check("ring: stop in the first chime silences it", r.phase == ALARM_RING_DRAIN &&
+                                                           (a & ALARM_RING_CHIME_OFF));
+    a = run(&r, &c, &t, t + 200, NULL);
+    check("ring: ... and still announces, once", r.phase == ALARM_RING_SPEAK &&
+                                                     (a & ALARM_RING_ANNOUNCE));
+    s_speak_at = r.phase_ms;
+    a = run(&r, &c, &t, s_speak_at + 8000, talking);
+    check("ring: ... then ends instead of chiming", r.phase == ALARM_RING_IDLE &&
+                                                        (a & ALARM_RING_ENDED) &&
+                                                        !(a & ALARM_RING_CHIME_ON));
+
+    /* No network: an announcement nobody speaks gives up at its timeout. */
+    t = 100000;
+    alarm_ring_begin(&r, t, false);
+    run(&r, &c, &t, t + 8300, NULL);
+    const uint32_t spoke = r.phase_ms;
+    a = run(&r, &c, &t, spoke + 29900, NULL);
+    check("ring: unspoken announcement waits out its timeout", r.phase == ALARM_RING_SPEAK);
+    a = run(&r, &c, &t, spoke + 30200, NULL);
+    check("ring: ... then chimes again", r.phase == ALARM_RING_CHIME);
+
+    /* A live session hears it first, then chimes. */
+    t = 200000;
+    a = alarm_ring_begin(&r, t, true);
+    check("ring: live session announces first, no chime",
+          r.phase == ALARM_RING_SPEAK && (a & ALARM_RING_ANNOUNCE) && !(a & ALARM_RING_CHIME_ON));
+
+    /* Snooze from each phase ends it with nothing said. */
+    const alarm_ring_phase_t phases[] = {ALARM_RING_CHIME, ALARM_RING_DRAIN, ALARM_RING_SPEAK};
+    int quiet = 1;
+    for (size_t k = 0; k < 3; k++) {
+        alarm_ring_begin(&r, 300000, false);
+        r.phase = phases[k];
+        a = alarm_ring_step(&r, &c, 300100, false, false, true);
+        quiet &= r.phase == ALARM_RING_IDLE && (a & ALARM_RING_ENDED) &&
+                 !(a & ALARM_RING_ANNOUNCE) && (a & ALARM_RING_HOLD_OFF);
+    }
+    check("ring: snooze from chime, drain or speech ends it quietly", quiet);
+
+    /* Ten minutes on, it falls silent and stays up until acted on. */
+    t = 400000;
+    s_speak_at = 0;
+    alarm_ring_begin(&r, t, false);
+    a = run(&r, &c, &t, 400000 + 600000 + 100, NULL);
+    check("ring: silent after the cap, screen still up",
+          r.phase == ALARM_RING_SILENT && !(a & ALARM_RING_ENDED));
+    a = run(&r, &c, &t, t + 60000, NULL);
+    check("ring: and stays silent", r.phase == ALARM_RING_SILENT && a == 0);
+    a = alarm_ring_step(&r, &c, t, false, true, false);
+    check("ring: stop from silence ends it", r.phase == ALARM_RING_IDLE && (a & ALARM_RING_ENDED));
+
+    /* Across the 32-bit millisecond wrap. */
+    t = 0xFFFFF000u;
+    alarm_ring_begin(&r, t, false);
+    run(&r, &c, &t, 0xFFFFF000u + 4000, NULL);   /* wraps through zero */
+    check("ring: the ms wrap does not end a chime early", r.phase == ALARM_RING_CHIME);
+}
+
 int main(void)
 {
     chicago("America/Chicago");
@@ -301,6 +455,8 @@ int main(void)
     missed();
     parsing();
     table();
+    snooze();
+    ring();
     if (failures) {
         printf("\n%d check(s) FAILED\n", failures);
         return 1;

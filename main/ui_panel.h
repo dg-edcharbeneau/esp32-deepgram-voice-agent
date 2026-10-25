@@ -1,0 +1,81 @@
+#pragma once
+
+/*
+ * The touch panel: a pull-down set of pages for settings that otherwise change
+ * only by voice -- sound (mic gain, volume), the orb's colour, two toggles
+ * (noise reduction, 12/24-hour) and pending timers and alarms. Nothing here is a
+ * new feature; see controls.h.
+ *
+ * Internal to the UI: ui.c owns the canvas, the touch events and the frame
+ * timer, and calls these on the LVGL task with the LVGL lock held. Swipe down
+ * from the top edge to open; sideways to change page; up, or 8 s untouched, to
+ * close. While open the panel owns the whole screen and the centre button means
+ * nothing.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "lvgl.h"
+
+#include "panel_geom.h"
+
+void ui_panel_init(lv_obj_t *canvas);
+
+bool ui_panel_is_open(void);
+
+/* The current page, or -1 when closed. For the TLM line. */
+int ui_panel_page(void);
+
+/*
+ * Touch, in the order LVGL delivers it. pressed() returns true when the panel is
+ * open and the press is its own; released() returns true when the whole gesture
+ * was the panel's (including the drag that opened it), so ui.c must not also
+ * treat it as a tap or hold on the centre button. `can_open` is ui.c's say on
+ * whether anything else owns the screen (QR code, display test, alarm).
+ */
+bool ui_panel_pressed(int32_t x, int32_t y, bool can_open);
+void ui_panel_pressing(int32_t x, int32_t y);
+bool ui_panel_released(bool lost);
+
+/* Close now, e.g. for an alarm or for sleep. No-op when closed. */
+void ui_panel_close(const char *why);
+
+/*
+ * Once per frame, always -- the deferred save runs from here even while the
+ * panel is closed. Returns true when the panel owns this frame, in which case
+ * ui.c draws nothing else. `tint_rgb` is the orb colour in force; `session_live`
+ * only paces the self-test (CONFIG_UI_PANEL_SELFTEST).
+ */
+bool ui_panel_frame(uint32_t now_ms, uint32_t tint_rgb, bool session_live);
+
+/*
+ * THE KIT: what the ring screen (ui_ring.c) borrows to paint the same canvas in
+ * the same visual language -- the panel's shapes from its precomputed masks,
+ * its stroked icons, and its palette in the orb's colour. LVGL task only.
+ */
+typedef enum {
+    UI_ICON_MIC, UI_ICON_SPEAKER_HI, UI_ICON_SPEAKER_LO, UI_ICON_PLUS, UI_ICON_MINUS,
+    UI_ICON_X, UI_ICON_LEFT, UI_ICON_RIGHT, UI_ICON_CHECK, UI_ICON_WAVE, UI_ICON_CLOCK,
+    UI_ICON_BELL_OFF, UI_ICON_ALARM,
+    /* The stopwatch's, smaller: about 18 px, for its 50 px round buttons. */
+    UI_ICON_RESET, UI_ICON_FLAG, UI_ICON_PLAY, UI_ICON_PAUSE,
+} ui_icon_t;
+
+typedef struct {
+    uint32_t primary, primary_ink;   /* a white button and the ink on it */
+    uint32_t secondary;              /* a dark button; its ink is `text` */
+    uint32_t text, hint;             /* white and grey text on black */
+} ui_panel_palette_t;
+
+void ui_panel_kit_palette(uint32_t tint, ui_panel_palette_t *out);
+
+/* The masks are built in the background at boot; until then a fill draws
+ * nothing. */
+bool ui_panel_kit_ready(void);
+
+/* Fill one of panel_geom's shapes into the canvas pixels. */
+void ui_panel_kit_fill(uint16_t *px, uint32_t stride_px, panel_seg_t seg, uint32_t rgb);
+
+/* A stroked icon, about 28 px across, centred on (x, y). */
+void ui_panel_kit_icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_t y);

@@ -6,6 +6,85 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-24
+
+Experimental pre-release. Verified on one bench board through screen captures
+and bench self-tests; the stopwatch's gestures and the touch panel's swipe down
+from the clock have not yet been tried by a finger.
+
+### Added
+
+- **A touch panel for settings that were voice-only.** Swipe down from the top
+  edge: four pages, swiped sideways -- Sound (mic gain and volume as linked +/-
+  pairs with a level meter between them), Colour
+  (the 13 orb colours on a clock face), Toggles (noise reduction, 12/24-hour)
+  and Timers & alarms (the soonest first, cancel in two taps). Nothing is new
+  behaviour: each control calls what the voice tool or the BOOT button already
+  did, and the agent needs no reload. The session carries on underneath; the
+  panel closes on a swipe up, 8 s untouched, or for an alarm. The drag must
+  start on the top edge, so it can never touch the centre button. Volume and
+  mic gain apply at once and are saved 2 s after the last press, off the LVGL
+  task. Painted into the face's canvas from precomputed shape masks rather than
+  LVGL widgets: 10-60 ms a repaint, and no change to internal RAM measured on
+  the board. `host/panel.sh` checks the geometry; `CONFIG_UI_PANEL_SELFTEST`
+  (bench only) drives every control for the log. `panel=` joins the TLM line.
+- **Screen captures of every orb state.** `CONFIG_UI_SCREENSHOT_TOUR` (bench
+  only) runs the display test on its own and prints three captures per step
+  over serial; `host/shot2png.py` turns the log into PNGs and a contact sheet.
+- **A stopwatch**, after Ed's "Orb stopwatch" design, built on the orb clock:
+  the minute ring counts seconds, the time shows centiseconds, the latest lap
+  sits under it, and the sphere spins while it runs. Swipe sideways on the orb
+  clock to get there and back, or say "start a stopwatch"; two round buttons
+  play/pause and lap/reset. It runs on in the background, holds the panel
+  awake while it counts on screen, and rides on the `alarms` tool (a
+  `stopwatch` argument) rather than a fifth tool. A press on the clock is now
+  decided on release: a tap puts the face back, a sideways swipe brings the
+  stopwatch.
+- **Timers and alarms ring until stopped, on a ring screen of their own,
+  and alarms snooze.** After Ed's "Timer alarm" design: a small dotted orb
+  with rings pulsing out of it, the label, and the overtime counting up
+  (`TIME'S UP · +5:11`, or the alarm's time). A timer gets one big Stop; an
+  alarm a Stop quarter beside a "+1 min" snooze quarter -- each tap adds a
+  minute, the button goes solid then fades over 1.5 s, and the snooze commits
+  at the dark end. It now rings until stopped or snoozed: an 8 s chime, the
+  agent saying what it is, a chime again, falling silent after 10 minutes
+  (`CONFIG_ALARM_RING_MAX_S`) with the screen still up. The microphone uplink
+  is held while it chimes into a live session. Stop before the agent has said
+  it still gets it said once; a press elsewhere on the ring screen does
+  nothing, where any press used to dismiss. `host/alarms.sh` walks the ring
+  cycle and the snooze arithmetic; `CONFIG_UI_RING_SELFTEST` (bench only)
+  drives the screen and captures it.
+- **The orb clock replaces the sleep clock.** While the device sleeps and the
+  time is known, the panel shows Ed's "Orb clock" design: a small dotted orb
+  turning in the middle with a meridian sweeping it, hour and minute rings of
+  dots lit up to the time (the current one large and pulsing), the time with
+  AM/PM and the next alarm, and Wi-Fi and battery across the top. It takes the
+  orb colour; on white it is the mockup exactly. Painted into the canvas from
+  `main/clock_face.c`, which `host/clock.sh` checks; still 5 fps. Against
+  burn-in the whole clock drifts a few pixels, continuously and too slowly to
+  see, where the old one jumped a step a minute.
+  `CONFIG_UI_CLOCK_PREVIEW` (bench only) shows it in four set states for
+  captures.
+- **The battery dots at the panel's edge are off by default, and the Wi-Fi
+  glyph only warns.** The orb clock's status row shows both readings whenever
+  the device sleeps or the clock is swiped up. The glyph at 9 o'clock now shows
+  only while the signal is weak, conversation or not. `CONFIG_BATTERY_SHOW_DOTS`
+  brings the dots back; the readings, the TLM line and the voice tools are
+  unchanged.
+- **Swipe up from the bottom edge for the clock on demand**, awake, with the
+  session carrying on underneath. Any touch puts the face back and does nothing
+  else, so it cannot also end a conversation.
+- **Sleep keeps full brightness**, so the clock can be read across a room. Only
+  the battery-critical sleep still dims to 15 %.
+- **The orb colour survives a reboot.** The last one chosen, by voice or on the
+  touch panel, is saved by name once it has held for 2 s, and the device boots
+  in it. `CONFIG_UI_DEFAULT_ORB_COLOR` is now only the out-of-box colour.
+- **The orb's colour is the whole screen's.** The status word, the sleep clock,
+  the hints, the ring round the button and every touch panel page take it, not
+  only the orb: the white buttons become the colour and the greys take its hue.
+  White is unchanged. The spectrum face, the QR code and the amber interrupt
+  ring keep their own colours. `set_color`'s description now says so.
+
 ## [0.8.0] - 2026-10-23
 
 Experimental pre-release.

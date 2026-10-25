@@ -47,6 +47,7 @@
 #include "boot_button.h"
 #include "clock.h"
 #include "heap_probe.h"
+#include "orb_colors.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "ui.h"
@@ -143,6 +144,9 @@ static volatile bool s_bad_key_notice;
  * the setup QR is on screen.
  */
 #define SLEEP_AFTER_STOPPED_MS 30000
+
+/* How long a new orb colour must hold before it is written to flash. */
+#define COLOR_SAVE_QUIET_MS 2000
 
 static inline uint32_t now_ms(void)
 {
@@ -573,17 +577,16 @@ static void on_gesture(ui_gesture_t gesture)
     s_forget_armed_ms = 0;
 
     /*
-     * A RINGING ALARM OWNS EVERY GESTURE. While it chimes, a tap would read as
+     * A RINGING ALARM OWNS EVERY GESTURE. While it rings, a tap would read as
      * an interrupt (the chime makes audio_io_playback_active() true) and a hold
      * as an offer to forget the conversation -- neither of which is what someone
-     * slapping a ringing device means. ui.c also turns a press anywhere on the
-     * panel into UI_DISMISS while it rings, because a sleepy hand does not aim
-     * for a 70 px button. Ahead of the switch, so nothing below can also act.
+     * reaching for a ringing device means. ui.c sends the ring screen's presses
+     * to its Stop and snooze buttons and none to the centre button, so nothing
+     * should arrive here; anything that does, in the instant before the screen
+     * knows, is dropped. Ahead of the switch, so nothing below can act.
      */
-    if (gesture == UI_DISMISS || (alarms_ringing() && (gesture == UI_TAP || gesture == UI_HOLD))) {
-        ESP_LOGI(TAG, "EVT alarm dismiss (%s)", gesture == UI_DISMISS ? "anywhere"
-                                                : gesture == UI_TAP ? "tap" : "hold");
-        alarms_dismiss();
+    if (alarms_ringing() && (gesture == UI_TAP || gesture == UI_HOLD)) {
+        ESP_LOGI(TAG, "EVT alarm ringing: %s ignored", gesture == UI_TAP ? "tap" : "hold");
         return;
     }
 
@@ -690,9 +693,6 @@ static void on_gesture(ui_gesture_t gesture)
         }
         break;
 
-    case UI_DISMISS:
-        /* Handled above; listed so the switch stays exhaustive. */
-        break;
 
     case UI_TEST_DONE:
         /*
@@ -946,6 +946,18 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(wait_ms));
         wait_ms = CONFIG_UI_TELEMETRY_MS;
 
+#if CONFIG_UI_SCREENSHOT_TOUR
+        /* Bench build: walk the display test once, 10 s after boot, capturing
+         * each step over serial (ui.c drives it from there). The same entry the
+         * voice command uses, so the session is stopped and the mic monitored. */
+        static bool toured;
+        if (!toured && now_ms() > 10000) {
+            toured = true;
+            ESP_LOGI(TAG, "EVT shot tour start");
+            enter_display_test();
+        }
+#endif
+
         /*
          * Hand over once the speaker is actually done, so the announcement is
          * not cut off. Polled here rather than in a task of its own, at a
@@ -982,11 +994,13 @@ void app_main(void)
          * battery.c samples on its own schedule, so this is a copy of the last
          * value and not a bus transaction.
          *
-         * The warning is the dots themselves -- battery.c's hysteresed `low` flag
-         * keeps them on screen whatever else is happening. The status label is
-         * deliberately NOT used: it reports the session, on_state_change() rewrites
-         * it constantly, and a battery message parked there would either be
-         * overwritten within the second or be a lie about the session.
+         * The warning is the orb clock's battery, red at `low` (battery.c's
+         * hysteresed flag), and with CONFIG_BATTERY_SHOW_DOTS the edge dots,
+         * which that flag keeps on screen whatever else is happening. The
+         * status label is deliberately NOT used: it reports the session,
+         * on_state_change() rewrites it constantly, and a battery message
+         * parked there would either be overwritten within the second or be a
+         * lie about the session.
          */
         battery_status_t bat;
         const bool bat_ok = battery_get(&bat);
@@ -1003,6 +1017,28 @@ void app_main(void)
         wifi_signal_t sig;
         const bool sig_ok = wifi_sta_get_signal(&sig);
         ui_set_signal(sig.bars, sig.weak, sig_ok);
+
+        /*
+         * THE ORB COLOUR, saved here so the device boots in the one it was left
+         * in. Here because a flash write stalls audio and the LVGL task must not
+         * make one; and only once a change has held for COLOR_SAVE_QUIET_MS, so
+         * someone trying swatches on the touch panel costs one write, not one a
+         * tap. The first pass takes what boot applied as already saved.
+         */
+        {
+            static int saved = -1, seen = -1;
+            static uint32_t seen_ms;
+            const int now_idx = ui_orb_color();
+            if (saved < 0) {
+                saved = seen = now_idx;
+            } else if (now_idx != seen) {
+                seen = now_idx;
+                seen_ms = now_ms();
+            } else if (now_idx != saved && (now_ms() - seen_ms) >= COLOR_SAVE_QUIET_MS) {
+                orb_colors_save((size_t)now_idx);
+                saved = now_idx;
+            }
+        }
 
         /*
          * CLOCK AND ALARMS. Here because everything slow they do -- applying a
@@ -1033,7 +1069,6 @@ void app_main(void)
             }
             ui_set_clock(clk_ok, clk_ok ? lt.tm_hour : 0, clk_ok ? lt.tm_min : 0,
                          next_day, next_hh, next_mm, clock_12h());
-            ui_set_ringing(alarms_ringing());
         }
 
         /*
@@ -1051,7 +1086,9 @@ void app_main(void)
         const bool bat_critical = false;
 #endif
         static bool prev_critical;
+        bool critical_cleared = false;
         if (bat_critical != prev_critical) {
+            critical_cleared = prev_critical;
             prev_critical = bat_critical;
             ESP_LOGW(TAG, "EVT battery critical=%d pct=%d", (int)bat_critical, bat.percent);
         }
@@ -1083,25 +1120,37 @@ void app_main(void)
         }
         prev_asleep = panel_asleep;
 
+        if (critical_cleared && panel_asleep) {
+            /* The charger went in, or the reading recovered, while the panel
+             * slept dimmed: keep it asleep but bring the brightness back. No
+             * branch below would ask again -- asleep and stopped, they leave a
+             * sleeping panel alone. A live session's branch still wakes it. */
+            ui_set_sleep(true, false);
+        }
         if (bat_critical) {
             /* Ahead of the session check, which is the only branch that would
              * otherwise wake the panel back up on the next pass. Ahead of a
              * ringing alarm too: the chime, the caption and the announcement all
              * still happen on a dim panel, and a cell this low needs it dim. */
-            ui_set_sleep(true);
+            ui_set_sleep(true, true);
         } else if (alarms_ringing()) {
             /* Awake while it chimes, and the sleep clock restarts from now so
              * the panel does not drop straight back down once it stops. */
             stopped_since_ms = now_ms();
-            ui_set_sleep(false);
+            ui_set_sleep(false, false);
+        } else if (ui_stopwatch_holds_awake()) {
+            /* The stopwatch screen, counting: someone is timing something and
+             * wants to see it. Stopped or paused, it sleeps as anything else. */
+            stopped_since_ms = now_ms();
+            ui_set_sleep(false, false);
         } else if (session_ctl_is_running()) {
             stopped_since_ms = 0;
-            ui_set_sleep(false);
+            ui_set_sleep(false, false);
         } else if (stopped_since_ms == 0) {
             stopped_since_ms = now_ms();
         } else if (!panel_asleep &&
                    (now_ms() - stopped_since_ms) > SLEEP_AFTER_STOPPED_MS) {
-            ui_set_sleep(true);
+            ui_set_sleep(true, false);
         }
 
         if (panel_asleep != radio_saving) {
@@ -1284,8 +1333,10 @@ void app_main(void)
             ui_set_status("check api key", false);
         }
 
+        /* Not while something rings: the user is silent through every chime by
+         * design, and the cycle needs the session for its next announcement. */
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
-            ready_now && s_activity_ms != 0) {
+            ready_now && s_activity_ms != 0 && !alarms_ringing()) {
             /* Unsigned, so correct across the 49.7-day wrap. */
             uint32_t quiet_ms = now_ms() - s_activity_ms;
             if (quiet_ms > (uint32_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000) {
@@ -1322,7 +1373,7 @@ void app_main(void)
                  " heap=%" PRIu32 " int=%u intmax=%u dma=%u dmamax=%u"
                  " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
-                 " rssi=%d bars=%d ch=%d clk=%d alm=%d",
+                 " rssi=%d bars=%d ch=%d clk=%d alm=%d panel=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1378,6 +1429,6 @@ void app_main(void)
                  sig_ok ? (int)sig.bars : -1,
                  sig_ok ? (int)sig.channel : -1,
                  /* Where the wall clock came from: 0 none yet, 1 RTC, 2 SNTP. */
-                 (int)clock_source(), alarms_count());
+                 (int)clock_source(), alarms_count(), t.panel);
     }
 }

@@ -57,14 +57,6 @@ typedef enum {
      * session header, exactly as tap and hold do.
      */
     UI_TEST_DONE,
-
-    /*
-     * A press ANYWHERE on the panel while an alarm rings -- see ui_set_ringing().
-     * Sent on the press, and the tap or hold that press would otherwise have
-     * become is swallowed, so dismissing can never also start, stop or restart
-     * a session.
-     */
-    UI_DISMISS,
 } ui_gesture_t;
 
 /*
@@ -130,12 +122,16 @@ void ui_set_gesture_handler(void (*handler)(ui_gesture_t gesture));
  * by the frame timer on the LVGL task, because changing the brightness is a panel
  * command over the same bus as the flush.
  *
- * Asleep the panel dims and the frame rate drops, but LVGL keeps running, so a
- * touch is answered as quickly as it is when awake -- and a touch wakes it on the
- * press, without the caller doing anything. Refused while the display test is
- * running, which can outlast the sleep timer.
+ * Asleep the frame rate drops and, once the time is known, the panel shows the
+ * orb clock, but LVGL keeps running, so a touch is answered as quickly as it is
+ * when awake -- and a touch wakes it on the press, without the caller doing
+ * anything. Refused while the display test is running, which can outlast the
+ * sleep timer.
+ *
+ * `dim` takes the brightness down as well; only the battery-critical sleep asks
+ * for it. Otherwise sleep keeps full brightness, so the clock can be read.
  */
-void ui_set_sleep(bool sleep);
+void ui_set_sleep(bool sleep, bool dim);
 
 /* Whether the display is currently in that state. */
 bool ui_is_asleep(void);
@@ -151,8 +147,9 @@ void ui_set_stopped(bool stopped);
  * `low` is battery.c's hysteresed flag, not a comparison the caller makes, so
  * the screen and the spoken answer agree on what "low" means.
  *
- * Nothing is shown at full charge during a conversation; see draw_battery() in
- * ui.c for when the dots are on screen and why.
+ * The orb clock's status row shows it; so do the edge dots, when
+ * CONFIG_BATTERY_SHOW_DOTS builds them in -- see draw_battery() in ui.c for when
+ * those are on screen and why.
  */
 void ui_set_battery(int percent, bool charging, bool low, bool valid);
 
@@ -166,8 +163,9 @@ void ui_set_battery(int percent, bool charging, bool low, bool valid);
  * likewise its flag; it is what keeps the icon on screen mid-conversation, which
  * is the one time it is worth interrupting the face for.
  *
- * Ignored unless CONFIG_WIFI_SIGNAL_SHOW_BARS; see draw_signal() in ui.c for
- * when the icon is actually on screen.
+ * The orb clock's status row shows it; so does the edge glyph, when
+ * CONFIG_WIFI_SIGNAL_SHOW_BARS builds it in -- see draw_signal() in ui.c for when
+ * that is on screen.
  */
 void ui_set_signal(int bars, bool weak, bool valid);
 
@@ -191,10 +189,30 @@ void ui_set_clock(bool valid, int hh, int mm, int next_day, int next_hh, int nex
                   bool h12);
 
 /*
- * An alarm is chiming: a press anywhere on the panel becomes UI_DISMISS, not
- * just one on the centre button. Safe from any task.
+ * What is ringing, for the ring screen: plain values and a copied label, as
+ * ui_set_clock takes integers. While `ringing`, the screen is the ring screen
+ * and a press reaches only its buttons -- never the centre button, so stopping
+ * an alarm can never also start, stop or restart a session. Safe from any task.
  */
-void ui_set_ringing(bool ringing);
+typedef struct {
+    bool ringing;
+    bool timer;            /* Stop only; an alarm also offers snooze */
+    bool snoozable;
+    bool sounding;         /* false once it has fallen silent past the cap */
+    int hh, mm;            /* an alarm's set time, for its line */
+    uint32_t since_ms;     /* when it began, esp_timer ms, for the overtime */
+    uint32_t seq;          /* changes per ring, so the screen starts afresh */
+    char label[24];
+} ui_ring_t;
+
+void ui_set_ring(const ui_ring_t *ring);
+
+/* Bring the stopwatch screen up, as a voice start or lap does. Safe from any
+ * task: applied by the frame timer. */
+void ui_show_stopwatch(void);
+
+/* The stopwatch screen is up and counting: main.c holds sleep off for it. */
+bool ui_stopwatch_holds_awake(void);
 
 /* audio_io_tap_t-compatible. Agent audio wins when both are active. */
 void ui_feed_agent(const int16_t *mono, size_t samples);
@@ -251,10 +269,13 @@ void ui_set_face(int index);
  *
  * Same contract as ui_set_face: an index, not a colour, so this header stays
  * free of both LVGL and the catalog. Out-of-range is logged and ignored. Applied
- * on the next frame, not persisted across a reboot -- a local display setting,
- * like the face and unlike the voice.
+ * on the next frame. Saved by main.c's loop once it has held a moment (see
+ * ui_orb_color), so the device boots in the colour it was left in.
  */
 void ui_set_orb_color(int index);
+
+/* The colour index on screen now. Safe from any task: one word. */
+int ui_orb_color(void);
 
 /*
  * Deepgram detected the user starting to speak.
@@ -325,6 +346,9 @@ typedef struct {
      * cannot log it itself -- that blocks the LVGL task on the console.
      */
     bool face_changed;
+
+    /* The touch panel's page, or -1 while it is closed. */
+    int panel;
 } ui_telemetry_t;
 
 /*

@@ -150,6 +150,11 @@ void audio_io_chime_start(void);
 void audio_io_chime_stop(void);
 bool audio_io_chime_active(void);
 
+/* Withhold the microphone uplink while `hold` -- an alarm chiming into a live
+ * session, so the tone cannot reach the agent as speech. The capture path, the
+ * echo canceller and the display tap carry on. Safe from any task. */
+void audio_io_uplink_hold(bool hold);
+
 /*
  * Tell the playback path that the incoming byte stream has broken.
  *
@@ -229,12 +234,26 @@ void audio_io_reset(void);
  *
  * Both setters are single calls rather than get-then-set so the clamp and the
  * write stay together -- adjust is a thin caller of set, so there is exactly one
- * apply, and that is where a lock would go if a second caller ever appears. A
- * touch or UI control should call audio_io_set_volume().
+ * apply, and that is where a lock would go if a second caller ever appears.
+ *
+ * set() also saves the level to flash, which stalls tasks running from flash
+ * while the cache is off. A touch control, on the LVGL task, calls
+ * set_volume_live() instead -- the register write alone -- and has the level
+ * saved later by audio_io_settings_persist() on a task that can afford it.
  */
+#define AUDIO_VOLUME_MIN 20
+#define AUDIO_VOLUME_MAX 100
 int audio_io_get_volume(void);
 int audio_io_set_volume(int level);      /* absolute; returns the resulting level */
+int audio_io_set_volume_live(int level); /* same, without the flash write */
 int audio_io_adjust_volume(int delta);   /* relative; returns the resulting level */
+
+/*
+ * Save whatever a _live() setter changed -- volume, mic gain -- and nothing
+ * else. Blocking: this is the flash write, so only from session_ctl's worker
+ * (session_ctl_request_settings_save()).
+ */
+void audio_io_settings_persist(void);
 
 /* True while agent audio is playing or has only just stopped. */
 bool audio_io_playback_active(void);
@@ -245,8 +264,16 @@ bool audio_io_playback_active(void);
  * capture task applies it on its next block, with the echo-reference lane put
  * back and the uplink gate rescaled to match. get_vad_peak() is the gate in
  * force, which is CONFIG_AEC_UPLINK_VAD_PEAK only at CONFIG_MIC_IN_GAIN.
+ *
+ * set_mic_gain_live() is set() without the flash write, for the same reason
+ * set_volume_live() exists. get() is the gain asked for, which the codec
+ * reaches within one capture block.
  */
+#define AUDIO_MIC_GAIN_MIN_DB 6
+#define AUDIO_MIC_GAIN_MAX_DB 30
+#define AUDIO_MIC_GAIN_STEP_DB 3
 int audio_io_set_mic_gain(int requested_db);
+int audio_io_set_mic_gain_live(int requested_db);
 int audio_io_get_mic_gain(void);
 int audio_io_get_vad_peak(void);
 
