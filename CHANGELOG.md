@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-24
+
+Experimental pre-release. Verified on one bench board through screen captures
+and bench self-tests; the stopwatch's gestures and the touch panel's swipe down
+from the clock have not yet been tried by a finger.
+
 ### Added
 
 - **A touch panel for settings that were voice-only.** Swipe down from the top
