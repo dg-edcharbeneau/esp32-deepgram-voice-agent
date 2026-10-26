@@ -320,6 +320,11 @@ Three things about that shape:
   `capture_task` parks the ES7210 on its own as soon as nothing downstream wants
   samples, 30 s before the panel sleeps. The CPU, the speaker amplifier and the
   sleeping panel's brightness have their own rules; see [power.md](power.md).
+- **Once the panel is off, the LVGL task stops.** Deep idle pauses the adapter
+  so the chip can light-sleep, which means the frame timer -- where every sleep
+  request is applied -- no longer runs. So `ui_set_sleep(false)` also pokes the
+  `deep_idle_waker` task, which resumes LVGL first, and a touch reaches the same
+  task through the touch ISR. See [power.md](power.md).
 
 ## Protocol
 

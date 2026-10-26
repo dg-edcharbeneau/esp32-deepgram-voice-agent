@@ -16,6 +16,7 @@
 #include "driver/i2c_master.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -212,10 +213,52 @@ static void rtc_start(void)
 /* ---------------- SNTP ---------------- */
 
 /* lwIP's task: record and leave. The RTC write is I2C and belongs to the loop. */
+/*
+ * THE CHIP'S OWN TIMEBASE, CHECKED AGAINST THE SERVER AT EVERY SYNC. Between
+ * two syncs the server's time moved by some amount and esp_timer by another;
+ * the difference is how far the chip's clock drifted in that interval.
+ * esp_timer is what timers count down on and what carries the wall clock
+ * through light sleep -- on this board on the internal RC oscillator, there
+ * being no 32 kHz crystal -- so this is the number that says whether deep idle
+ * keeps time. Reported as the worst drift seen, in ms per hour, for TLM.
+ */
+static volatile int64_t s_sync_server_us;   /* lwIP task writes, loop reads */
+static volatile int64_t s_sync_mono_us;
+static int64_t s_last_server_us;
+static int64_t s_last_mono_us;
+static int s_drift_worst_ms_h;
+
 static void on_sntp_sync(struct timeval *tv)
 {
-    (void)tv;
+    s_sync_mono_us = esp_timer_get_time();
+    s_sync_server_us = (int64_t)tv->tv_sec * 1000000 + tv->tv_usec;
     s_synced = true;
+}
+
+static void drift_note(void)
+{
+    const int64_t server = s_sync_server_us;
+    const int64_t mono = s_sync_mono_us;
+    if (s_last_server_us != 0) {
+        const int64_t span = server - s_last_server_us;
+        if (span > 600LL * 1000000) {   /* under 10 min says too little */
+            const int64_t drift_us = (mono - s_last_mono_us) - span;
+            /* us of drift per ms of span, times 3600: ms per hour. */
+            const int ms_h = (int)(drift_us * 3600 / (span / 1000));
+            if (abs(ms_h) > abs(s_drift_worst_ms_h)) {
+                s_drift_worst_ms_h = ms_h;
+            }
+            ESP_LOGI(TAG, "EVT clock drift %+d ms/h over %lld s", ms_h,
+                     (long long)(span / 1000000));
+        }
+    }
+    s_last_server_us = server;
+    s_last_mono_us = mono;
+}
+
+int clock_drift_ms_per_hour(void)
+{
+    return s_drift_worst_ms_h;
 }
 
 /* The event task, whose stack is small: a flag, and clock_tick() starts SNTP. */
@@ -368,6 +411,7 @@ void clock_tick(void)
 
     if (s_synced) {
         s_synced = false;
+        drift_note();
         struct timeval tv;
         gettimeofday(&tv, NULL);
         const bool first = (s_source != CLOCK_SRC_SNTP);

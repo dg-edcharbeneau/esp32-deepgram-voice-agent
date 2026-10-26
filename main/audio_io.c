@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_codec_dev.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -605,6 +606,133 @@ static void chime_fill(int16_t *out, size_t n, uint32_t *pos)
 static bool s_pa_on = true;   /* the codec's open turned it on */
 #endif
 
+/*
+ * DEEP IDLE (ui.c): THE AUDIO LINK CLOSED. The i2s driver holds an APB_FREQ_MAX
+ * power-management lock per enabled channel, and either one keeps the chip out
+ * of light sleep. So once the panel has gone dark, the speaker codec closes --
+ * with the microphone already parked, that disables the TX channel too, and
+ * with it both locks go -- and reopens for the next sound or on the way out.
+ * The reopen is the click the speaker-stays-open rule exists to avoid, so it
+ * happens only here: after minutes of dark, never between two sentences.
+ *
+ * Playback task only, apart from the request flag and the poke.
+ */
+#define DEEP_IDLE_WAIT_MS 1000
+static volatile bool s_deep_idle_want;
+static volatile bool s_mic_is_open = true;   /* capture task's mic_open, shared */
+static bool s_spk_closed;
+static bool s_busy_logged;
+static TaskHandle_t s_play_task;
+static uint32_t s_reopen_failed_ms;   /* last failed reopen, for the retry gap */
+#define SPK_REOPEN_RETRY_MS 500
+/*
+ * Microphone and speaker share one full-duplex I2S data interface, and opening
+ * or closing either changes its channels' enable state. The capture task opens
+ * and closes the microphone; deep idle has the playback task close and reopen
+ * the speaker. This keeps those from interleaving, and makes "is the
+ * microphone open?" and the speaker close one step.
+ */
+static SemaphoreHandle_t s_codec_lock;
+
+static void codec_lock(void)
+{
+    if (s_codec_lock != NULL) {
+        xSemaphoreTake(s_codec_lock, portMAX_DELAY);
+    }
+}
+
+static void codec_unlock(void)
+{
+    if (s_codec_lock != NULL) {
+        xSemaphoreGive(s_codec_lock);
+    }
+}
+
+/*
+ * A poke, not xTaskAbortDelay(): that ends ANY blocked wait, including an
+ * esp_codec_dev_write()/read() in the middle of its I2S transfer. A
+ * notification ends only the waits that wait on notifications -- the playback
+ * ring's receive, and the parked microphone's wait below -- never the I2S
+ * queues. One lost between waits costs at most one wait's timeout.
+ */
+static void poke(TaskHandle_t t)
+{
+    if (t != NULL) {
+        xTaskNotifyGive(t);
+    }
+}
+
+static void spk_close_if_idle(void)
+{
+    if (s_spk_closed) {
+        return;
+    }
+    codec_lock();
+    if (s_mic_is_open) {
+        codec_unlock();
+        /* Closing the speaker with the microphone open would only defer the TX
+         * disable (it shares the clocks), and the locks would stay. */
+        if (!s_busy_logged) {
+            s_busy_logged = true;
+            ESP_LOGI(TAG, "EVT deepidle audio busy (microphone open)");
+        }
+        return;
+    }
+    esp_codec_dev_close(s_spk);
+    codec_unlock();
+    s_spk_closed = true;
+    s_busy_logged = false;
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    s_pa_on = false;   /* the close switched the amplifier off with the codec */
+#endif
+    ESP_LOGI(TAG, "EVT audio closed");
+}
+
+/* True once the speaker is open. A failed open leaves it closed and is
+ * retried, at most every SPK_REOPEN_RETRY_MS, by the next caller. */
+static bool spk_reopen(void)
+{
+    if (!s_spk_closed) {
+        return true;
+    }
+    if (s_reopen_failed_ms != 0 && now_ms() - s_reopen_failed_ms < SPK_REOPEN_RETRY_MS) {
+        return false;
+    }
+    esp_codec_dev_sample_info_t fs = s_fs;
+    codec_lock();
+    /* The same unconditional disable-before-reconfigure as the microphone's
+     * reopen (see capture_task), and the same scoped silence for it. */
+    esp_log_level_set("i2s_common", ESP_LOG_NONE);
+    const int err = esp_codec_dev_open(s_spk, &fs);
+    esp_log_level_set("i2s_common", ESP_LOG_INFO);
+    codec_unlock();
+    if (err != ESP_CODEC_DEV_OK) {
+        s_reopen_failed_ms = now_ms() | 1;
+        ESP_LOGE(TAG, "speaker reopen failed: %d", err);
+        return false;
+    }
+    s_reopen_failed_ms = 0;
+    esp_codec_dev_set_out_vol(s_spk, s_volume);
+    s_spk_closed = false;
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    s_pa_on = true;    /* the open switched it on */
+#endif
+    s_play_write_ms = now_ms();
+    ESP_LOGI(TAG, "EVT audio open");
+    return true;
+}
+
+void audio_io_deep_idle(bool on)
+{
+    s_deep_idle_want = on;
+    /* Out of their idle waits, so the change is acted on now: the close or
+     * reopen here, and a parked microphone's next look sooner. */
+    poke(s_play_task);
+    if (!on) {
+        poke(s_capture_task);
+    }
+}
+
 static void pa_on(void)
 {
 #if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
@@ -670,8 +798,16 @@ static void playback_task(void *arg)
         /* No wait while chiming: the tone is generated the instant the ring is
          * found empty, and the codec write below is what paces the loop. */
         const bool chime = s_chime_on;
+        if (s_deep_idle_want && !chime && !s_flush_pending &&
+            xStreamBufferIsEmpty(s_ring) == pdTRUE) {
+            spk_close_if_idle();
+        } else if (!s_deep_idle_want) {
+            spk_reopen();   /* on the way out: before anything wants it */
+        }
         size_t got = xStreamBufferReceive(s_ring, mono_bytes + off, CHUNK_MONO - off,
-                                         chime ? 0 : pdMS_TO_TICKS(DRAIN_WAIT_MS));
+                                         chime ? 0
+                                         : pdMS_TO_TICKS(s_spk_closed ? DEEP_IDLE_WAIT_MS
+                                                                      : DRAIN_WAIT_MS));
         size_t total = off + got;
 
         if (chime != chiming) {
@@ -691,6 +827,10 @@ static void playback_task(void *arg)
              * mid-ring takes over within a frame or two. */
             const size_t samples = CHUNK_MONO / sizeof(int16_t) / 2;
             chime_fill(mono, samples, &chime_pos);
+            if (!spk_reopen()) {   /* a ring out of deep idle */
+                vTaskDelay(pdMS_TO_TICKS(DRAIN_WAIT_MS));
+                continue;
+            }
             pa_on();
             if (s_play_tap != NULL) {
                 s_play_tap(mono, samples);
@@ -746,6 +886,12 @@ static void playback_task(void *arg)
             carry_valid = false;
         }
 
+        if (!spk_reopen()) {
+            /* Nowhere to play it: drop this chunk rather than write into a
+             * closed codec, and pace the loop while the reopen is retried. */
+            vTaskDelay(pdMS_TO_TICKS(DRAIN_WAIT_MS));
+            continue;
+        }
         pa_on();
 
         /*
@@ -855,11 +1001,18 @@ static void capture_task(void *arg)
          */
         if (!s_capture_enabled && !s_monitor) {
             if (mic_open) {
+                codec_lock();
                 esp_codec_dev_close(s_mic);
+                s_mic_is_open = false;
+                codec_unlock();
                 mic_open = false;
                 ESP_LOGI(TAG, "microphone parked");
             }
-            vTaskDelay(pdMS_TO_TICKS(CAPTURE_PARK_POLL_MS));
+            /* A second in deep idle: nothing can want the microphone until it
+             * ends, and audio_io_deep_idle(false) cuts this wait short. A
+             * notification wait, so that poke can. */
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(s_deep_idle_want ? DEEP_IDLE_WAIT_MS
+                                                                    : CAPTURE_PARK_POLL_MS));
             continue;
         }
         if (!mic_open) {
@@ -889,9 +1042,14 @@ static void capture_task(void *arg)
              * Delete this once esp_codec_dev checks the channel state before
              * disabling it.
              */
+            /* Under the codec lock, and the flag with the open: a deep-idle
+             * speaker close cannot interleave with it (see s_codec_lock). */
+            codec_lock();
             esp_log_level_set("i2s_common", ESP_LOG_NONE);
             int oerr = esp_codec_dev_open(s_mic, &s_fs);
             esp_log_level_set("i2s_common", ESP_LOG_INFO);
+            s_mic_is_open = (oerr == ESP_CODEC_DEV_OK);
+            codec_unlock();
             if (oerr != ESP_CODEC_DEV_OK) {
                 ESP_LOGE(TAG, "microphone reopen failed: %d", oerr);
                 vTaskDelay(pdMS_TO_TICKS(CAPTURE_PARK_POLL_MS));
@@ -1873,7 +2031,14 @@ esp_err_t audio_io_init(int sample_rate)
     /* Before capture can start; a no-op unless CONFIG_AUDIO_RECORD. */
     audio_rec_init(CAPTURE_FRAMES);
 
-    if (xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, NULL, 6, NULL, 1) != pdPASS) {
+    /* Before either audio task: they share it from their first open. */
+    s_codec_lock = xSemaphoreCreateMutex();
+    if (s_codec_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, NULL, 6, &s_play_task, 1) !=
+        pdPASS) {
         return ESP_FAIL;
     }
 
@@ -2049,6 +2214,9 @@ void audio_io_note_stream_gap(void)
 void audio_io_chime_start(void)
 {
     s_chime_on = true;
+    /* Out of a deep-idle wait now, not up to a second from now: the chime is
+     * the alarm, and the speaker has to reopen first. */
+    poke(s_play_task);
 }
 
 void audio_io_chime_stop(void)

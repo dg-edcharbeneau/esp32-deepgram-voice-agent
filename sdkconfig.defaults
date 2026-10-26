@@ -23,6 +23,16 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # live (PM locks in ui.c and session_ctl.c), 80 MHz otherwise -- asleep on the
 # orb clock, most of the device's life. No light sleep; see main.c.
 CONFIG_PM_ENABLE=y
+# Light sleep, entered only when no PM lock is held -- deep idle (ui.c). The
+# USB console holds a lock while plugged in, so a bench board stays awake.
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+# The CPU stays powered (clock-gated) through light sleep. Powering it down
+# needs an 8,784 B CPU retention buffer plus a cache-tag buffer, both in
+# internal DMA-capable RAM -- 13.5 kB measured, enough that the TLS handshake's
+# esp-aes allocation failed and no session could start. Keeping the CPU
+# powered costs on the order of 0.1 mA while asleep.
+# CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP is not set
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 CONFIG_ESP32S3_DATA_CACHE_64KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y

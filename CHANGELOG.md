@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Deep idle: the chip light-sleeps while the screen is off**
+  (`CONFIG_UI_DEEP_IDLE`). Once the sleeping screen goes dark (5 minutes asleep),
+  the panel controller sleeps, the speaker codec closes, the display task pauses
+  and the chip naps between the once-a-second alarm check, Wi-Fi beacons and a
+  touch. A touch, the BOOT button, a session, an alarm or the stopwatch brings it
+  all back. Aimed at the ~50 mA the device drew asleep (10 % an hour on its
+  500 mAh cell). Never on USB: the USB console keeps the chip awake.
+- TLM `di=` (deep idle), `drift=` (the chip clock's worst drift against SNTP, ms
+  per hour) and `alate=` (the latest an alarm or timer has rung, ms).
+
 ### Changed
 
 - **Power, by design.** No current figures -- the AXP2101 has no current

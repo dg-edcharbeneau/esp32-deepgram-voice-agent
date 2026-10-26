@@ -136,6 +136,10 @@ void ui_set_sleep(bool sleep, bool dim);
 /* Whether the display is currently in that state. */
 bool ui_is_asleep(void);
 
+/* Whether the device is in deep idle: the panel dark and the chip free to
+ * light-sleep (ui.c). For the TLM line. */
+bool ui_deep_idle(void);
+
 void ui_set_stopped(bool stopped);
 
 /*

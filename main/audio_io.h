@@ -155,6 +155,15 @@ bool audio_io_chime_active(void);
  * echo canceller and the display tap carry on. Safe from any task. */
 void audio_io_uplink_hold(bool hold);
 
+/*
+ * Deep idle (ui.c): `on` closes the speaker codec once nothing plays and the
+ * microphone is parked, which stops the I2S link and releases its
+ * power-management locks so the chip can light-sleep; `off` reopens it. Any
+ * sound -- a chime, agent audio -- reopens it first regardless. Safe from any
+ * task; the playback task does the work.
+ */
+void audio_io_deep_idle(bool on);
+
 /* BENCH AID (CONFIG_POWER_STATE_WALK): the speaker codec and its amplifier off
  * and back on, for the power walk. Only with nothing playing. */
 void audio_io_bench_speaker(bool on);

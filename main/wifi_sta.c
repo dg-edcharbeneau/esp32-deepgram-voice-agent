@@ -259,6 +259,10 @@ esp_err_t wifi_sta_start(const char *ssid, const char *pass)
     wifi_config_t sta_cfg = {
         .sta = {
             .threshold.authmode = open ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK,
+            /* Under max modem sleep the radio wakes for every third beacon
+             * (~300 ms). 3 is also the driver's value for 0; named here because
+             * deep idle's light sleep is paced by it. */
+            .listen_interval = 3,
         },
     };
     /* strncpy, not assignment: the config fields are fixed-size uint8_t arrays. */

@@ -192,6 +192,14 @@ static void reconcile_locked(int64_t now, bool zone_changed)
     }
 }
 
+/* The latest any alarm or timer has rung since boot, in ms (alarms_tick). */
+static int64_t s_worst_late_ms;
+
+int alarms_worst_late_ms(void)
+{
+    return (int)s_worst_late_ms;
+}
+
 /* Under s_lock: the first entry that is due, or -1. */
 static int due_locked(bool valid, int64_t now)
 {
@@ -547,6 +555,15 @@ void alarms_tick(void)
     if (i >= 0) {
         fired = s_b->e[i];
         fire = true;
+        /* How late, for the TLM line: to the millisecond while a timer is still
+         * on the monotonic clock (before the wall clock is known), otherwise to
+         * the second against the wall -- where timers move once it is. */
+        const int64_t late_ms = s_mono_ms[i] > 0
+                                    ? esp_timer_get_time() / 1000 - s_mono_ms[i]
+                                    : (now - fired.fire_epoch) * 1000;
+        if (late_ms > s_worst_late_ms) {
+            s_worst_late_ms = late_ms;
+        }
         if (fired.kind == ALARM_WEEKLY && valid) {
             /* Rolls on in RAM; nothing about its definition changed. */
             s_b->e[i].fire_epoch = alarm_next_local(now, fired.hh, fired.mm, fired.dow_mask);

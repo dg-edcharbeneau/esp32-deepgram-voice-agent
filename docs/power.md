@@ -20,6 +20,7 @@ is to hand.
 | speaker amplifier | on | off 5 s after the last sound | off |
 | microphone | open, echo cancelling | parked | parked |
 | panel | 100 %, ~30 fps | 100 %, ~30 fps | 100 % at 5 fps, **40 % after 2 min, off after 5** |
+| deep idle | -- | -- | **once the panel is off: light sleep** (below) |
 
 ## The measures
 
@@ -47,11 +48,11 @@ driver and the speech libraries were built against it; changing it is not a
 by-design change. The other lever left is the asleep frame itself: fewer frames,
 or less of each, after the clock dims.
 
-There is **no light sleep**. The LVGL adapter's tick is a 1 ms `esp_timer`, which
-would wake the chip a thousand times a second; until that can be stopped asleep,
-light sleep would cost the work of entering it for nothing. The BOOT button's
-5 ms timer and a few 10-20 Hz idle polls (`dg_uplink`, `audio_play`, the parked
-capture task) would be next in line.
+**Light sleep comes with deep idle**, below. Before it, the asleep device drew
+about **50 mA**: Ed's 10 % an hour on the 500 mAh cell. Nearly all of that is
+the chip never sleeping; the PMU's unused rails (ALDO2-4, BLDO1-2, CPUSLDO,
+DLDO1-2 and DCDC2-4, which feed nothing on this board -- see the schematic)
+account for well under 1 mA.
 
 **The radio follows the session.** A live session streams audio both ways and
 modem sleep costs it tens of ms of jitter, so it gets none -- the
@@ -76,6 +77,55 @@ to once a second -- until a touch, a session or an alarm. An AMOLED's draw is
 its lit pixels times its brightness. And the clock flushes only its own 420 px
 square, not the whole 466 px frame, five times a second.
 
+**Deep idle: the chip sleeps while the panel is dark** (`CONFIG_UI_DEEP_IDLE`,
+`ui.c`). Light sleep is allowed from boot (tickless idle, `main.c`), but it only
+happens when no power-management lock is held, and something always held one: the
+panel awake, a session, or the audio link, whose i2s driver holds a lock per
+enabled channel. Once the panel goes off, deep idle releases the last of them:
+
+- the panel controller is put to sleep (SLPIN), not just blanked;
+- the speaker codec closes (`audio_io_deep_idle`), which with the microphone
+  already parked stops the I2S link and releases its locks;
+- the LVGL adapter is paused, stopping its 1 ms tick;
+- the touch line (GPIO11) is armed as a wake source, and the BOOT button wakes on
+  its GPIO instead of polling every 5 ms;
+- the idle polls slow to once a second (`audio_play`, the parked capture task,
+  `dg_uplink` without a session).
+
+The chip then naps between the once-a-second main loop (which checks alarms and
+timers), Wi-Fi beacons (max modem sleep, listen interval 3) and a touch. A touch,
+the BOOT button, a session, an alarm or the stopwatch ends it: one task
+(`deep_idle_waker`) wakes the panel controller, reopens the speaker and resumes
+LVGL, and the usual paths take it from there. Reopening the speaker is the click
+the speaker-stays-open rule otherwise avoids, so it happens only here.
+
+Two costs, both deliberate:
+
+- **The CPU stays powered through light sleep.** Powering it down needs 13.5 kB
+  of internal DMA-capable RAM for retention buffers, and with them the TLS
+  handshake failed to allocate and no session could start
+  (`CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP` off). On the datasheet it is worth
+  about 0.1 mA.
+- **Time is kept by the RC oscillator while the chip naps.** The board has no
+  32 kHz crystal (its pins carry I2C and I2S), so the clock rides on the
+  calibrated internal RC through each nap. SNTP corrects it hourly, and alarms
+  and timers both fire on it (`alarms.c` moves a timer onto the wall clock as soon
+  as the time is known), so drift shows up as an alarm up to that hour's drift
+  early or late. TLM `drift=` reports the worst measured drift in ms per hour,
+  `alate=` the latest an alarm or timer has rung (ms). If drift is too large,
+  `CONFIG_RTC_CLK_SRC_INT_8MD256` is the fix, at tens of µA.
+
+On USB power the chip never light-sleeps: `main.c` holds a `NO_LIGHT_SLEEP` lock
+whenever the PMU reports VBUS. There is nothing to save there, and light sleep
+stops the USB console. IDF's own guard for that,
+`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`, is kept but not relied on: it tolerates 3
+ticks without a USB start-of-frame and refills that allowance only on a
+reconnect, so late ticks use it up for good and the next miss reads as a
+disconnect. In deep idle that took about 28 s, and the console died with the cable
+in (the chip carried on, light-sleeping). Measure on battery. With `CONFIG_PM_PROFILING`, the IDF's lock and mode stats print 5 s into
+deep idle and at every exit, so after a battery run, replugging and tapping shows
+how much of it was spent in light sleep.
+
 From the last word, with the defaults:
 
 | Phase | Starts | Lasts | Screen | CPU | Radio | Amp | Mic |
@@ -84,7 +134,7 @@ From the last word, with the defaults:
 | Idle, awake | 15 s | 30 s | orb face, 100 %, ~30 fps | 240 MHz | min modem sleep | off | off |
 | Asleep, clock bright | 45 s | 2 min | orb clock, 100 %, 5 fps | 80 MHz between frames | max modem sleep | off | off |
 | Asleep, clock dimmed | 2 min 45 s | 3 min | orb clock, 40 %, 5 fps | 80 MHz between frames | max modem sleep | off | off |
-| Asleep, display off | 5 min 45 s | until woken | off | 80 MHz but for 1 Hz | max modem sleep | off | off |
+| Asleep, deep idle | 5 min 45 s | until woken | off, controller asleep | light sleep but for 1 Hz | max modem sleep | off, codec closed | off |
 
 ## Putting numbers on it
 

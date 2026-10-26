@@ -2790,8 +2790,10 @@ static void audio_send_task(void *arg)
     while (1) {
         size_t len = 0;
         /* The timeout is a liveness tick, not a deadline: it is what lets this
-         * task notice a queue that has been deleted or a session that ended. */
-        void *frame = xRingbufferReceive(s_audio_rb, &len, pdMS_TO_TICKS(100));
+         * task notice a queue that has been deleted or a session that ended.
+         * A second with no session: a frame still wakes it at once, and ten
+         * wakes a second for nothing kept the chip out of light sleep. */
+        void *frame = xRingbufferReceive(s_audio_rb, &len, pdMS_TO_TICKS(s_ready ? 100 : 1000));
         if (frame == NULL) {
             continue;
         }

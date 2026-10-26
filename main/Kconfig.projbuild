@@ -792,6 +792,20 @@ menu "Deepgram Agent Device"
         default 40
         range 5 100
 
+    config UI_DEEP_IDLE
+        bool "Deep idle: let the chip light-sleep once the panel is off"
+        default y
+        depends on FREERTOS_USE_TICKLESS_IDLE
+        help
+            Once the sleeping panel has gone off (UI_SLEEP_OFF_AFTER_MIN), put
+            the panel controller to sleep, close the audio link and pause the
+            display task, so nothing holds the chip awake and it light-sleeps
+            between the once-a-second main loop, Wi-Fi beacons and a touch. A
+            touch, the BOOT button, a session, an alarm or the stopwatch
+            brings everything back. Needs UI_SLEEP_OFF_AFTER_MIN above 0 to
+            ever happen. Off: the panel goes dark but the chip stays awake,
+            as before.
+
     config UI_SLEEP_OFF_AFTER_MIN
         int "Turn the panel off after this many minutes asleep (0 = never)"
         default 5
