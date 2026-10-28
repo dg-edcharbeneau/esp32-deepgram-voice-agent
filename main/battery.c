@@ -9,6 +9,7 @@
 #include "bsp/esp32_s3_touch_amoled_1_75c.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -141,6 +142,52 @@ static int median_of(const int *src, int n)
  * TLM loop and the frame timer, which are the two places this firmware already
  * agrees are allowed to be slow.
  */
+/*
+ * THE CHIP'S SETUP, LOGGED ONCE, 10 s IN. Not at boot: after a reset the USB
+ * console re-enumerates and a capture reattaches about 3 s later, so a line
+ * printed during start-up is never seen. Sampler task only (it owns the reads).
+ */
+#define SETUP_LOG_AFTER_US (10 * 1000 * 1000)
+
+static void log_setup(void)
+{
+    /*
+     * The charge target, read once and reported.
+     *
+     * This is the number that explains a cell which charges to 70% and stops:
+     * the chip stops at the configured voltage, and 4.0 V or 4.1 V leaves a
+     * 4.2 V cell genuinely part-full. Read only -- raising it is a write to the
+     * chip that also feeds the panel and codec rails, and it is a decision
+     * about someone's battery, not a default to change quietly.
+     */
+    uint8_t cv = 0;
+    static const char *const cv_name[] = {
+        "reserved", "4.0V", "4.1V", "4.2V", "4.35V", "4.4V",
+    };
+    if (reg_read(REG_CV_TARGET, &cv, 1) == ESP_OK) {
+        const unsigned sel = cv & 0x07;
+        ESP_LOGI(TAG, "charge target REG64=%02x -> %s", cv,
+                 (sel < (sizeof(cv_name) / sizeof(cv_name[0]))) ? cv_name[sel] : "?");
+    }
+
+    /*
+     * The rails as the factory left them, read once: which of the 4 DC-DCs
+     * (REG80) and 11 LDOs (REG90/91) are on, and at what voltage (REG82-86,
+     * REG92-9A). Nothing here writes them -- this firmware has never touched
+     * a rail -- but which are on and what they feed is the first question of
+     * any power audit, and the board's documentation does not say.
+     */
+    uint8_t onoff[2] = {0}, ldo1 = 0, dcv[5] = {0}, ldov[9] = {0}, adc = 0;
+    if (reg_read(0x80, &onoff[0], 1) == ESP_OK && reg_read(0x90, &onoff[1], 1) == ESP_OK &&
+        reg_read(0x91, &ldo1, 1) == ESP_OK && reg_read(0x82, dcv, 5) == ESP_OK &&
+        reg_read(0x92, ldov, 9) == ESP_OK && reg_read(0x30, &adc, 1) == ESP_OK) {
+        ESP_LOGI(TAG, "rails REG80=%02x REG90=%02x REG91=%02x dcdc=%02x %02x %02x %02x %02x "
+                      "ldo=%02x %02x %02x %02x %02x %02x %02x %02x %02x adc=%02x",
+                 onoff[0], onoff[1], ldo1, dcv[0], dcv[1], dcv[2], dcv[3], dcv[4], ldov[0],
+                 ldov[1], ldov[2], ldov[3], ldov[4], ldov[5], ldov[6], ldov[7], ldov[8], adc);
+    }
+}
+
 static void sampler_task(void *arg)
 {
     (void)arg;
@@ -153,8 +200,13 @@ static void sampler_task(void *arg)
     int  reported = -1;
     int  prev_pct = -1;
     int  settled = 0;
+    bool setup_logged = false;
 
     for (;;) {
+        if (!setup_logged && esp_timer_get_time() >= SETUP_LOG_AFTER_US) {
+            setup_logged = true;
+            log_setup();
+        }
         uint8_t status1 = 0, status2 = 0, gauge = 0, vbat[2] = {0, 0};
         esp_err_t err = reg_read(REG_STATUS1, &status1, 1);
         if (err == ESP_OK) err = reg_read(REG_STATUS2, &status2, 1);
@@ -310,42 +362,6 @@ void battery_start(void)
     if (xTaskCreatePinnedToCore(sampler_task, "battery", 3072, NULL, 1, NULL, 0) != pdPASS) {
         ESP_LOGE(TAG, "sampler task did not start");
         return;
-    }
-
-    /*
-     * The charge target, read once and reported.
-     *
-     * This is the number that explains a cell which charges to 70% and stops:
-     * the chip stops at the configured voltage, and 4.0 V or 4.1 V leaves a
-     * 4.2 V cell genuinely part-full. Read only -- raising it is a write to the
-     * chip that also feeds the panel and codec rails, and it is a decision
-     * about someone's battery, not a default to change quietly.
-     */
-    uint8_t cv = 0;
-    static const char *const cv_name[] = {
-        "reserved", "4.0V", "4.1V", "4.2V", "4.35V", "4.4V",
-    };
-    if (reg_read(REG_CV_TARGET, &cv, 1) == ESP_OK) {
-        const unsigned sel = cv & 0x07;
-        ESP_LOGI(TAG, "charge target REG64=%02x -> %s", cv,
-                 (sel < (sizeof(cv_name) / sizeof(cv_name[0]))) ? cv_name[sel] : "?");
-    }
-
-    /*
-     * The rails as the factory left them, read once: which of the 4 DC-DCs
-     * (REG80) and 11 LDOs (REG90/91) are on, and at what voltage (REG82-86,
-     * REG92-9A). Nothing here writes them -- this firmware has never touched
-     * a rail -- but which are on and what they feed is the first question of
-     * any power audit, and the board's documentation does not say.
-     */
-    uint8_t onoff[2] = {0}, ldo1 = 0, dcv[5] = {0}, ldov[9] = {0}, adc = 0;
-    if (reg_read(0x80, onoff, 2) == ESP_OK && reg_read(0x90, &onoff[1], 1) == ESP_OK &&
-        reg_read(0x91, &ldo1, 1) == ESP_OK && reg_read(0x82, dcv, 5) == ESP_OK &&
-        reg_read(0x92, ldov, 9) == ESP_OK && reg_read(0x30, &adc, 1) == ESP_OK) {
-        ESP_LOGI(TAG, "rails REG80=%02x REG90=%02x REG91=%02x dcdc=%02x %02x %02x %02x %02x "
-                      "ldo=%02x %02x %02x %02x %02x %02x %02x %02x %02x adc=%02x",
-                 onoff[0], onoff[1], ldo1, dcv[0], dcv[1], dcv[2], dcv[3], dcv[4], ldov[0],
-                 ldov[1], ldov[2], ldov[3], ldov[4], ldov[5], ldov[6], ldov[7], ldov[8], adc);
     }
 
     ESP_LOGI(TAG, "AXP2101 at 0x%02x, sampling every %d ms",

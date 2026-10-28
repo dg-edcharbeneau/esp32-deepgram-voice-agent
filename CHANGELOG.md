@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The AXP2101's charge target and rail report is logged 10 s after boot
+  instead of during start-up, where it printed before a USB capture could
+  reattach and so had never been seen.
+
+### Removed
+
+- Three functions with no callers (`wifi_sta_set_power_save()`,
+  `audio_io_chime_active()`, `ui_panel_kit_ready()`), and a
+  `sdkconfig.defaults` line naming a log option ESP-IDF 5.5 does not have.
+
 ## [0.10.0] - 2026-10-28
 
 Experimental pre-release. Verified on one bench board, plugged in, through logs

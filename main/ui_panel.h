@@ -70,10 +70,6 @@ typedef struct {
 
 void ui_panel_kit_palette(uint32_t tint, ui_panel_palette_t *out);
 
-/* The masks are built in the background at boot; until then a fill draws
- * nothing. */
-bool ui_panel_kit_ready(void);
-
 /* Fill one of panel_geom's shapes into the canvas pixels. */
 void ui_panel_kit_fill(uint16_t *px, uint32_t stride_px, panel_seg_t seg, uint32_t rgb);
 

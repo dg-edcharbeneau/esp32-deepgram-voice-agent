@@ -504,11 +504,6 @@ void ui_panel_kit_palette(uint32_t tint, ui_panel_palette_t *out)
     out->hint = s_col.hint;
 }
 
-bool ui_panel_kit_ready(void)
-{
-    return s_masks_ready;
-}
-
 void ui_panel_kit_fill(uint16_t *px, uint32_t stride_px, panel_seg_t seg, uint32_t rgb)
 {
     s_px = px;

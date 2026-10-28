@@ -54,17 +54,14 @@ esp_err_t wifi_sta_wait_connected(int timeout_ms);
 esp_err_t wifi_sta_stop(void);
 
 /*
- * Turn Wi-Fi modem sleep on or off.
+ * The radio's power save as a level: none, minimum modem sleep (wakes at every
+ * DTIM) or maximum (sleeps through the listen interval). Logged on change.
  *
- * On while the device is asleep, off while a session is live -- modem sleep adds
- * tens of ms of jitter, which matters to a 16 kHz audio stream and to nothing
- * else. Safe from any task; failures are logged rather than returned, because
- * there is no useful way for a caller to react.
+ * None while a session is live -- modem sleep adds tens of ms of jitter, which
+ * matters to a 16 kHz audio stream and to nothing else. Safe from any task;
+ * failures are logged rather than returned, because there is no useful way for
+ * a caller to react.
  */
-void wifi_sta_set_power_save(bool enabled);
-
-/* The radio's power save as a level: none, minimum modem sleep (wakes at every
- * DTIM) or maximum (sleeps through the listen interval). Logged on change. */
 #define WIFI_STA_PS_NONE 0
 #define WIFI_STA_PS_MIN  1
 #define WIFI_STA_PS_MAX  2

@@ -2224,11 +2224,6 @@ void audio_io_chime_stop(void)
     s_chime_on = false;
 }
 
-bool audio_io_chime_active(void)
-{
-    return s_chime_on;
-}
-
 #if CONFIG_POWER_STATE_WALK
 void audio_io_bench_speaker(bool on)
 {
