@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
+Experimental pre-release. Verified on one bench board, plugged in, through logs
+and bench self-tests. The battery saving has not been measured yet. Known
+issues: the agent has been reported hearing itself more often, which is not yet
+investigated; and a ring cycle occasionally skips its spoken announcement, which
+predates this release.
+
 ### Added
 
 - **Deep idle: the chip light-sleeps while the screen is off**
