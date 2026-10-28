@@ -598,6 +598,19 @@ menu "Deepgram Agent Device"
 
             0 disables the timeout and restores the old always-on behaviour.
 
+    config AUDIO_PA_IDLE_OFF_MS
+        int "Turn the speaker amplifier off after this long silent (ms, 0 = never)"
+        default 5000
+        range 0 600000
+        help
+            The amplifier (GPIO46) draws current even into silence, and the
+            speaker is open for the device's whole life -- the codec stays
+            open because reopening it clicks. So only the amplifier is
+            switched: off once nothing has played for this long, back on
+            before the next sound, with 20 ms for it to come up. If a click or
+            a clipped first syllable is heard, raise this or set 0 to keep it
+            on, as it always was.
+
     config AUDIO_CAPTURE_ALWAYS
         bool "Keep visualizing the microphone while the session is stopped"
         default n
@@ -686,6 +699,19 @@ menu "Deepgram Agent Device"
             host/shot2png.py. Then hands back to the face. Costs 434 kB of
             PSRAM for the capture copy.
 
+    config POWER_STATE_WALK
+        bool "Power walk: hold each device state for the meter (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. 45 s after boot, holds the device in one
+            state at a time for 60 s each, with an "EVT power step" line to read
+            a USB power meter by: awake on the orb face; asleep on the orb clock
+            at 100, 40 and 15 % brightness and with the panel off; asleep with
+            the speaker amplifier off; with the radio in maximum modem sleep;
+            with the radio off; and a live session with nobody talking. Run it
+            with the cell full (TLM chgst=4), so the USB current is the
+            system's draw and not charging. Every override is undone at the end.
+
     config UI_PANEL_SELFTEST
         bool "Touch panel self-test (bench only)"
         default n
@@ -748,6 +774,48 @@ menu "Deepgram Agent Device"
         default 1 if UI_DEFAULT_FACE_SPECTRUM
         help
             Index into the face table in ui.c. Set by the choice above.
+
+    config UI_SLEEP_DIM_AFTER_MIN
+        int "Dim the sleeping clock after this many minutes (0 = never)"
+        default 2
+        range 0 1440
+        help
+            The orb clock comes up at full brightness when the device sleeps,
+            to be read across a room. Past this long asleep nobody has looked
+            for a while, and it dims to UI_SLEEP_DIM_PCT. An AMOLED's draw is
+            its lit pixels times its brightness, and sleep is where this
+            device spends its life. A touch, a session or an alarm brings it
+            back to full.
+
+    config UI_SLEEP_DIM_PCT
+        int "Brightness of the dimmed sleeping clock (%)"
+        default 40
+        range 5 100
+
+    config UI_DEEP_IDLE
+        bool "Deep idle: let the chip light-sleep once the panel is off"
+        default y
+        depends on FREERTOS_USE_TICKLESS_IDLE
+        help
+            Once the sleeping panel has gone off (UI_SLEEP_OFF_AFTER_MIN), put
+            the panel controller to sleep, close the audio link and pause the
+            display task, so nothing holds the chip awake and it light-sleeps
+            between the once-a-second main loop, Wi-Fi beacons and a touch. A
+            touch, the BOOT button, a session, an alarm or the stopwatch
+            brings everything back. Needs UI_SLEEP_OFF_AFTER_MIN above 0 to
+            ever happen. Off: the panel goes dark but the chip stays awake,
+            as before.
+
+    config UI_SLEEP_OFF_AFTER_MIN
+        int "Turn the panel off after this many minutes asleep (0 = never)"
+        default 5
+        range 0 1440
+        help
+            Past this long asleep the panel goes off altogether and nothing
+            is drawn -- the frame timer drops to once a second -- and a touch,
+            a session or an alarm turns it back on. With the defaults the clock
+            is bright for 2 minutes, dimmed for 3, then off: 5 minutes 45
+            seconds after the last word. 0 keeps the clock up for good.
 
     choice UI_DEFAULT_ORB_COLOR_CHOICE
         prompt "Default orb colour"

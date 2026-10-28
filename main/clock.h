@@ -73,6 +73,11 @@ void clock_unlock(void);
 /* Where the current time came from, for the TLM line. */
 clock_source_t clock_source(void);
 
+/* The worst drift of the chip's own clock against SNTP seen since boot, in ms
+ * per hour (+ fast, - slow), measured between syncs at least 10 min apart; 0
+ * until there are two. For the TLM line. */
+int clock_drift_ms_per_hour(void);
+
 /*
  * Changes whenever a zone is applied. An alarm "at 7:30" is a wall time, so
  * alarms.c recomputes its instants when this moves -- otherwise moving the

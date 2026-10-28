@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
+Experimental pre-release. Verified on one bench board, plugged in, through logs
+and bench self-tests. The battery saving has not been measured yet. Known
+issues: the agent has been reported hearing itself more often, which is not yet
+investigated; and a ring cycle occasionally skips its spoken announcement, which
+predates this release.
+
+### Added
+
+- **Deep idle: the chip light-sleeps while the screen is off**
+  (`CONFIG_UI_DEEP_IDLE`). Once the sleeping screen goes dark (5 minutes asleep),
+  the panel controller sleeps, the speaker codec closes, the display task pauses
+  and the chip naps between the once-a-second alarm check, Wi-Fi beacons and a
+  touch. A touch, the BOOT button, a session, an alarm or the stopwatch brings it
+  all back. Aimed at the ~50 mA the device drew asleep (10 % an hour on its
+  500 mAh cell). Never on USB: the USB console keeps the chip awake.
+- TLM `di=` (deep idle), `drift=` (the chip clock's worst drift against SNTP, ms
+  per hour) and `alate=` (the latest an alarm or timer has rung, ms).
+
+### Changed
+
+- **Power, by design.** No current figures -- the AXP2101 has no current
+  reading and no meter was to hand -- so each measure saves by how it works and
+  was checked for behaviour on the board. See `docs/power.md`.
+  - **The CPU drops to 80 MHz asleep** (`CONFIG_PM_ENABLE`): held at 240 while
+    the panel is awake or a session is live.
+  - **The radio follows the session:** no modem sleep in a session, minimum
+    with none, maximum while the panel sleeps too.
+  - **The speaker amplifier turns off** after 5 s of silence and back on before
+    the next sound (`CONFIG_AUDIO_PA_IDLE_OFF_MS`, 0 keeps it on).
+  - **The sleeping clock dims, then goes off:** full brightness for 2 minutes
+    asleep, 40 % for 3 more, then the panel off -- 5 minutes 45 seconds after
+    the last word (`CONFIG_UI_SLEEP_DIM_AFTER_MIN`, `_DIM_PCT`,
+    `CONFIG_UI_SLEEP_OFF_AFTER_MIN`). A touch, a session or an alarm brings it
+    back. It also flushes only its own square.
+  - The console UART is 1 Mbaud, the most it allows with power management on;
+    the USB console, which is what is read, has no baud rate.
+- **Power audit tooling:** TLM gains `slp= bri= ps= vbus= dir=`; Wi-Fi power
+  save changes are logged; `CONFIG_POWER_STATE_WALK` (bench only) holds each
+  state for a USB meter; `host/analyse.py --power` summarises a capture.
+
 ## [0.9.0] - 2026-10-24
 
 Experimental pre-release. Verified on one bench board through screen captures

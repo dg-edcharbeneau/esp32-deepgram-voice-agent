@@ -3,6 +3,7 @@
 #include "esp_timer.h"
 #include "iot_button.h"
 #include "button_gpio.h"
+#include "driver/gpio.h"
 
 #include "alarms.h"
 #include "audio_io.h"
@@ -167,10 +168,33 @@ esp_err_t boot_button_start(void)
         .active_level = 0,
         /* disable_pull left false: with active_level 0 that selects the
          * internal pull-up, which is what makes the released state read high. */
+        /* No 5 ms poll while nobody is pressing: the component stops its timer
+         * and arms a GPIO wake instead, which is what lets the chip light-sleep
+         * (main.c). It resumes polling on the press. */
+        .enable_power_save = true,
     };
 
+    /*
+     * THE GPIO INTERRUPT SERVICE, INSTALLED HERE AND NOT IN IRAM. Power save
+     * makes the button component install it, with ESP_INTR_FLAG_IRAM -- and
+     * being first at boot, its flags would stick for every pin. The touch
+     * handler shares that service, and the LVGL adapter's touch ISR calls
+     * esp_lv_adapter_request_wake_from_isr(), which lives in flash: under an
+     * IRAM service a touch during an NVS write would run it with the cache off.
+     * So install it first, without the flag, as the touch driver always did;
+     * the button's own handler is IRAM_ATTR and works either way. The
+     * component's install then finds it present -- correct, but the GPIO
+     * driver logs that as an error, so that one call runs with the tag muted.
+     */
+    esp_err_t isr = gpio_install_isr_service(0);
+    if (isr != ESP_OK && isr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "GPIO interrupt service: %s", esp_err_to_name(isr));
+    }
+
     button_handle_t btn;
+    esp_log_level_set("gpio", ESP_LOG_NONE);
     esp_err_t err = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &btn);
+    esp_log_level_set("gpio", ESP_LOG_INFO);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "could not claim GPIO %d: %s",
                  BOOT_BUTTON_GPIO, esp_err_to_name(err));

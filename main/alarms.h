@@ -50,6 +50,10 @@ void alarms_tick(void);
  * the panel stays awake and shows the ring screen. */
 bool alarms_ringing(void);
 
+/* The latest any alarm or timer has rung since boot, in ms past due. Once a
+ * second is the check, so up to 1000 is on time. For the TLM line. */
+int alarms_worst_late_ms(void);
+
 /* Stop it. If the agent has not yet said what it was, it still does, once --
  * that is how the user learns which alarm it was. Safe from any task. */
 void alarms_dismiss(void);

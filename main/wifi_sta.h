@@ -63,6 +63,14 @@ esp_err_t wifi_sta_stop(void);
  */
 void wifi_sta_set_power_save(bool enabled);
 
+/* The radio's power save as a level: none, minimum modem sleep (wakes at every
+ * DTIM) or maximum (sleeps through the listen interval). Logged on change. */
+#define WIFI_STA_PS_NONE 0
+#define WIFI_STA_PS_MIN  1
+#define WIFI_STA_PS_MAX  2
+void wifi_sta_set_power_save_mode(int mode);
+int wifi_sta_power_save_mode(void);
+
 
 /*
  * Link quality of the AP the station is associated with.

@@ -35,6 +35,9 @@
 #include "esp_heap_caps.h"
 #include "multi_heap.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
+#include "driver/gpio.h"
+#include "bsp/esp-bsp.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -147,6 +150,91 @@ static volatile bool s_bad_key_notice;
 
 /* How long a new orb colour must hold before it is written to flash. */
 #define COLOR_SAVE_QUIET_MS 2000
+
+#if CONFIG_POWER_STATE_WALK
+#include "esp_wifi.h"
+/*
+ * BENCH AID, NOT A FEATURE: the power walk. Holds the device in one state at a
+ * time for WALK_STEP_MS, with an EVT line to read the USB meter by, so each
+ * consumer's share can be priced: the screen at three brightnesses and off, the
+ * speaker amplifier, the radio's modes, a live session. Run with the cell full
+ * (TLM chgst=4) so USB current is the system's draw and not charging. Every
+ * override is undone at the end and the device carries on as normal.
+ */
+#define WALK_START_MS 45000   /* the boot session has idled out, the clock synced */
+#define WALK_STEP_MS  60000
+static const char *const WALK[] = {
+    "awake, orb face",
+    "asleep, clock 100%",
+    "asleep, clock 40%",
+    "asleep, clock 15%",
+    "asleep, display off",
+    "asleep, clock 100%, speaker off",
+    "asleep, clock 100%, radio max modem",
+    "asleep, clock 100%, radio off",
+    "session live, nobody talking",
+};
+#define WALK_N ((int)(sizeof(WALK) / sizeof(WALK[0])))
+#define WALK_SESSION (WALK_N - 1)
+
+/* The step at `now`: -1 before the walk, WALK_N once it is over. */
+static int walk_step(uint32_t now)
+{
+    if (now < WALK_START_MS) {
+        return -1;
+    }
+    const uint32_t k = (now - WALK_START_MS) / WALK_STEP_MS;
+    return k < (uint32_t)WALK_N ? (int)k : WALK_N;
+}
+
+/* Hold the device in `step`, every pass; set its one-off overrides on entry. */
+static void walk_hold(int step, bool entering)
+{
+    if (entering) {
+        /* Undo whatever the last step set, then set this one's. */
+        ui_bench_power(-1, false);
+        static bool speaker_off, radio_off;
+        if (speaker_off) {
+            audio_io_bench_speaker(true);
+            speaker_off = false;
+        }
+        if (radio_off) {
+            esp_wifi_start();
+            radio_off = false;
+        }
+        if (step >= WALK_N) {
+            ESP_LOGW(TAG, "EVT power walk done -- back to normal");
+            return;
+        }
+        battery_status_t b;
+        battery_get(&b);
+        ESP_LOGW(TAG, "EVT power step %d %s -- read the meter (vbus=%d chgst=%d)", step + 1,
+                 WALK[step], (int)b.vbus, b.chg_state);
+        switch (step) {
+        case 2: ui_bench_power(40, false); break;
+        case 3: ui_bench_power(15, false); break;
+        case 4: ui_bench_power(-1, true); break;
+        case 5: audio_io_bench_speaker(false); speaker_off = true; break;
+        case 7: esp_wifi_stop(); radio_off = true; break;
+        case WALK_SESSION: session_ctl_request_start(); break;
+        default: break;
+        }
+        if (step == 0 && session_ctl_is_running()) {
+            session_ctl_request_stop();
+        }
+    }
+    if (step >= WALK_N) {
+        return;
+    }
+    const bool asleep = step != 0 && step != WALK_SESSION;
+    ui_set_sleep(asleep, false);
+    if (step != 7) {
+        wifi_sta_set_power_save_mode(step == 6     ? WIFI_STA_PS_MAX
+                                     : asleep      ? WIFI_STA_PS_MIN
+                                                   : WIFI_STA_PS_NONE);
+    }
+}
+#endif
 
 static inline uint32_t now_ms(void)
 {
@@ -773,6 +861,32 @@ static void enter_provisioning(void)
     wifi_prov_run();
 }
 
+/*
+ * The board's control outputs keep their level through light sleep. With
+ * CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND every pin is switched to a floating
+ * sleep state while the chip naps; for these that would mean the amplifier
+ * enable drifting up (a pop), and the panel's and touch controller's reset
+ * lines drifting down -- a touch controller held in reset cannot wake anyone.
+ * gpio_sleep_sel_dis() keeps the pin's normal configuration through sleep.
+ * After audio_io_init() (the amplifier pin) and before ui_start() (which
+ * drives the others); the setting is per pin, not per configuration, so the
+ * order of the BSP's own setup does not matter.
+ */
+static void hold_pins_in_sleep(void)
+{
+#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
+    static const gpio_num_t HELD[] = {
+        BSP_POWER_AMP_IO,   /* amplifier enable: low when silent */
+        BSP_LCD_RST,        /* panel reset */
+        BSP_LCD_TOUCH_RST,  /* touch reset (shared with the panel's) */
+        BSP_LCD_CS,         /* QSPI chip select: high when idle */
+    };
+    for (size_t i = 0; i < sizeof(HELD) / sizeof(HELD[0]); i++) {
+        gpio_sleep_sel_dis(HELD[i]);
+    }
+#endif
+}
+
 void app_main(void)
 {
     /*
@@ -780,6 +894,44 @@ void app_main(void)
      * allocated. Compiles to nothing unless CONFIG_HEAP_PROBE is on.
      */
     heap_probe_start();
+
+#if CONFIG_PM_ENABLE
+    /*
+     * FREQUENCY SCALING, AND LIGHT SLEEP THE LOCKS ALLOW. Turned on once, here,
+     * and never toggled (each esp_pm_configure() reallocates the CPU retention
+     * buffer). What decides the state is which locks are held:
+     *
+     *   the panel awake (ui.c "awake") or a session (session_ctl.c "session"):
+     *     CPU_FREQ_MAX -- 240 MHz, no sleep;
+     *   the audio link open (the i2s driver's two APB_FREQ_MAX locks): 80 MHz
+     *     between frames, no sleep -- which is every other state but one;
+     *   deep idle (ui.c), the panel off and the audio closed: no lock at all,
+     *     and the idle task takes the chip into light sleep between the 1 s
+     *     main loop, Wi-Fi beacons and a touch;
+     *   USB plugged in: the USB-Serial-JTAG driver holds NO_LIGHT_SLEEP
+     *     (CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION), so the console stays up and
+     *     a bench board never sleeps. Measure light sleep on battery.
+     *
+     * 80 MHz is the floor on purpose: below it the APB clock falls from 80 MHz,
+     * and with it the console UART and the peripheral timings everything else
+     * was built against.
+     */
+    {
+        const esp_pm_config_t pm = {
+            .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+            .min_freq_mhz = 80,
+#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
+            .light_sleep_enable = true,
+#else
+            .light_sleep_enable = false,
+#endif
+        };
+        const esp_err_t pm_err = esp_pm_configure(&pm);
+        ESP_LOGI(TAG, "power management: %d-%d MHz, light sleep %s, %s", pm.min_freq_mhz,
+                 pm.max_freq_mhz, pm.light_sleep_enable ? "allowed" : "off",
+                 pm_err == ESP_OK ? "on" : esp_err_to_name(pm_err));
+    }
+#endif
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -854,6 +1006,8 @@ void app_main(void)
     } else {
         ui_set_status("setup", false);
     }
+    hold_pins_in_sleep();
+
     if (ui_start() == ESP_OK) {
         audio_io_set_playback_tap(ui_feed_agent);
         audio_io_set_capture_tap(ui_feed_mic);
@@ -1005,6 +1159,40 @@ void app_main(void)
         battery_status_t bat;
         const bool bat_ok = battery_get(&bat);
         ui_set_battery(bat.percent, bat.charging, bat.low, bat_ok);
+#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
+        {
+            /*
+             * NO LIGHT SLEEP ON EXTERNAL POWER. There is nothing to save, and
+             * light sleep stops the USB console. IDF's own guard for that
+             * (CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION) cannot be relied on: its
+             * tick hook allows 3 ticks without a USB start-of-frame, and refills
+             * that allowance only on a reconnect -- so late ticks spend it for
+             * good, and the next miss reads as a disconnect. In deep idle that
+             * took about 28 s, and the console died with the cable still in.
+             * The PMU knows whether USB power is present; that decides it. Held
+             * from boot until a reading says battery, so the first seconds are
+             * the safe way round -- or for 30 s, after which a board whose PMU
+             * does not answer is let go, and sleeps as the USB monitor allows.
+             */
+            static esp_pm_lock_handle_t ext_power;
+            static bool held;
+            if (ext_power == NULL &&
+                esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "ext_power", &ext_power) == ESP_OK) {
+                esp_pm_lock_acquire(ext_power);
+                held = true;
+            }
+            const bool want = bat_ok ? bat.vbus : (now_ms() < 30000);
+            if (ext_power != NULL && want != held) {
+                held = want;
+                if (want) {
+                    esp_pm_lock_acquire(ext_power);
+                } else {
+                    esp_pm_lock_release(ext_power);
+                }
+                ESP_LOGI(TAG, "EVT power %s", want ? "external: no light sleep" : "battery");
+            }
+        }
+#endif
 
         /*
          * WI-FI SIGNAL, read here for the same reason and at the same cadence.
@@ -1110,9 +1298,46 @@ void app_main(void)
          */
         static uint32_t stopped_since_ms;
         static bool prev_asleep;
-        static bool radio_saving;
         const bool panel_asleep = ui_is_asleep();
 
+#if CONFIG_PM_PROFILING
+        {
+            /*
+             * Where the CPU's time goes asleep: the IDF's lock and mode stats,
+             * printed 5 s and 65 s into each sleep, so the difference between
+             * the two is one minute asleep. (The CPU runs at full speed whenever
+             * any task does -- the "rtos" locks -- and drops only while both
+             * cores idle, so a reading taken from a running task always says
+             * 240 MHz; only these totals show the split.) Only with the IDF's
+             * PM profiling on.
+             */
+            static uint32_t asleep_since;
+            static int dumps;
+            if (!prev_asleep && panel_asleep) {
+                asleep_since = now_ms();
+                dumps = 0;
+            }
+            if (panel_asleep && asleep_since != 0 && dumps < 2 &&
+                now_ms() - asleep_since > (dumps == 0 ? 5000u : 65000u)) {
+                dumps++;
+                ESP_LOGI(TAG, "EVT pm dump %d", dumps);
+                esp_pm_dump_locks(stdout);
+            }
+            /* And 5 s into deep idle: which locks are left. On USB only the
+             * USB-Serial-JTAG's should be; anything else is keeping the chip
+             * up on battery too. */
+            static uint32_t deep_since;
+            if (!ui_deep_idle()) {
+                deep_since = 0;
+            } else if (deep_since == 0) {
+                deep_since = now_ms();
+            } else if (deep_since != 1 && now_ms() - deep_since > 5000) {
+                deep_since = 1;   /* once per deep idle */
+                ESP_LOGI(TAG, "EVT pm dump deepidle");
+                esp_pm_dump_locks(stdout);
+            }
+        }
+#endif
         if (prev_asleep && !panel_asleep) {
             /* Something woke the panel -- a finger, almost always. Start counting
              * again from now rather than sleeping straight back down. */
@@ -1120,6 +1345,23 @@ void app_main(void)
         }
         prev_asleep = panel_asleep;
 
+#if CONFIG_POWER_STATE_WALK
+        {
+            static int walked = -1;
+            const int w = walk_step(now_ms());
+            if (w >= 0 && w != walked) {
+                walk_hold(w, true);
+                walked = w;
+                if (w >= WALK_N) {
+                    stopped_since_ms = now_ms();   /* sleep counts afresh after */
+                }
+            }
+            if (w >= 0 && w < WALK_N) {
+                walk_hold(w, false);
+                goto walk_skip;
+            }
+        }
+#endif
         if (critical_cleared && panel_asleep) {
             /* The charger went in, or the reading recovered, while the panel
              * slept dimmed: keep it asleep but bring the brightness back. No
@@ -1153,10 +1395,28 @@ void app_main(void)
             ui_set_sleep(true, false);
         }
 
-        if (panel_asleep != radio_saving) {
-            wifi_sta_set_power_save(panel_asleep);
-            radio_saving = panel_asleep;
+        /*
+         * THE RADIO FOLLOWS THE SESSION, AND SLEEPS DEEPER WITH THE PANEL. A live
+         * session streams audio both ways and modem sleep costs it tens of ms of
+         * jitter, so it gets none -- the battery-critical sleep included, which
+         * keeps a session going. With no session the radio has nothing to carry
+         * but beacons and the hourly SNTP, so it naps between DTIMs (MIN_MODEM)
+         * while the panel is awake, and sleeps through the listen interval
+         * (MAX_MODEM) while it sleeps too. session_ctl puts it back to NONE
+         * itself before a session's first packet; this keeps it there.
+         */
+        {
+            const int want_ps = (session_ctl_is_running() || session_ctl_is_busy())
+                                    ? WIFI_STA_PS_NONE
+                                : panel_asleep ? WIFI_STA_PS_MAX
+                                               : WIFI_STA_PS_MIN;
+            if (want_ps != wifi_sta_power_save_mode()) {
+                wifi_sta_set_power_save_mode(want_ps);
+            }
         }
+#if CONFIG_POWER_STATE_WALK
+walk_skip:
+#endif
 
         uint32_t played, dropped, captured;
         audio_io_stats(&played, &dropped, &captured);
@@ -1336,7 +1596,11 @@ void app_main(void)
         /* Not while something rings: the user is silent through every chime by
          * design, and the cycle needs the session for its next announcement. */
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
-            ready_now && s_activity_ms != 0 && !alarms_ringing()) {
+            ready_now && s_activity_ms != 0 && !alarms_ringing()
+#if CONFIG_POWER_STATE_WALK
+            && walk_step(now_ms()) != WALK_SESSION
+#endif
+            ) {
             /* Unsigned, so correct across the 49.7-day wrap. */
             uint32_t quiet_ms = now_ms() - s_activity_ms;
             if (quiet_ms > (uint32_t)CONFIG_SESSION_IDLE_TIMEOUT_S * 1000) {
@@ -1373,7 +1637,8 @@ void app_main(void)
                  " heap=%" PRIu32 " int=%u intmax=%u dma=%u dmamax=%u"
                  " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
-                 " rssi=%d bars=%d ch=%d clk=%d alm=%d panel=%d",
+                 " rssi=%d bars=%d ch=%d clk=%d alm=%d panel=%d"
+                 " slp=%d bri=%d ps=%d vbus=%d dir=%d di=%d drift=%d alate=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1429,6 +1694,14 @@ void app_main(void)
                  sig_ok ? (int)sig.bars : -1,
                  sig_ok ? (int)sig.channel : -1,
                  /* Where the wall clock came from: 0 none yet, 1 RTC, 2 SNTP. */
-                 (int)clock_source(), alarms_count(), t.panel);
+                 (int)clock_source(), alarms_count(), t.panel,
+                 /* For the power audit: asleep, the panel's brightness (0 off),
+                  * the radio's power save (0 none, 1 min, 2 max modem), USB
+                  * power, and the charger's direction (0 standby, 1 charging,
+                  * 2 discharging) -- with vbus=1 dir=0 the USB current is the
+                  * system's own draw. */
+                 (int)ui_is_asleep(), ui_brightness_pct(), wifi_sta_power_save_mode(),
+                 bat_ok ? (int)bat.vbus : -1, bat_ok ? bat.dir : -1,
+                 (int)ui_deep_idle(), clock_drift_ms_per_hour(), alarms_worst_late_ms());
     }
 }

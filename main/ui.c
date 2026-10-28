@@ -38,14 +38,20 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 
 #include "bsp/display.h"
+#include "esp_lcd_panel_ops.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/touch.h"
 #include "esp_lv_adapter.h"
 #include "esp_lv_adapter_input.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_sleep.h"
+#include "driver/gpio.h"
 
 #include "alarm_sched.h"
 #include "audio_io.h"
@@ -517,6 +523,35 @@ static volatile bool s_sleep_want;
 static volatile bool s_sleep_dim;   /* only the battery-critical sleep dims */
 static bool s_asleep;            /* LVGL task only */
 static bool s_dimmed;            /* LVGL task only */
+static volatile int s_bri_pct = 100;   /* the brightness last set, for the TLM line */
+static uint32_t s_asleep_ms;           /* when the panel last fell asleep */
+static bool s_display_off;             /* blanked after CONFIG_UI_SLEEP_OFF_AFTER_MIN */
+#if CONFIG_UI_DEEP_IDLE
+/* Deep idle (see deep_idle_enter): the panel's IO for its sleep commands, the
+ * state, why it last ended, the task that ends it, and when. */
+static esp_lcd_panel_io_handle_t s_panel_io;
+static volatile bool s_deep_idle;
+static const char *volatile s_wake_cause = "";
+static TaskHandle_t s_waker;
+static uint32_t s_deep_exit_ms;
+/* The touch line armed as the wake source: set by the entry, cleared by the
+ * first of the touch hook and the waker, under s_touch_mux -- so exactly one of
+ * them owns the pin's interrupt state on the way out. */
+static volatile bool s_touch_armed;
+static portMUX_TYPE s_touch_mux = portMUX_INITIALIZER_UNLOCKED;
+/* A wake decided off the LVGL task (deep idle's exit): held until the frame
+ * timer has applied it, so the main loop's once-a-second sleep request cannot
+ * overwrite it first. */
+static volatile bool s_wake_pending;
+#endif
+static esp_lcd_panel_handle_t s_panel; /* for the power walk's display off */
+
+#if CONFIG_POWER_STATE_WALK
+/* BENCH AID: the power walk's overrides, applied by the frame timer -- a
+ * brightness (-1 none) and the panel on or off. See ui_bench_power(). */
+static volatile int s_bench_bri = -1;
+static volatile bool s_bench_display_off;
+#endif
 
 /*
  * THE CLOCK ON DEMAND: a swipe up from the bottom edge shows the orb clock now,
@@ -577,6 +612,33 @@ static bool sw_running(void)
     return sw.state == SW_RUNNING;
 }
 
+/*
+ * The panel awake holds the CPU at full speed (CONFIG_PM_ENABLE): the face's
+ * frame budget was measured at 240 MHz, and a touch must find the panel quick.
+ * Asleep, the clock's 5 fps fits in its 200 ms at any speed, so main.c's power
+ * management may let the CPU drop to its floor. Held from boot.
+ */
+static void pm_awake(bool hold)
+{
+#if CONFIG_PM_ENABLE
+    static esp_pm_lock_handle_t lock;
+    static bool held;
+    if (lock == NULL && esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "awake", &lock) != ESP_OK) {
+        return;
+    }
+    if (hold != held) {
+        held = hold;
+        if (hold) {
+            esp_pm_lock_acquire(lock);
+        } else {
+            esp_pm_lock_release(lock);
+        }
+    }
+#else
+    (void)hold;
+#endif
+}
+
 static void set_frame_period(void)
 {
     static uint32_t set;
@@ -585,7 +647,8 @@ static void set_frame_period(void)
     }
     /* The stopwatch runs at the ring rate while it counts -- its centiseconds
      * want frames -- and at the sleep rate while it stands still. */
-    const uint32_t want = (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
+    const uint32_t want = s_display_off                ? 1000
+                          : (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
                           : s_ring_shown               ? RING_FRAME_MS
                           : s_sw_shown                 ? (sw_running() ? RING_FRAME_MS : SLEEP_FRAME_MS)
                                                        : FRAME_MS;
@@ -1171,7 +1234,19 @@ void ui_set_gesture_handler(void (*handler)(ui_gesture_t gesture))
 void ui_set_sleep(bool sleep, bool dim)
 {
     s_sleep_dim = dim;
+#if CONFIG_UI_DEEP_IDLE
+    if (sleep && s_wake_pending) {
+        return;   /* deep idle's exit is waking the panel; it outranks this */
+    }
+#endif
     s_sleep_want = sleep;
+#if CONFIG_UI_DEEP_IDLE
+    /* The LVGL task is parked in deep idle and would never apply this. */
+    if (!sleep && s_deep_idle && s_waker != NULL) {
+        s_wake_cause = "wake";
+        xTaskNotifyGive(s_waker);
+    }
+#endif
 }
 
 bool ui_is_asleep(void)
@@ -1211,6 +1286,19 @@ void ui_set_clock(bool valid, int hh, int mm, int next_day, int next_hh, int nex
     s_next_mm = next_mm;
     s_clk_valid = valid;
 }
+
+int ui_brightness_pct(void)
+{
+    return s_bri_pct;
+}
+
+#if CONFIG_POWER_STATE_WALK
+void ui_bench_power(int brightness_pct, bool display_off)
+{
+    s_bench_bri = brightness_pct;
+    s_bench_display_off = display_off;
+}
+#endif
 
 void ui_show_stopwatch(void)
 {
@@ -2577,13 +2665,228 @@ static void apply_sleep(bool want)
     }
     if (want != s_asleep) {
         s_asleep = want;
+        s_asleep_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!want && s_display_off && s_panel != NULL) {
+            esp_lcd_panel_disp_on_off(s_panel, true);
+            s_display_off = false;
+        }
         set_frame_period();
+        pm_awake(!want);
     }
     /* Also when only the dimming changed: a cell that turns critical while the
      * panel already sleeps dims it, and the charger un-dims it. */
     s_dimmed = dim;
-    bsp_display_brightness_set(dim ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
+    s_bri_pct = dim ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT;
+    bsp_display_brightness_set(s_bri_pct);
     ESP_LOGI(TAG, "EVT %s%s", want ? "sleep" : "wake", dim ? " dim" : "");
+}
+
+/*
+ * THE LONGER IT SLEEPS, THE LESS IT LIGHTS. The orb clock comes up at full
+ * brightness, to be read across a room; past CONFIG_UI_SLEEP_DIM_AFTER_MIN
+ * nobody has looked for a while, and it dims to CONFIG_UI_SLEEP_DIM_PCT.
+ * Past CONFIG_UI_SLEEP_OFF_AFTER_MIN (0, never, by default) the panel goes
+ * off altogether. An AMOLED's draw is its lit pixels times the brightness, and
+ * this is where the device spends its life. A touch, a session or an alarm
+ * wakes it all back up. Not over the battery-critical dim, which is lower.
+ */
+static void sleep_deepens(uint32_t now)
+{
+    if (!s_asleep || s_dimmed) {
+        return;
+    }
+#if CONFIG_POWER_STATE_WALK
+    if (s_bench_bri >= 0 || s_bench_display_off) {
+        return;   /* the walk is pricing brightness itself */
+    }
+#endif
+    const uint32_t mins = (now - s_asleep_ms) / 60000;
+#if CONFIG_UI_SLEEP_OFF_AFTER_MIN > 0
+    if (mins >= CONFIG_UI_SLEEP_OFF_AFTER_MIN && !s_display_off && s_panel != NULL) {
+        esp_lcd_panel_disp_on_off(s_panel, false);
+        s_display_off = true;
+        s_bri_pct = 0;
+        set_frame_period();
+        ESP_LOGI(TAG, "EVT sleep display off");
+        return;
+    }
+#endif
+#if CONFIG_UI_SLEEP_DIM_AFTER_MIN > 0
+    if (mins >= CONFIG_UI_SLEEP_DIM_AFTER_MIN && !s_display_off &&
+        s_bri_pct != CONFIG_UI_SLEEP_DIM_PCT) {
+        s_bri_pct = CONFIG_UI_SLEEP_DIM_PCT;
+        bsp_display_brightness_set(s_bri_pct);
+        ESP_LOGI(TAG, "EVT sleep dim %d%%", s_bri_pct);
+    }
+#endif
+    (void)mins;
+}
+
+/*
+ * DEEP IDLE: THE CHIP SLEEPS WHILE THE PANEL IS DARK.
+ *
+ * Once sleep_deepens() has turned the panel off, nothing the device does
+ * needs the CPU more than once a second -- the main loop's alarm check -- and
+ * the rest of the time it could be in light sleep (main.c). Three things kept
+ * it awake: this task's own 1 ms tick, the audio link's power-management
+ * locks, and the panel controller still running. So, on entry: the panel's
+ * controller into its sleep mode (SLPIN), the audio link closed
+ * (audio_io_deep_idle), the touch line armed as a wake source, and the LVGL
+ * adapter paused -- which stops its tick and parks this task.
+ *
+ * A paused LVGL task cannot wake itself, so one small task does every exit:
+ * a touch (the touch ISR's hook pokes it), or ui_set_sleep(false) from the main
+ * loop for a session, an alarm or the stopwatch. It undoes the entry in
+ * reverse and resumes LVGL; the existing paths then wake the panel exactly as
+ * they always have -- the press is still in the touch driver's queue.
+ *
+ * Not re-entered for DEEP_IDLE_REENTER_MS after an exit, so a press is read
+ * before the dark panel can put the device back under; a touch that turns out
+ * to be nothing (an INT pulse with no point) simply re-enters after it.
+ */
+#if CONFIG_UI_DEEP_IDLE
+#define DEEP_IDLE_REENTER_MS 10000
+#define PANEL_SLPIN  0x10
+#define PANEL_SLPOUT 0x11
+#define PANEL_SLPOUT_WAIT_MS 120
+
+/* A bare command to the CO5300 over QSPI, framed as its driver frames them. */
+static void panel_cmd(uint8_t cmd)
+{
+    if (s_panel_io != NULL) {
+        esp_lcd_panel_io_tx_param(s_panel_io, (int)((0x02u << 24) | ((uint32_t)cmd << 8)),
+                                  NULL, 0);
+    }
+}
+
+static void deep_idle_enter(uint32_t now)
+{
+    if (s_deep_idle || s_waker == NULL || s_panel_io == NULL || !s_display_off ||
+        !s_sleep_want || s_wake_pending ||
+        (s_deep_exit_ms != 0 && now - s_deep_exit_ms < DEEP_IDLE_REENTER_MS)) {
+        return;
+    }
+    panel_cmd(PANEL_SLPIN);
+    audio_io_deep_idle(true);
+    /*
+     * In this order, and s_deep_idle last. The touch line is armed before
+     * anything can ask the waker to disarm it (the hook and ui_set_sleep() both
+     * act only once s_deep_idle is set). And the pause is requested before the
+     * waker can resume: from this task it only sets the flag and returns, the
+     * task parking once this callback is done -- so a resume that follows at
+     * once, from the other core, clears it and the task never parks.
+     */
+    portENTER_CRITICAL(&s_touch_mux);
+    /* Level, not edge: only a level can wake a light-sleeping chip. It also
+     * replaces the pin's falling-edge interrupt until the exit restores it. */
+    gpio_wakeup_enable(BSP_LCD_TOUCH_INT, GPIO_INTR_LOW_LEVEL);
+    s_touch_armed = true;
+    portEXIT_CRITICAL(&s_touch_mux);
+    esp_lv_adapter_pause(0);
+    s_deep_idle = true;
+    ESP_LOGI(TAG, "EVT deepidle enter");
+    /* A wake asked for between this frame's apply_sleep() and the line above
+     * found s_deep_idle false and poked no one: catch it here. */
+    if (!s_sleep_want) {
+        s_wake_cause = "wake";
+        xTaskNotifyGive(s_waker);
+    }
+}
+
+/* ISR context, inside the LVGL adapter's touch ISR (the GPIO interrupt service
+ * is not IRAM -- boot_button.c -- so flash code is fine here). The level
+ * trigger would refire for as long as a finger rests, so it is switched off
+ * at once; the waker restores the edge interrupt. */
+static void touch_irq_hook(esp_lcd_touch_handle_t tp, void *ctx)
+{
+    LV_UNUSED(tp);
+    LV_UNUSED(ctx);
+    bool first = false;
+    portENTER_CRITICAL_ISR(&s_touch_mux);
+    if (s_touch_armed) {
+        s_touch_armed = false;
+        gpio_intr_disable(BSP_LCD_TOUCH_INT);
+        first = true;
+    }
+    portEXIT_CRITICAL_ISR(&s_touch_mux);
+    if (first && s_waker != NULL) {
+        s_wake_cause = "touch";
+        BaseType_t woken = pdFALSE;
+        vTaskNotifyGiveFromISR(s_waker, &woken);
+        portYIELD_FROM_ISR(woken);
+    }
+}
+
+static void deep_idle_waker(void *arg)
+{
+    LV_UNUSED(arg);
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (!s_deep_idle) {
+            continue;
+        }
+        /* Disarm and put the edge interrupt back in one step against the hook:
+         * if it fired first it has already disabled the pin, and this enables
+         * it after; if this is first, the hook sees nothing armed and leaves
+         * the pin alone -- a finger still pulsing INT cannot switch it off. */
+        portENTER_CRITICAL(&s_touch_mux);
+        s_touch_armed = false;
+        gpio_wakeup_disable(BSP_LCD_TOUCH_INT);
+        gpio_set_intr_type(BSP_LCD_TOUCH_INT, GPIO_INTR_NEGEDGE);
+        gpio_intr_enable(BSP_LCD_TOUCH_INT);
+        portEXIT_CRITICAL(&s_touch_mux);
+        /* The touch IS the wake: a quick tap may be over before LVGL, resumed
+         * after the panel's wake-up below, gets to read it. */
+        s_wake_pending = true;
+        s_sleep_want = false;
+        audio_io_deep_idle(false);
+        panel_cmd(PANEL_SLPOUT);
+        vTaskDelay(pdMS_TO_TICKS(PANEL_SLPOUT_WAIT_MS));
+        s_deep_exit_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        s_deep_idle = false;
+        esp_lv_adapter_resume();
+        /* The frame timer runs once a second while the panel is off; run it now,
+         * so the panel is back within the wake-up wait above, not a second on. */
+        if (esp_lv_adapter_lock(100) == ESP_OK) {
+            if (s_frame_timer != NULL) {
+                lv_timer_ready(s_frame_timer);
+            }
+            esp_lv_adapter_unlock();
+        }
+        ESP_LOGI(TAG, "EVT deepidle exit %s", (const char *)s_wake_cause);
+#if CONFIG_PM_PROFILING
+        /* How the chip spent its time, light sleep included (mode SLEEP):
+         * after a run on battery, replug and tap to read it. */
+        esp_pm_dump_locks(stdout);
+#endif
+    }
+}
+
+static void deep_idle_start(lv_indev_t *touch)
+{
+    if (s_panel_io == NULL || touch == NULL) {
+        return;
+    }
+    const esp_lv_adapter_touch_callbacks_t cbs = {.on_interrupt = touch_irq_hook};
+    esp_lv_adapter_set_touch_callbacks(touch, &cbs);
+    esp_sleep_enable_gpio_wakeup();
+    /* Stack in PSRAM: internal RAM is what the TLS handshake runs short of,
+     * and this task never touches flash, the one thing a PSRAM stack forbids. */
+    if (xTaskCreatePinnedToCoreWithCaps(deep_idle_waker, "deep_idle", 3072, NULL, 5, &s_waker,
+                                        tskNO_AFFINITY, MALLOC_CAP_SPIRAM) != pdPASS) {
+        s_waker = NULL;
+        ESP_LOGE(TAG, "deep idle waker did not start; deep idle off");
+    }
+}
+#endif
+
+bool ui_deep_idle(void)
+{
+#if CONFIG_UI_DEEP_IDLE
+    return s_deep_idle;
+#else
+    return false;
+#endif
 }
 
 static void frame_timer_cb(lv_timer_t *timer)
@@ -2593,6 +2896,39 @@ static void frame_timer_cb(lv_timer_t *timer)
 
     /* Before anything draws, like the face and colour switches below. */
     apply_sleep(s_sleep_want);
+#if CONFIG_UI_DEEP_IDLE
+    if (s_wake_pending && !s_asleep) {
+        s_wake_pending = false;   /* applied: the main loop sees the wake edge */
+    }
+#endif
+    sleep_deepens((uint32_t)(esp_timer_get_time() / 1000));
+    if (s_display_off) {
+        /* Nothing to draw on a blank panel; a press turns it back on. */
+        tlm_accumulate_frame(esp_timer_get_time());
+#if CONFIG_UI_DEEP_IDLE
+        deep_idle_enter((uint32_t)(esp_timer_get_time() / 1000));
+#endif
+        return;
+    }
+#if CONFIG_POWER_STATE_WALK
+    {
+        /* The power walk's overrides, on the task that owns the panel's bus. */
+        static int bri_applied = -1;
+        static bool off_applied;
+        const int bri = s_bench_bri;
+        if (bri != bri_applied) {
+            bri_applied = bri;
+            s_bri_pct = bri >= 0 ? bri : (s_dimmed ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
+            bsp_display_brightness_set(s_bri_pct);
+        }
+        const bool off = s_bench_display_off;
+        if (off != off_applied && s_panel != NULL) {
+            off_applied = off;
+            esp_lcd_panel_disp_on_off(s_panel, !off);
+            s_bri_pct = off ? 0 : s_bri_pct;
+        }
+    }
+#endif
 
     int64_t draw_start_us = esp_timer_get_time();
     bool idle = ((uint32_t)(draw_start_us / 1000) - s_last_feed_ms) > IDLE_MS;
@@ -3174,6 +3510,7 @@ static lv_display_t *display_start(void)
     if (bsp_display_new(&panel_cfg, &panel, &panel_io) != ESP_OK) {
         return NULL;
     }
+    s_panel = panel;
 
     esp_lv_adapter_display_config_t disp_cfg = {
         .panel = panel,
@@ -3216,7 +3553,16 @@ static lv_display_t *display_start(void)
         return NULL;
     }
     const esp_lv_adapter_touch_config_t tcfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, tp);
+    /* The GPIO interrupt service is already installed (boot_button.c, which
+     * explains why); the touch driver's own install finds it so, correctly,
+     * and the GPIO driver logs that as an error. Muted for this one call. */
+    esp_log_level_set("gpio", ESP_LOG_NONE);
     s_touch = esp_lv_adapter_register_touch(&tcfg);
+    esp_log_level_set("gpio", ESP_LOG_INFO);
+#if CONFIG_UI_DEEP_IDLE
+    s_panel_io = panel_io;
+    deep_idle_start(s_touch);
+#endif
     if (s_touch == NULL) {
         return NULL;
     }
@@ -3449,6 +3795,7 @@ static esp_err_t build_ui(void)
     apply_tint();
 
     ui_panel_init(canvas_obj);
+    pm_awake(true);   /* the panel starts awake */
     s_clock_ok = ui_clock_init(canvas_obj);
     ui_ring_init(canvas_obj);
 #if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \

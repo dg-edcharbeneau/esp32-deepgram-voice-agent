@@ -259,6 +259,10 @@ esp_err_t wifi_sta_start(const char *ssid, const char *pass)
     wifi_config_t sta_cfg = {
         .sta = {
             .threshold.authmode = open ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK,
+            /* Under max modem sleep the radio wakes for every third beacon
+             * (~300 ms). 3 is also the driver's value for 0; named here because
+             * deep idle's light sleep is paced by it. */
+            .listen_interval = 3,
         },
     };
     /* strncpy, not assignment: the config fields are fixed-size uint8_t arrays. */
@@ -340,9 +344,32 @@ esp_err_t wifi_sta_stop(void)
  */
 void wifi_sta_set_power_save(bool enabled)
 {
-    esp_err_t err = esp_wifi_set_ps(enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_wifi_set_ps(%s): %s",
-                 enabled ? "MIN_MODEM" : "NONE", esp_err_to_name(err));
+    wifi_sta_set_power_save_mode(enabled ? WIFI_STA_PS_MIN : WIFI_STA_PS_NONE);
+}
+
+static volatile int s_ps_mode = WIFI_STA_PS_NONE;
+
+void wifi_sta_set_power_save_mode(int mode)
+{
+    static const wifi_ps_type_t PS_TYPE[] = {WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM};
+    static const char *const NAME[] = {"NONE", "MIN_MODEM", "MAX_MODEM"};
+    if (mode < WIFI_STA_PS_NONE || mode > WIFI_STA_PS_MAX) {
+        return;
     }
+    esp_err_t err = esp_wifi_set_ps(PS_TYPE[mode]);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(%s): %s", NAME[mode], esp_err_to_name(err));
+        return;
+    }
+    if (mode != s_ps_mode) {
+        s_ps_mode = mode;
+        /* Logged on success too: the power audit reads the radio's state off the
+         * log, and a change that only logs when it fails is invisible. */
+        ESP_LOGI(TAG, "EVT wifi ps %s", NAME[mode]);
+    }
+}
+
+int wifi_sta_power_save_mode(void)
+{
+    return s_ps_mode;
 }

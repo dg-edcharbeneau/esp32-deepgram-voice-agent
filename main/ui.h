@@ -136,6 +136,10 @@ void ui_set_sleep(bool sleep, bool dim);
 /* Whether the display is currently in that state. */
 bool ui_is_asleep(void);
 
+/* Whether the device is in deep idle: the panel dark and the chip free to
+ * light-sleep (ui.c). For the TLM line. */
+bool ui_deep_idle(void);
+
 void ui_set_stopped(bool stopped);
 
 /*
@@ -210,6 +214,13 @@ void ui_set_ring(const ui_ring_t *ring);
 /* Bring the stopwatch screen up, as a voice start or lap does. Safe from any
  * task: applied by the frame timer. */
 void ui_show_stopwatch(void);
+
+/* The panel brightness last set, 0 with the panel off, for the TLM line. */
+int ui_brightness_pct(void);
+
+/* BENCH AID (CONFIG_POWER_STATE_WALK): override the brightness (-1 none) and
+ * switch the panel off, so the power walk can price each. Safe from any task. */
+void ui_bench_power(int brightness_pct, bool display_off);
 
 /* The stopwatch screen is up and counting: main.c holds sleep off for it. */
 bool ui_stopwatch_holds_awake(void);
