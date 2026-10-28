@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-10-18
 
 ### Fixed
 
@@ -178,15 +178,16 @@ Experimental pre-release.
 
 - **Noise suppression is on by default.** `CONFIG_MIC_NS_ENABLE` and
   `CONFIG_MIC_NS_DEFAULT_ON` both default to `y`, so a fresh checkout builds a
-  device that denoises from boot. The BOOT button's double click still overrides
-  it at runtime and the choice persists.
+  device that denoises from boot. A double click on BOOT turns it off, and the
+  choice persists.
 
-  The measurements that argued against this are kept rather than dropped: in the
-  room it was tested in the denoiser did not improve transcription -- the no-NS
-  baseline already scored 4/4 -- and it costs about a quarter of the frame rate
-  (20.0 -> 14.8 fps), 7.4 kB of internal RAM, and 64 ms of uplink latency. It is
-  on for louder rooms than that one, and 4/4 is the bar to beat before anyone
-  calls it a win. See [docs/audio-path.md](docs/audio-path.md).
+  This is a product judgement, not a measurement result. Almost nobody changes
+  a default, so the default decides what nearly every device does, and the two
+  ways of being wrong are not equally bad. Wrong in a quiet room costs about 14%
+  of the frame rate, 7.4 kB of internal RAM and 64 ms of uplink latency, with
+  transcription unaffected. Wrong in a loud room costs the transcript, which is
+  the point of the device. The measurements that argue against the default are
+  kept in [docs/audio-path.md](docs/audio-path.md).
 
 ### Added
 

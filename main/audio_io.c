@@ -269,6 +269,19 @@ static int s_aec_chunk;
  *                      fps     int mean   intmax    transcription
  *   NS off           20.00      60,331    26,624    4/4 lines correct
  *   esp-sr           14.80      52,894    21,504    3/3 in window
+ *
+ * THE fps COLUMN WAS RE-MEASURED AND DID NOT AGREE. Nine arms over two days:
+ * NS on reads 14.80 / 14.81 / 14.87 / 14.89 / 14.91 / 14.96 / 15.00, so the
+ * 14.80 above is solid -- but NS off reads 17.24-17.74, never 20.00. So the
+ * cost is about -14%, not the -26% this table implies, and the baseline is the
+ * figure that has failed to reproduce.
+ *
+ * Three suspects tested, all exonerated: CONFIG_HEAP_PROBE (+0.9%),
+ * CONFIG_AUDIO_CAPTURE_ALWAYS (0.02-0.13 fps), and the code itself -- the
+ * September tree was checked out into a worktree, built NS-off and flashed, and
+ * read 17.22 against today's 17.37 at matched ambient. The 20.00 cannot be
+ * reproduced from the source that recorded it, so it is that READING which is
+ * unreliable, not any change since. docs/audio-path.md has the whole chain.
  *   SpeexDSP          8.63      60,903    29,696    dropped word onsets
  *
  * SPEEXDSP WAS EVALUATED AND REMOVED. It cost 57% of the frame rate -- the
@@ -282,8 +295,20 @@ static int s_aec_chunk;
  * NEITHER ENGINE IMPROVED TRANSCRIPTION AT THIS ROOM'S NOISE LEVEL. Deepgram
  * already handled the audio unaided, so in that room the denoiser paid frame
  * rate for nothing. The feature ships anyway, for louder rooms than that one --
- * but the number above is the one to beat before anyone calls it a win, and it
- * is kept here rather than quietly dropped for that reason.
+ * and the 4/4 above is the number to beat before anyone calls it a win.
+ *
+ * A LOUD ROOM HAS SINCE BEEN TRIED BY HAND AND THE DENOISER HELPED (2026-09-19,
+ * both arms, one sitting). That is the first result in its favour -- but it was
+ * uninstrumented: no log, so no per-arm transcripts and no confirmation the two
+ * arms met the same ambient. Reported, not measured. docs/audio-path.md carries
+ * the field report and keeps the instrumented run as an open item.
+ *
+ * AND THAT IS WHY IT SHIPS ON ANYWAY. Almost nobody changes a default, so the
+ * default decides what nearly every device does, and the two ways of being
+ * wrong are not equally bad: wrong in a quiet room costs ~14% of the frame rate
+ * with transcription unaffected, wrong in a loud room costs the transcript. The
+ * default belongs where the expensive mistake is the one it prevents. A product
+ * judgement, not a measurement -- the numbers above are the honest price of it.
  *
  * NS ABOVE THE VAD WAS A MISTAKE, AND HAS BEEN FIXED. The VAD compares the peak
  * it is given against CONFIG_AEC_UPLINK_VAD_PEAK, and a denoiser upstream of it
