@@ -52,6 +52,11 @@ typedef struct {
     /* percent has fallen to CONFIG_BATTERY_LOW_PCT, with hysteresis on the way
      * back up so a cell sitting on the threshold does not chatter. */
     bool low;
+    /* USB power present, and the charger's current direction (0 standby, 1
+     * charging, 2 discharging). Diagnostic, for the power audit: with VBUS in and
+     * the cell full, USB current is the system's own draw. */
+    bool vbus;
+    int dir;
 } battery_status_t;
 
 /*

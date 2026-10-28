@@ -85,6 +85,29 @@ menu "Deepgram Agent Device"
             How long silence may run before a turn is force-ended. 0 omits the
             field and uses the server default.
 
+    config AUDIO_RECORD
+        bool "Record each session's microphone audio for debugging"
+        depends on AEC_ENABLE
+        default n
+        help
+            DEBUG ONLY. Records the first AUDIO_RECORD_SECONDS of every session
+            into PSRAM -- two channels, the raw microphone before echo
+            cancellation and exactly what was sent to Deepgram -- and prints it
+            to the console as base64 once the session ends.
+            host/rec2wav.py turns a capture of that log into a WAV labelled
+            with the session's request_id, aligned to the server's
+            "seconds into call".
+
+            Costs ~2 kB x 2 of PSRAM per second recorded, a memcpy per 64 ms
+            block on the capture task, and a few seconds of console traffic
+            after each session. It records the room: do not leave it on.
+
+    config AUDIO_RECORD_SECONDS
+        int "Seconds of each session to record"
+        depends on AUDIO_RECORD
+        default 60
+        range 5 120
+
     config DEEPGRAM_LOG_WIRE_JSON
         bool "Log every JSON message sent to Deepgram"
         default n
@@ -195,11 +218,44 @@ menu "Deepgram Agent Device"
 
     config MIC_IN_GAIN
         int "Microphone ADC gain (dB)"
-        default 24
+        default 18
         range 0 48
         help
-            spec_analyzer_radial uses 24 dB on this board. Raise it if mic peaks
-            stay near zero while you are speaking.
+            18 dB, measured, and NOT higher: the gain is what decides whether the
+            agent's own voice clips the microphone, and a clipped echo cannot be
+            cancelled.
+
+            Measured 2026-10-22 at volume 70, with a recording of the raw mic and
+            of exactly what went to Deepgram (CONFIG_AUDIO_RECORD):
+              24 dB  the echo plus a voice over it pinned the mic at 32,768. Barge-in
+                     failed, and replaying the uplink into Flux STT on its own
+                     found no turn either -- the interruption never left the
+                     device intact.
+              30 dB  31% of mic blocks clipped during replies, the canceller let
+                     the echo through, and the device heard itself read the time
+                     and answered it.
+              18 dB  no clipping; residual echo under 100 in quiet passages
+                     (it crosses 400 in loud ones -- see AEC_UPLINK_VAD_PEAK);
+                     interruptions
+                     detected reliably.
+            spec_analyzer_radial uses 24 dB, which is right for a device that
+            never listens while it plays. Lowering this needs AEC_UPLINK_VAD_PEAK
+            lowered with it: see there.
+
+    config MIC_GAIN_TOOL
+        bool "Let the agent change the mic gain by voice (experimental)"
+        default y
+        help
+            Adds a set_mic_gain tool: "set your microphone gain to 21". The gain
+            applies at once, is saved, and survives a reset; the uplink gate
+            (AEC_UPLINK_VAD_PEAK) is rescaled with it so it keeps meaning the same
+            loudness. 6 to 30 dB in the ES7210's 3 dB steps.
+
+            Experimental, and on so a released image can be tuned without a
+            rebuild. MIC_IN_GAIN is a measured value, not a taste: this is for
+            re-measuring it on a new board or in a new room, and 18 dB is where
+            to come back to. Turning the option off ignores any saved gain and
+            goes back to MIC_IN_GAIN. It costs about 190 bytes of Settings.
 
     config MIC_LEVEL_LOG
         bool "Log microphone peak level every 3 s"
@@ -348,18 +404,30 @@ menu "Deepgram Agent Device"
 
     config AEC_UPLINK_VAD_PEAK
         int "Post-AEC peak that counts as speech during playback"
-        default 400
+        default 200
         range 50 8000
         depends on AEC_UPLINK_VAD
         help
             Peak absolute sample, measured AFTER cancellation, above which a
             block is treated as somebody talking rather than as residual echo.
 
-            Measured on this board at volume 70, from the "mic peak ... out="
-            log: with nobody talking over the agent, post-AEC peaks ran 5-40 and
-            touched 263 at worst; talking over it produced 533, 1349 and 1607.
-            400 sits in that gap, nearer the noise than the speech so a quiet
-            barge-in still opens the link.
+            IT SCALES WITH MIC_IN_GAIN. It is a sample value, so the same voice
+            reads half as large at 6 dB less gain. 400 was chosen at 24 dB --
+            residual echo 5-40, someone talking over the agent 533-1607 -- and
+            200 is that same threshold at 18 dB. Measured 2026-10-22: left at 400
+            after the gain came down, the gate cut a talking-over voice into
+            fragments and interruptions only landed in the agent's pauses; at
+            200 it passed every block of them. Change one, change the other.
+
+            The gate is NOT an echo detector, and must not be used as one.
+            Residual echo stays under 100 in the agent's quiet passages but
+            regularly crosses 400 in its loud ones -- so at 200 the uplink is
+            open for most of a reply (about 86% measured), which is what lets an
+            interruption through, and costs only bandwidth. A device-side
+            decision on this signal does not hold up: ducking the agent on it
+            (tried 2026-10-23, -12 dB after two blocks over 400) fired 16 times
+            across two replies with nobody talking and pumped the agent's
+            volume up and down.
 
             Too low and the reply burst keeps the uplink open and the link dies
             as before; too high and quiet interruptions are ignored. Retune from
@@ -538,6 +606,19 @@ menu "Deepgram Agent Device"
 
             0 disables the timeout and restores the old always-on behaviour.
 
+    config AUDIO_PA_IDLE_OFF_MS
+        int "Turn the speaker amplifier off after this long silent (ms, 0 = never)"
+        default 5000
+        range 0 600000
+        help
+            The amplifier (GPIO46) draws current even into silence, and the
+            speaker is open for the device's whole life -- the codec stays
+            open because reopening it clicks. So only the amplifier is
+            switched: off once nothing has played for this long, back on
+            before the next sound, with 20 ms for it to come up. If a click or
+            a clipped first syllable is heard, raise this or set 0 to keep it
+            on, as it always was.
+
     config AUDIO_CAPTURE_ALWAYS
         bool "Keep visualizing the microphone while the session is stopped"
         default n
@@ -573,6 +654,89 @@ menu "Deepgram Agent Device"
             1000 ms gives several samples inside a spoken word. Raise it to reduce
             log volume for long unattended runs; note that a window shorter than a
             frame period will report frames=0.
+
+    config UI_SCREENSHOT_TOUR
+        bool "Capture every orb state over serial (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, runs the display
+            test on its own -- every orb state, then frozen -- and prints three
+            captures of the screen per step over the serial console, 1.5, 2.5
+            and 3.5 s into it. host/shot2png.py turns the log into PNGs.
+
+            What is captured is the face's canvas: LVGL labels on top of it,
+            such as the status word, are not in the images. The microphone is
+            live throughout (monitor mode), so the states that respond to sound
+            show the room as it was. Costs 434 kB of PSRAM for the copy.
+
+    config UI_CLOCK_PREVIEW
+        bool "Orb clock preview (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, shows the orb
+            clock -- the sleeping panel's face -- in four set states for 3 s
+            each, whether or not the device is asleep or the time is known:
+            the mockup's own 2:38 PM in white, the same in purple, 9:05 AM with
+            an alarm set and a low battery, and 21:52 in 24-hour while
+            charging. Prints two captures of each over serial, a second apart;
+            host/shot2png.py turns the log into PNGs. Then the face carries on
+            as normal. Costs 434 kB of PSRAM for the capture copy.
+
+    config UI_RING_SELFTEST
+        bool "Ring screen self-test (bench only)"
+        depends on CLOCK
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Sets a real "Tea timer" 25 s after boot
+            and a real "Wake up" alarm 90 s after the clock is known, then
+            drives the ring screen through the same hit tests a finger uses:
+            the timer is left to cycle (chime, announcement, chime) and stopped
+            after 40 s; the alarm is snoozed three minutes with three taps,
+            rings again, and is stopped. Prints captures of each step over
+            serial for host/shot2png.py. Costs 434 kB of PSRAM for the copy.
+
+    config UI_STOPWATCH_SELFTEST
+        bool "Stopwatch screen self-test (bench only)"
+        depends on CLOCK
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, opens the
+            stopwatch screen and presses its buttons through the same hit test
+            a finger uses -- play, lap, pause, reset -- printing captures of it
+            ready, running, running with a lap, and paused over serial for
+            host/shot2png.py. Then hands back to the face. Costs 434 kB of
+            PSRAM for the capture copy.
+
+    config POWER_STATE_WALK
+        bool "Power walk: hold each device state for the meter (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. 45 s after boot, holds the device in one
+            state at a time for 60 s each, with an "EVT power step" line to read
+            a USB power meter by: awake on the orb face; asleep on the orb clock
+            at 100, 40 and 15 % brightness and with the panel off; asleep with
+            the speaker amplifier off; with the radio in maximum modem sleep;
+            with the radio off; and a live session with nobody talking. Run it
+            with the cell full (TLM chgst=4), so the USB current is the
+            system's draw and not charging. Every override is undone at the end.
+
+    config UI_PANEL_SELFTEST
+        bool "Touch panel self-test (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds into the first live session,
+            drives the touch panel through every page and control -- volume and
+            mic gain up and down, three colours, noise reduction and the clock
+            format there and back, the alarm page's buttons -- through the same
+            hit tests a finger uses, 1.5 s apart, then closes it. Everything it
+            changes it puts back; an alarm's cancel is only armed, never
+            confirmed.
+
+            It exists so the panel's draw time ("EVT panel draw"), its effect on
+            internal RAM (TLM int=/intmax=/dma=) and every action ("EVT ctl")
+            can be read off the serial log with nobody touching the board. Every
+            repaint is also printed as a screen capture, for host/shot2png.py
+            (434 kB of PSRAM for the copy).
 
     config UI_SHOW_INDICATORS
         bool "Draw the touch target and what a tap will do"
@@ -619,12 +783,56 @@ menu "Deepgram Agent Device"
         help
             Index into the face table in ui.c. Set by the choice above.
 
+    config UI_SLEEP_DIM_AFTER_MIN
+        int "Dim the sleeping clock after this many minutes (0 = never)"
+        default 2
+        range 0 1440
+        help
+            The orb clock comes up at full brightness when the device sleeps,
+            to be read across a room. Past this long asleep nobody has looked
+            for a while, and it dims to UI_SLEEP_DIM_PCT. An AMOLED's draw is
+            its lit pixels times its brightness, and sleep is where this
+            device spends its life. A touch, a session or an alarm brings it
+            back to full.
+
+    config UI_SLEEP_DIM_PCT
+        int "Brightness of the dimmed sleeping clock (%)"
+        default 40
+        range 5 100
+
+    config UI_DEEP_IDLE
+        bool "Deep idle: let the chip light-sleep once the panel is off"
+        default y
+        depends on FREERTOS_USE_TICKLESS_IDLE
+        help
+            Once the sleeping panel has gone off (UI_SLEEP_OFF_AFTER_MIN), put
+            the panel controller to sleep, close the audio link and pause the
+            display task, so nothing holds the chip awake and it light-sleeps
+            between the once-a-second main loop, Wi-Fi beacons and a touch. A
+            touch, the BOOT button, a session, an alarm or the stopwatch
+            brings everything back. Needs UI_SLEEP_OFF_AFTER_MIN above 0 to
+            ever happen. Off: the panel goes dark but the chip stays awake,
+            as before.
+
+    config UI_SLEEP_OFF_AFTER_MIN
+        int "Turn the panel off after this many minutes asleep (0 = never)"
+        default 5
+        range 0 1440
+        help
+            Past this long asleep the panel goes off altogether and nothing
+            is drawn -- the frame timer drops to once a second -- and a touch,
+            a session or an alarm turns it back on. With the defaults the clock
+            is bright for 2 minutes, dimmed for 3, then off: 5 minutes 45
+            seconds after the last word. 0 keeps the clock up for good.
+
     choice UI_DEFAULT_ORB_COLOR_CHOICE
         prompt "Default orb colour"
         default UI_DEFAULT_ORB_COLOR_WHITE
         help
-            What colour the orb's dots boot as. Any of these can be asked for at
-            runtime ("change the colour to teal"), so this only picks the default.
+            What colour the orb's dots boot as until one is chosen. Any of these
+            can be asked for at runtime ("change the colour to teal") or picked
+            on the touch panel, and the last one chosen is saved and booted in
+            from then on, so this only picks the out-of-box look.
 
             Named colours rather than a raw hex on purpose: every colour the
             device can boot in is then also one the agent can be asked to return
@@ -730,9 +938,14 @@ menu "Deepgram Agent Device"
     config BATTERY_SHOW_DOTS
         bool "Show the charge dots on screen"
         depends on BATTERY
-        default y
+        default n
         help
-            Four dots following the display's outer curve from 1 to 2 o'clock,
+            OFF BY DEFAULT: the orb clock's status row shows the charge -- a
+            battery whose fill is the level, red when low, the percentage and
+            a bolt while charging -- whenever the device sleeps or the clock is
+            swiped up. These dots predate it and are kept as an option.
+
+            Four dots following the display's outer curve round 3 o'clock,
             each worth a quarter of the charge, filling clockwise. Dots still
             held go bright, spent ones go dim, so 50% reads as two bright then
             two dim. A bolt continues the arc past them while current is going
@@ -820,20 +1033,21 @@ menu "Deepgram Agent Device"
             Off costs nothing: no code, no event handler.
 
     config WIFI_SIGNAL_SHOW_BARS
-        bool "Show the signal icon on screen"
+        bool "Show the weak-signal icon on screen"
         depends on WIFI_SIGNAL
         default y
         help
+            A WARNING ONLY: shown while the signal is weak (WIFI_SIGNAL_WEAK_DBM,
+            with wifi_sta.c's hysteresis), conversation or not, and not
+            otherwise. The orb clock's status row is where the signal is read
+            at rest, whenever the device sleeps or the clock is swiped up.
+
             The familiar wifi glyph -- a dot with three arcs fanning out above
-            it -- at 10 to 11 o'clock, balancing the battery dots across the
-            panel. Four elements for four bars: the dot alone is one, each arc
-            past it is one more, which is the progression every phone draws.
+            it -- at 9 o'clock. Four elements for four bars: the dot alone is
+            one, each arc past it is one more, which is the progression every
+            phone draws.
             Lit parts go bright, the rest go dim. It takes the orb's colour, so
             set_color moves it too.
-
-            Shown while the session is stopped, the display is asleep, or the
-            signal is weak. Not during a conversation: the face is the point
-            then, and a permanent gauge over it is clutter.
 
     config WIFI_SIGNAL_WEAK_DBM
         int "Weak-signal warning threshold (dBm)"
@@ -853,5 +1067,87 @@ menu "Deepgram Agent Device"
 
             -80 dBm is roughly where a 2.4 GHz link starts retrying enough to
             matter to a 16 kHz stream. Raise it toward -70 to be warned earlier.
+
+    config CLOCK
+        bool "Clock, timers and alarms"
+        default y
+        help
+            Wall-clock time from SNTP (this board has no RTC, so a reboot with
+            no network has no time until it reconnects); a timezone set by
+            voice or in the setup portal, and 12 or 24-hour time; four agent
+            tools (get_time, set_clock, set_alarm, alarms); timers and alarms
+            that chime, wake the panel and then have the agent say what they
+            were; and the orb clock on the panel while it sleeps -- hour and
+            minute rings round a small turning orb, with the time, the next
+            alarm, Wi-Fi and battery.
+
+            Off removes all of it, tools included -- a tool that can only ever
+            answer "no clock" is worse than no tool.
+
+    config CLOCK_RTC
+        bool "Use a PCF85063 RTC at 0x51"
+        depends on CLOCK
+        default n
+        help
+            Read the RTC at boot so the clock is right before Wi-Fi is, and
+            write every SNTP sync back to it.
+
+            OFF BY DEFAULT BECAUSE THIS BOARD HAS NONE. The board package's
+            comment lists an RTC on the shared bus, but a scan of the
+            ESP32-S3-Touch-AMOLED-1.75C finds 0x18 (ES8311), 0x34 (AXP2101),
+            0x40 (ES7210), 0x5A (touch) and 0x6B (QMI8658 IMU) -- nothing at
+            0x51. Kept for a board that does carry one; it probes first, so
+            turning it on where nothing answers costs one log line.
+
+    config CLOCK_NTP_SERVER
+        string "SNTP server"
+        depends on CLOCK
+        default "pool.ntp.org"
+        help
+            Queried once the station has an address, then on lwIP's own
+            schedule (CONFIG_LWIP_SNTP_UPDATE_DELAY, an hour by default).
+
+    config CLOCK_DEFAULT_TZ
+        string "Timezone until one is set"
+        depends on CLOCK
+        default "UTC"
+        help
+            An IANA name from main/tz_table.c, or a POSIX TZ rule. Used only
+            until the user sets a zone by voice or in the portal; that choice
+            is saved and wins from then on.
+
+    config ALARM_CHIME_S
+        int "Seconds of each chime while an alarm rings"
+        depends on CLOCK
+        default 8
+        range 2 60
+        help
+            A timer or alarm rings until it is stopped or snoozed: a chime this
+            long, the agent saying what it is, a chime again, and so on. The
+            chime is local and needs no network, so it is what actually gets
+            someone's attention. While it sounds into a live session the
+            microphone uplink is held, so the tone never reaches the agent as
+            speech. The ring screen's Stop button, or the BOOT button, stops it.
+
+    config ALARM_RING_MAX_S
+        int "Seconds a ring may sound before it falls silent (0 = never)"
+        depends on CLOCK
+        default 600
+        range 0 3600
+        help
+            After this long the chimes and announcements stop, but the ring
+            screen stays up, its overtime counting, until Stop or snooze. A
+            device left ringing in an empty room should not go on all day.
+
+    config CLOCK_TEST_TIMER_S
+        int "Bench aid: start a timer this many seconds after boot (0 = off)"
+        depends on CLOCK
+        default 0
+        range 0 3600
+        help
+            BRING-UP TOOL. Sets an unlabelled-but-"test" timer at boot, so the
+            whole firing path -- chime, drain, session start, announcement --
+            runs with nobody speaking to the device. Leave it at 0 in anything
+            that ships.
 
 endmenu

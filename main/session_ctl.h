@@ -68,6 +68,16 @@ void session_ctl_request_history_flush(void);
 void session_ctl_request_reload_soon(void);
 
 /*
+ * Open a session when the worker is next free, and do nothing if one is up.
+ *
+ * For an alarm, which has no finger behind it. session_ctl_request_start() goes
+ * through the gesture debounce and is silently dropped while a stop is in
+ * progress or inside the 1.5 s cooldown; this rides alongside as a flag instead,
+ * so a start requested at the worst moment is late rather than lost.
+ */
+void session_ctl_request_start_soon(void);
+
+/*
  * Repaint the centre label for a device that is stopped, and do nothing if it
  * is not.
  *
@@ -87,6 +97,13 @@ void session_ctl_request_reload_soon(void);
 #if CONFIG_MIC_NS_ENABLE
 void session_ctl_request_ns_save(void);
 #endif
+
+/*
+ * "Save the volume and mic gain to flash when you get a moment" -- whatever the
+ * touch panel changed with audio_io's _live() setters. Same reason and same
+ * mechanism as the denoiser's save above. Safe from any task.
+ */
+void session_ctl_request_settings_save(void);
 
 void session_ctl_repaint_idle_status(void);
 

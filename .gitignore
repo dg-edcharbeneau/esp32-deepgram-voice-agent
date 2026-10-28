@@ -12,3 +12,6 @@ managed_components/
 
 # Internal bug report -- kept local, not published
 agent-edge-host-header-404.md
+
+# Python bytecode from the host tools
+__pycache__/

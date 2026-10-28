@@ -156,6 +156,13 @@ void dg_agent_suppress_state_events(bool suppress);
 bool dg_agent_is_ready(void);
 
 /*
+ * The latest session's request_id -- the key to Deepgram's server-side logs --
+ * and, through `welcome_us`, the esp_timer time its Welcome arrived, which is
+ * where the server's "seconds into call" counts from. "?" before the first.
+ */
+const char *dg_agent_request_id(int64_t *welcome_us);
+
+/*
  * Frames the uplink queue had to drop because the socket could not keep up,
  * cumulative since boot.
  *
@@ -225,3 +232,14 @@ bool dg_agent_has_history(void);
  * session_ctl_request_history_flush() is how every other task asks for this.
  */
 void dg_agent_flush_history(void);
+
+/*
+ * Have the agent say `text`, unprompted -- an alarm going off. Safe from any
+ * task; the text is copied.
+ *
+ * Does not open a session; the caller arranges that. Whichever session is next
+ * ready says it: as the greeting of a fresh conversation, otherwise as an
+ * InjectAgentMessage. It expires after two minutes unsaid, so a device that
+ * spent five reconnecting does not announce a stale timer as news.
+ */
+void dg_agent_announce(const char *text);

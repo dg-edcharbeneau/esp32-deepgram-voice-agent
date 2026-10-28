@@ -6,7 +6,175 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.0] - 2026-10-18
 
+### Fixed
+
+- The AXP2101's charge target and rail report is logged 10 s after boot
+  instead of during start-up, where it printed before a USB capture could
+  reattach and so had never been seen.
+
+### Removed
+
+- Three functions with no callers (`wifi_sta_set_power_save()`,
+  `audio_io_chime_active()`, `ui_panel_kit_ready()`), and a
+  `sdkconfig.defaults` line naming a log option ESP-IDF 5.5 does not have.
+
+## [0.10.0] - 2026-10-28
+
+Experimental pre-release. Verified on one bench board, plugged in, through logs
+and bench self-tests. The battery saving has not been measured yet. Known
+issues: the agent has been reported hearing itself more often, which is not yet
+investigated; and a ring cycle occasionally skips its spoken announcement, which
+predates this release.
+
+### Added
+
+- **Deep idle: the chip light-sleeps while the screen is off**
+  (`CONFIG_UI_DEEP_IDLE`). Once the sleeping screen goes dark (5 minutes asleep),
+  the panel controller sleeps, the speaker codec closes, the display task pauses
+  and the chip naps between the once-a-second alarm check, Wi-Fi beacons and a
+  touch. A touch, the BOOT button, a session, an alarm or the stopwatch brings it
+  all back. Aimed at the ~50 mA the device drew asleep (10 % an hour on its
+  500 mAh cell). Never on USB: the USB console keeps the chip awake.
+- TLM `di=` (deep idle), `drift=` (the chip clock's worst drift against SNTP, ms
+  per hour) and `alate=` (the latest an alarm or timer has rung, ms).
+
 ### Changed
+
+- **Power, by design.** No current figures -- the AXP2101 has no current
+  reading and no meter was to hand -- so each measure saves by how it works and
+  was checked for behaviour on the board. See `docs/power.md`.
+  - **The CPU drops to 80 MHz asleep** (`CONFIG_PM_ENABLE`): held at 240 while
+    the panel is awake or a session is live.
+  - **The radio follows the session:** no modem sleep in a session, minimum
+    with none, maximum while the panel sleeps too.
+  - **The speaker amplifier turns off** after 5 s of silence and back on before
+    the next sound (`CONFIG_AUDIO_PA_IDLE_OFF_MS`, 0 keeps it on).
+  - **The sleeping clock dims, then goes off:** full brightness for 2 minutes
+    asleep, 40 % for 3 more, then the panel off -- 5 minutes 45 seconds after
+    the last word (`CONFIG_UI_SLEEP_DIM_AFTER_MIN`, `_DIM_PCT`,
+    `CONFIG_UI_SLEEP_OFF_AFTER_MIN`). A touch, a session or an alarm brings it
+    back. It also flushes only its own square.
+  - The console UART is 1 Mbaud, the most it allows with power management on;
+    the USB console, which is what is read, has no baud rate.
+- **Power audit tooling:** TLM gains `slp= bri= ps= vbus= dir=`; Wi-Fi power
+  save changes are logged; `CONFIG_POWER_STATE_WALK` (bench only) holds each
+  state for a USB meter; `host/analyse.py --power` summarises a capture.
+
+## [0.9.0] - 2026-10-24
+
+Experimental pre-release. Verified on one bench board through screen captures
+and bench self-tests; the stopwatch's gestures and the touch panel's swipe down
+from the clock have not yet been tried by a finger.
+
+### Added
+
+- **A touch panel for settings that were voice-only.** Swipe down from the top
+  edge: four pages, swiped sideways -- Sound (mic gain and volume as linked +/-
+  pairs with a level meter between them), Colour
+  (the 13 orb colours on a clock face), Toggles (noise reduction, 12/24-hour)
+  and Timers & alarms (the soonest first, cancel in two taps). Nothing is new
+  behaviour: each control calls what the voice tool or the BOOT button already
+  did, and the agent needs no reload. The session carries on underneath; the
+  panel closes on a swipe up, 8 s untouched, or for an alarm. The drag must
+  start on the top edge, so it can never touch the centre button. Volume and
+  mic gain apply at once and are saved 2 s after the last press, off the LVGL
+  task. Painted into the face's canvas from precomputed shape masks rather than
+  LVGL widgets: 10-60 ms a repaint, and no change to internal RAM measured on
+  the board. `host/panel.sh` checks the geometry; `CONFIG_UI_PANEL_SELFTEST`
+  (bench only) drives every control for the log. `panel=` joins the TLM line.
+- **Screen captures of every orb state.** `CONFIG_UI_SCREENSHOT_TOUR` (bench
+  only) runs the display test on its own and prints three captures per step
+  over serial; `host/shot2png.py` turns the log into PNGs and a contact sheet.
+- **A stopwatch**, after Ed's "Orb stopwatch" design, built on the orb clock:
+  the minute ring counts seconds, the time shows centiseconds, the latest lap
+  sits under it, and the sphere spins while it runs. Swipe sideways on the orb
+  clock to get there and back, or say "start a stopwatch"; two round buttons
+  play/pause and lap/reset. It runs on in the background, holds the panel
+  awake while it counts on screen, and rides on the `alarms` tool (a
+  `stopwatch` argument) rather than a fifth tool. A press on the clock is now
+  decided on release: a tap puts the face back, a sideways swipe brings the
+  stopwatch.
+- **Timers and alarms ring until stopped, on a ring screen of their own,
+  and alarms snooze.** After Ed's "Timer alarm" design: a small dotted orb
+  with rings pulsing out of it, the label, and the overtime counting up
+  (`TIME'S UP · +5:11`, or the alarm's time). A timer gets one big Stop; an
+  alarm a Stop quarter beside a "+1 min" snooze quarter -- each tap adds a
+  minute, the button goes solid then fades over 1.5 s, and the snooze commits
+  at the dark end. It now rings until stopped or snoozed: an 8 s chime, the
+  agent saying what it is, a chime again, falling silent after 10 minutes
+  (`CONFIG_ALARM_RING_MAX_S`) with the screen still up. The microphone uplink
+  is held while it chimes into a live session. Stop before the agent has said
+  it still gets it said once; a press elsewhere on the ring screen does
+  nothing, where any press used to dismiss. `host/alarms.sh` walks the ring
+  cycle and the snooze arithmetic; `CONFIG_UI_RING_SELFTEST` (bench only)
+  drives the screen and captures it.
+- **The orb clock replaces the sleep clock.** While the device sleeps and the
+  time is known, the panel shows Ed's "Orb clock" design: a small dotted orb
+  turning in the middle with a meridian sweeping it, hour and minute rings of
+  dots lit up to the time (the current one large and pulsing), the time with
+  AM/PM and the next alarm, and Wi-Fi and battery across the top. It takes the
+  orb colour; on white it is the mockup exactly. Painted into the canvas from
+  `main/clock_face.c`, which `host/clock.sh` checks; still 5 fps. Against
+  burn-in the whole clock drifts a few pixels, continuously and too slowly to
+  see, where the old one jumped a step a minute.
+  `CONFIG_UI_CLOCK_PREVIEW` (bench only) shows it in four set states for
+  captures.
+- **The battery dots at the panel's edge are off by default, and the Wi-Fi
+  glyph only warns.** The orb clock's status row shows both readings whenever
+  the device sleeps or the clock is swiped up. The glyph at 9 o'clock now shows
+  only while the signal is weak, conversation or not. `CONFIG_BATTERY_SHOW_DOTS`
+  brings the dots back; the readings, the TLM line and the voice tools are
+  unchanged.
+- **Swipe up from the bottom edge for the clock on demand**, awake, with the
+  session carrying on underneath. Any touch puts the face back and does nothing
+  else, so it cannot also end a conversation.
+- **Sleep keeps full brightness**, so the clock can be read across a room. Only
+  the battery-critical sleep still dims to 15 %.
+- **The orb colour survives a reboot.** The last one chosen, by voice or on the
+  touch panel, is saved by name once it has held for 2 s, and the device boots
+  in it. `CONFIG_UI_DEFAULT_ORB_COLOR` is now only the out-of-box colour.
+- **The orb's colour is the whole screen's.** The status word, the sleep clock,
+  the hints, the ring round the button and every touch panel page take it, not
+  only the orb: the white buttons become the colour and the greys take its hue.
+  White is unchanged. The spectrum face, the QR code and the amber interrupt
+  ring keep their own colours. `set_color`'s description now says so.
+
+## [0.8.0] - 2026-10-23
+
+Experimental pre-release.
+
+### Fixed
+
+- **Barge-in at volume 70 and above.** Talking over the agent had stopped
+  working above volume 50, with nothing changed on the device. The firmware is
+  not what changed: 0.7.0 and the 30 August build that first recorded barge-in
+  working both fail the same way today, on the same settings and the same echo
+  levels. Two device-side settings were what made it break, and are what fix it:
+
+  - **`CONFIG_MIC_IN_GAIN` 24 -> 18 dB.** At 24 dB the agent's echo, with a
+    voice on top of it, pinned the microphone at full scale; a clipped echo
+    cannot be cancelled, and the interruption never left the device intact --
+    replaying the recorded uplink into Flux STT on its own found no turn there
+    either. 30 dB was tried and is worse: the device heard itself read the time
+    and answered it.
+  - **`CONFIG_AEC_UPLINK_VAD_PEAK` 400 -> 200.** The gate's threshold is a
+    sample value and scales with the gain; 200 is the old 400 at 18 dB. Left at
+    400, the gate cut a talking-over voice into fragments and interruptions only
+    landed in the agent's pauses.
+
+  Measured on the board at volume 70: no clipping, residual echo under 100 in
+  the agent's quiet passages, interruptions detected reliably, best with noise suppression on (the default).
+  One half remains Deepgram-side: in session
+  `01a165b8-6a6f-7180-96d0-c5210810b4a2` Flux STT finds a turn in the replayed
+  uplink at ~22.7 s where the live agent did not barge in. See
+  [docs/audio-path.md](docs/audio-path.md).
+
+### Changed
+
+- **The agent's model is gpt-5.4-mini** (was gpt-4o-mini). After a working
+  barge-in on "okay", gpt-4o-mini resumed the story it had been cut off from, and
+  ignored a prompt rule against it; gpt-5.4-mini stopped and stayed stopped, with
+  no noticeable change in reply latency.
 
 - **Noise suppression is on by default.** `CONFIG_MIC_NS_ENABLE` and
   `CONFIG_MIC_NS_DEFAULT_ON` both default to `y`, so a fresh checkout builds a
@@ -23,88 +191,161 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Microphone noise suppression** (`CONFIG_MIC_NS_ENABLE`). The canceller
-  removes the device's own speaker; nothing removed the *room*, so fans, HVAC
-  and traffic went up the wire to Deepgram at full level. esp-sr's `ns_pro`,
-  which was already linked, now runs after the AEC -- a non-linear stage
-  upstream of an adaptive filter wrecks its convergence -- and below the uplink
-  VAD, so it cannot attenuate interrupting speech out of a barge-in. Its 10 ms
-  frames do not divide the 1024-sample capture block, so it runs through an
-  input and an output FIFO. Flash is +17,872 B; with the feature off the binary
-  is byte-for-byte what it was.
+- **Mic gain by voice (experimental).** "Set your microphone gain to 21" changes
+  the ES7210's gain at once, 6 to 30 dB in its 3 dB steps, and saves it across
+  resets. The uplink gate rescales with it so it keeps meaning the same loudness
+  (200 at 18 dB, 283 at 21, 399 at 24), and the echo-reference lane is put back
+  to `CONFIG_AEC_REF_GAIN_DB` after every change. For re-measuring the gain on a
+  new board or in a new room; 18 dB is the measured value to come back to.
+  `CONFIG_MIC_GAIN_TOOL`, on; turning it off ignores the saved gain. About 190
+  bytes of Settings. Not yet exercised by voice on the board.
 
-  Measured on the board:
+- **`CONFIG_AUDIO_RECORD`, a recording of what the device heard and sent.**
+  Debug only, off by default. Each session's first 60 s go into PSRAM -- the raw
+  microphone before cancellation, and exactly what reached Deepgram -- and are
+  printed after the session ends; `host/rec2wav.py` turns a captured log into a
+  WAV labelled with the request_id and aligned to the server's "seconds into
+  call". `host/flux_replay.py` streams such a recording back into Flux STT. The
+  two together are what split the barge-in failure into its device and server
+  halves.
 
-  | | NS off | NS on |
-  |---|---|---|
-  | frame rate | 17.2-17.7 fps | 14.8-15.0 fps (about -14%) |
-  | internal RAM | -- | -7,438 B, held whether or not it is running |
-  | uplink latency | -- | +64 ms |
+- **A clock, timers and alarms.** The agent can say the time and the date, set
+  its timezone, and set timers and one-shot or weekly alarms. Alarms go off with
+  nobody talking to the device, and the panel shows a large clock while it
+  sleeps. Four tools: `get_time`, `set_clock`, `set_alarm`, `alarms`. All of it
+  is `CONFIG_CLOCK`, on by default. See [docs/clock.md](docs/clock.md).
 
-  The NS-on figure reproduced on four separate days. An earlier bench quoted
-  -26% against a 20.00 fps baseline that has since failed to reproduce, even
-  when its own source tree was rebuilt and flashed; that figure should not be
-  quoted.
+  **Time** comes from SNTP. Without it the device says it does not know the
+  time, rather than inventing 1970. **This board has no RTC**, though its board
+  package's comment lists one; a bus scan proved it. A PCF85063 driver is kept
+  behind `CONFIG_CLOCK_RTC`, default off. The TLM line gains `clk=` (0 none,
+  1 RTC, 2 SNTP) and `alm=` (pending count).
 
-  What it buys is less certain. In the one instrumented room, nothing: the NS-off
-  baseline already transcribed 4/4. In a genuinely loud room on 2026-09-19 the
-  device worked well with it on -- but that was tried by hand with no log, so it
-  is a field report, not a measurement.
+  **12 or 24-hour** follows the timezone (12-hour across most of the Americas,
+  Australia, India and a few more) until the user says otherwise by voice, and
+  that choice is saved. The sleep clock shows `8:52` with a small `PM` under
+  it, right-aligned.
 
-  **SpeexDSP was evaluated and removed.** It ran at 8.63 fps against esp-sr's
-  14.80 in the same sitting, and it ate quiet word onsets ("A quick brown fox"
-  for "The quick brown fox"). Moving its state out of PSRAM to recover the speed
-  left the device unable to open a session at all.
+  **Timezones** are IANA names, set by voice or in a new setup-portal field
+  that is filled in from the phone. A 130-row table maps them to the POSIX rules
+  newlib needs. `host/alarms.sh` checks every row against tzdata across a full
+  year, and its first run caught three Canadian zones that tzdata 2026e moves to
+  permanent summer time on 1 Nov 2026.
 
-  The `mic peak` line gains an `ns=` field beside `out=`, reading `ns=off` when
-  the stage is idle rather than `ns=0`, which would look like total suppression.
+  **When one rings,** a locally synthesised chime plays first, so neither the
+  network nor a session is needed for it. The chime is generated inside the
+  playback task rather than queued, because the ring has exactly one writer.
+  After `CONFIG_ALARM_CHIME_S`, or a tap anywhere, the chime stops and the
+  speaker drains. Only then does a session open, so the echo canceller never
+  warms up on a tone. The agent then says what it was: as the greeting of a
+  fresh conversation, or as an `InjectAgentMessage` (`behavior: queue`) sent
+  from the keepalive task, retried on `InjectionRefused`.
+  `session_ctl_request_start_soon()` makes sure an alarm landing during a stop
+  or the cooldown is late rather than lost.
 
-- **A double click on BOOT toggles noise suppression** at runtime, and the
-  setting persists across reboots; `CONFIG_MIC_NS_DEFAULT_ON` is only the
-  power-on state. The status caption confirms the press. The engine's RAM is
-  allocated at init and held either way -- allocating it on the first press
-  would mean a multi-kB internal allocation mid-session on a fragmented heap,
-  which is what drops sessions on this board -- so the toggle buys back CPU, not
-  RAM. The gesture is compiled out with the feature: registering a double click
-  makes every single click wait out the double-click window, and the single
-  click is the session toggle.
+  **Only definitions reach flash.** A weekly alarm's next time is recomputed,
+  never stored as truth, so it never writes NVS. Daylight saving is handled
+  explicitly: a spring-forward 02:30 rings at 03:00, and a fall-back 01:30 rings
+  once.
 
-- **`rxovf`, `lowint` and `lowdma` on the telemetry line.** `rxovf` counts I2S
-  RX frames the capture ring dropped, which is how the denoiser was shown not to
-  starve it. `lowint` and `lowdma` are `heap_probe`'s 50 ms low-water marks since
-  boot, `-1` when `CONFIG_HEAP_PROBE` is off. They matter because the 1 Hz
-  `dmamax` reading overstates headroom by 2-3x: one boot read 20,480 B live
-  against a true floor of 6,656 B, which puts the margin over the 1,630 B
-  `INTERNAL|DMA` allocation that drops sessions at about 4x, not 15x.
+  **Cost:** +51 kB flash (including a 72 px digits-only font of about 15 kB) and
+  +864 B of static internal RAM. The alarm table and its copies live in PSRAM.
+  `Settings` grows by 1,049 bytes (19,290 to 20,339 with history replayed): four
+  tools as raw cJSON nodes, and one prompt sentence. A first cut with six tools
+  measured 21,349, past the 20 kB at which sessions flapped before, and was cut.
+  Ten fresh-boot sessions went live; one dipped to 1,728 B of DMA-capable
+  memory, so the margin is thin.
 
-### Known issues
+- **Microphone noise suppression, off by default and not yet measured on the
+  device.** The canceller removes the device's own speaker; nothing removed the
+  *room*, so fans, HVAC and traffic went up the wire to Deepgram at full level.
+  `CONFIG_MIC_NS_ENABLE` adds a denoiser after the AEC and before the tap, the
+  uplink VAD and the sink -- after the canceller because a non-linear stage
+  upstream of an adaptive filter wrecks its convergence, before the rest so the
+  orb, the VAD threshold and Deepgram all see the same cleaned signal.
 
-- **Suppression has only ever run at level 2 (aggressive).**
-  `CONFIG_MIC_NS_ESPSR_MODE` defaults to 2; levels 0 and 1 are untested. If
-  level 2 clips quiet word onsets -- the failure that disqualified SpeexDSP, and
-  hinted at once by esp-sr -- default-on spreads that to every device. If
-  transcripts start losing their first word, double click BOOT to turn
-  suppression off.
-- **Heap behaviour under long conversation is untested.** A 35-minute run found
-  no drift: the DMA floor was reached 4.2 s after boot and never moved again.
-  But nobody spoke during it, so the churn of playback, history writes and
-  reconnects was not exercised.
-- **An unexplained frame-rate gap.** The 14.8-15.0 fps figure above comes from
-  300 s bench runs. Live sessions have read about 10.5 fps three times: a
-  35-minute run (10.56), and two short boot captures on 2026-10-16 and
-  2026-10-18 (10.0-10.9), the second on this release's shipping configuration.
-  The boot captures are too short to be measurements, but together they suggest
-  the bench figure may be the outlier rather than the 10.5. It is cosmetic --
-  the orb animates less smoothly -- and not yet understood.
-- **On a network with more than one access point under the same name, the
-  device can join a weaker one**, which drops uplink audio or fails to start a
-  session. Workaround: move the device closer to the main access point, or give
-  the access points separate names. This is not new in 0.8.0: across 20 boots
-  on a two-AP network, v0.7.0 and 0.8.0 alike were clean on every session that
-  joined the strong AP and failed on every session that joined the weak one.
-  Scanning every channel and joining the strongest AP was tried and held back:
-  it still joined the weak AP on 2 of 10 boots, because the strong one did not
-  always answer the scan, and it roughly doubled the time to get online.
+  It uses esp-sr's `ns_pro`, which was already linked. Its one awkwardness is
+  frame size: `ns_pro_create` takes 10 ms frames only and
+  `AUDIO_IO_CAPTURE_FRAMES` is 1024 under the AEC, so `1024 % 160 = 64` and it
+  cannot walk the block in place the way `aec_process` does. It carries an input
+  and an output FIFO instead, costing 7,104 B of internal staging and a standing
+  64 ms of added uplink latency.
+
+  **SpeexDSP was evaluated and removed.** It was vendored precisely because it
+  accepts any frame size and so needed no FIFO, and that was not enough: it cost
+  57% of the frame rate against esp-sr's 26%, and it damaged speech -- eating
+  quiet word onsets ("A quick brown fox" for "The quick brown fox") and losing
+  an utterance where the no-NS baseline transcribed 4/4. Its state could not be
+  moved out of PSRAM to recover the speed: doing so dropped `intmax` to 10,240
+  and the device could not open a session at all, TLS failing on every retry.
+  The measurements are kept in `docs/audio-path.md` so it is not re-proposed.
+
+  The `mic peak` line gains an `ns=` field beside `out=`. They stay separate on
+  purpose: `out=` is post-AEC and `ns=` post-denoiser, so ERLE remains readable
+  on its own and a regression in one cannot be blamed on the other.
+
+  **Measured on the board**, 150 s per arm from cold boot on a live session:
+
+  | arm | fps | `int` mean | `intmax` floor | rx overruns |
+  |---|---|---|---|---|
+  | off | 20.00 | 60,331 | 26,624 | +0 |
+  | Speex | 8.63 (-57%) | 60,903 | 29,696 | +0 |
+  | esp-sr | 14.80 (-26%) | 52,894 (-7,438) | 21,504 | +0 |
+
+  **They do not rank, they trade.** esp-sr is 2.2x cheaper on CPU and costs
+  7.4 kB of internal RAM -- the resource this board has least of. Speex costs
+  none and more than half the frame rate. Neither moved `rxovf`. Flash is
+  +18,592 B (Speex) / +17,872 B (esp-sr); with the feature off the binary is
+  byte-for-byte what it was.
+
+  **Acoustically, neither engine helped.** One speaker, four fixed lines, same
+  room: NS off transcribed 4/4 correctly; Speex dropped word onsets ("A quick
+  brown fox", "Seashells seashells") and lost an utterance; esp-sr was 3/3 in
+  window. At this noise level Deepgram already handles the audio, so the
+  denoiser spends frame rate for nothing. A genuinely loud room is untested and
+  is the only condition where NS is likely to pay.
+
+  **NS runs below the uplink VAD**, which took two attempts. Placing it above
+  was justified as giving the VAD a cleaner floor; that was backwards -- the
+  denoiser attenuates interrupting speech along with the room, so fewer blocks
+  cleared `VAD_PEAK` and barge-in got perceptibly harder to trigger. Blocks
+  discarded during playback: 22 (off) -> 49 (NS above) -> 16 (NS below). With
+  the stage moved, the VAD decides on the post-AEC signal exactly as it did
+  before, and the denoiser still sits ahead of the tap and the sink.
+
+  **Correction: esp-sr adds 64 ms of uplink latency, not the 10 ms first
+  claimed.** 10 ms is only the input residue; the output FIFO holds a further
+  full capture block between drains, measured at 1024 samples of standing
+  occupancy -- straight onto the interruption path.
+
+- **Noise suppression toggles from the BOOT button.** A double click turns it on
+  and off at runtime and the setting persists across reboots;
+  `CONFIG_MIC_NS_DEFAULT_ON` is just the power-on state. The status caption
+  confirms the press, and `mic peak` says `ns=off` for an idle stage rather than
+  `ns=0`, which would read as total suppression.
+
+  The engine's 7,104 B of staging is allocated at init and held either way --
+  deferring it to the first press would mean a multi-kB internal allocation
+  mid-session on a fragmented heap, which is what drops sessions on this board.
+  The toggle buys back CPU, not RAM.
+
+  The gesture is compiled out along with the feature rather than left answering
+  "not built": registering a double click makes `iot_button` hold back every
+  single click until the double-click window closes, and the single click is the
+  session toggle -- the escape hatch. Builds without the denoiser keep it sharp.
+
+- **`rxovf` in the telemetry line.** `audio_codecs_rx_overruns()` has counted
+  silently dropped I2S RX frames since the DMA sizing work and nothing ever read
+  it. It is now on the TLM line, which is how the bench above could show the
+  denoiser was not starving the capture ring.
+
+  Three measurement traps hit along the way, all recorded in
+  [docs/audio-path.md](docs/audio-path.md): a first esp-sr build that measured
+  +96 B of flash because `1024 % 160 != 0` is a compile-time constant and the
+  compiler had deleted the whole engine; a serial reader left holding the port,
+  which makes `idf.py flash` fail with `The chip stopped responding` and look
+  like dead hardware; and a stale capture log that made a fixed crash appear to
+  still be happening.
 
 ## [0.7.0] - 2026-09-01
 

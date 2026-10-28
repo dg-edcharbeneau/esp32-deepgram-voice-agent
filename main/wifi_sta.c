@@ -259,6 +259,10 @@ esp_err_t wifi_sta_start(const char *ssid, const char *pass)
     wifi_config_t sta_cfg = {
         .sta = {
             .threshold.authmode = open ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK,
+            /* Under max modem sleep the radio wakes for every third beacon
+             * (~300 ms). 3 is also the driver's value for 0; named here because
+             * deep idle's light sleep is paced by it. */
+            .listen_interval = 3,
         },
     };
     /* strncpy, not assignment: the config fields are fixed-size uint8_t arrays. */
@@ -278,8 +282,8 @@ esp_err_t wifi_sta_start(const char *ssid, const char *pass)
      *
      * That is a SESSION-TIME requirement, not an always-on one, and for most of
      * this device's life there is no stream to protect -- 88% of it is spent with
-     * the session stopped. wifi_sta_set_power_save() below is what lets the sleep
-     * state take advantage of that; this call is the awake default.
+     * the session stopped. wifi_sta_set_power_save_mode() below is what lets the
+     * sleep state take advantage of that; this call is the awake default.
      */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -325,24 +329,42 @@ esp_err_t wifi_sta_stop(void)
 }
 
 /*
- * Modem sleep on or off, for the sleep state in main.c.
+ * Modem sleep by level, for the radio policy in main.c and session_ctl.c.
  *
  * Kept here rather than calling esp_wifi_set_ps() from the caller so that Wi-Fi
- * policy lives in one file and the reasoning above sits next to both settings.
+ * policy lives in one file and the reasoning above sits next to every setting.
  *
- * MIN_MODEM rather than MAX_MODEM: the station stays associated and keeps
- * listening for beacons, so waking costs about one beacon interval (~100 ms)
- * rather than a re-association. That is invisible behind the 1.1-6.0 s the
- * Deepgram handshake takes -- see the CONNECTING note in main.c.
+ * Either modem sleep keeps the station associated and listening for beacons,
+ * so waking costs at most a listen interval (~300 ms at MAX_MODEM) rather than
+ * a re-association. That is invisible behind the 1.1-6.0 s the Deepgram
+ * handshake takes -- see the CONNECTING note in main.c.
  *
  * Failure is logged and swallowed: a device that will not modem-sleep should
  * carry on running warm, not refuse to work.
  */
-void wifi_sta_set_power_save(bool enabled)
+static volatile int s_ps_mode = WIFI_STA_PS_NONE;
+
+void wifi_sta_set_power_save_mode(int mode)
 {
-    esp_err_t err = esp_wifi_set_ps(enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_wifi_set_ps(%s): %s",
-                 enabled ? "MIN_MODEM" : "NONE", esp_err_to_name(err));
+    static const wifi_ps_type_t PS_TYPE[] = {WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM};
+    static const char *const NAME[] = {"NONE", "MIN_MODEM", "MAX_MODEM"};
+    if (mode < WIFI_STA_PS_NONE || mode > WIFI_STA_PS_MAX) {
+        return;
     }
+    esp_err_t err = esp_wifi_set_ps(PS_TYPE[mode]);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(%s): %s", NAME[mode], esp_err_to_name(err));
+        return;
+    }
+    if (mode != s_ps_mode) {
+        s_ps_mode = mode;
+        /* Logged on success too: the power audit reads the radio's state off the
+         * log, and a change that only logs when it fails is invisible. */
+        ESP_LOGI(TAG, "EVT wifi ps %s", NAME[mode]);
+    }
+}
+
+int wifi_sta_power_save_mode(void)
+{
+    return s_ps_mode;
 }

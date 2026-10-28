@@ -1,0 +1,605 @@
+<!doctype html>
+<!--
+  GENERATED: docs/orb.html is host/orb_web.html with the WebAssembly module
+  inlined by host/orb_web.sh. Edit the template and rebuild, not the output.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Orb Motion</title>
+<meta name="description" content="The device's orb face running live in the browser, on the firmware's own geometry compiled to WebAssembly.">
+<meta name="color-scheme" content="dark">
+<!-- index.html's icon, so the two pages read as one site. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%23f3b6e0'/%3E%3Cstop offset='.33' stop-color='%23f7a878'/%3E%3Cstop offset='.66' stop-color='%23a8ecd3'/%3E%3Cstop offset='1' stop-color='%2338bdf8'/%3E%3C/linearGradient%3E%3Crect width='32' height='32' rx='7' fill='%230e0e10'/%3E%3Ccircle cx='16' cy='16' r='9' fill='url(%23g)'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@700;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: the round panel is the page; controls sit beside it like a bench, and
+   every state runs live underneath. Single-theme, as index.html is: the board
+   is a black disc and the dots only read on black. Values are index.html's;
+   the names are this page's (--ground is its --ink, --ink its --fg). */
+:root {
+  --pink: #f3b6e0; --peach: #f7a878; --mint: #a8ecd3; --blue: #38bdf8;
+  --ground: #0e0e10;
+  --panel: #161619;
+  --rule: #26262b;
+  --ink: #f2f3f5;
+  --muted: #83858e;         /* index.html's --fg-faint: 5.2:1, the floor */
+  --tint: #f2f3f5;          /* the orb colour; set from script */
+  --font-display: Chivo, ui-sans-serif, system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+  color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+html, body { background: var(--ground); color: var(--ink); }
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+/* index.html's bar, which the device's own portal wears too. */
+.hair { height: 4px; background: linear-gradient(90deg, var(--pink), var(--peach), var(--mint), var(--blue)); }
+.wrap {
+  max-width: 1120px; margin: 0 auto; display: grid; gap: 36px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 56px;
+}
+nav { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 20px; font-size: 14px; }
+nav a { color: var(--muted); text-decoration: none; font-weight: 500; }
+nav a:hover, nav a:focus-visible { color: var(--ink); }
+footer a { color: var(--ink); }
+
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+h1 { font-family: var(--font-display); font-weight: 900; font-size: clamp(28px, 4vw, 40px); line-height: 1.05; letter-spacing: -0.02em; margin: 0; text-wrap: balance; }
+.sub { color: var(--muted); margin: 0; max-width: 62ch; }
+.sub code { font-family: var(--font-data); font-size: 13px; color: var(--ink); }
+
+.bench { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 32px; align-items: start; }
+@media (max-width: 880px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+
+.stage { display: grid; justify-items: center; gap: 18px; min-width: 0; }
+.bezel {
+  width: min(100%, 540px);
+  aspect-ratio: 1;
+  max-width: 100%;
+  border-radius: 50%;
+  padding: 14px;
+  background: radial-gradient(circle at 50% 35%, #2a2d34, #15171b 70%);
+  box-shadow: 0 0 0 1px var(--rule), 0 30px 80px -30px #000;
+  box-sizing: border-box;
+}
+.bezel canvas { width: 100%; height: 100%; display: block; border-radius: 50%; background: #000; }
+
+.readout {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 20px;
+  font-family: var(--font-data); font-size: 12.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.readout b { color: var(--ink); font-weight: 500; }
+.about { margin: 0; max-width: 54ch; text-align: center; color: var(--ink); min-height: 3em; text-wrap: pretty; }
+
+.controls { display: grid; gap: 22px; min-width: 0; }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 10px; min-width: 0; }
+legend {
+  padding: 0; margin-bottom: 10px;
+  font-family: var(--font-data); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+}
+.hint { margin: 0; font-size: 13px; color: var(--muted); }
+
+.states { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+button, .seg label {
+  font: inherit; font-size: 14px; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 7px 11px; cursor: pointer; text-align: left;
+  transition: border-color 120ms, background 120ms;
+}
+button:hover, .seg label:hover { border-color: #3a3e48; }
+button:focus-visible, .seg input:focus-visible + span, input[type=range]:focus-visible, .swatch:focus-visible {
+  outline: 2px solid var(--tint); outline-offset: 2px;
+}
+.states button { display: flex; align-items: center; gap: 9px; }
+.states button .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rule); flex: none; }
+.states button[aria-pressed="true"] { border-color: var(--tint); background: #181b21; }
+.states button[aria-pressed="true"] .dot { background: var(--tint); box-shadow: 0 0 8px var(--tint); }
+.seg label { display: inline-flex; padding: 0; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg span { padding: 6px 11px; border-radius: 7px; }
+.seg input:checked + span { background: #1d2028; box-shadow: inset 0 0 0 1px var(--tint); }
+
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+input[type=range] { flex: 1; min-width: 140px; accent-color: var(--tint); }
+.val { font-family: var(--font-data); font-size: 12.5px; color: var(--muted); min-width: 4ch; font-variant-numeric: tabular-nums; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.check input { accent-color: var(--tint); width: 16px; height: 16px; }
+
+.swatches { display: flex; flex-wrap: wrap; gap: 7px; }
+.swatch {
+  width: 26px; height: 26px; border-radius: 50%; padding: 0; border: 2px solid transparent;
+  background-clip: padding-box; box-shadow: 0 0 0 1px var(--rule);
+}
+.swatch[aria-pressed="true"] { border-color: var(--ground); box-shadow: 0 0 0 2px var(--ink); }
+.colorname { font-family: var(--font-data); font-size: 12.5px; color: var(--muted); }
+
+.primary { background: var(--ink); color: var(--ground); border-color: var(--ink); font-weight: 600; }
+.primary:hover { border-color: var(--ink); opacity: 0.9; }
+
+.all h2 { font-family: var(--font-data); font-weight: 400; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0 0 14px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 18px 14px; }
+.thumb { display: grid; gap: 8px; justify-items: center; background: none; border: 0; padding: 0; text-align: center; }
+.thumb canvas { width: 100%; max-width: 150px; aspect-ratio: 1; border-radius: 50%; background: #000; box-shadow: 0 0 0 1px var(--rule); display: block; }
+.thumb[aria-pressed="true"] canvas { box-shadow: 0 0 0 2px var(--tint); }
+.thumb span { font-size: 13px; color: var(--muted); }
+.thumb[aria-pressed="true"] span { color: var(--ink); }
+
+footer { color: var(--muted); font-size: 13px; max-width: 80ch; display: grid; gap: 6px; }
+footer p { margin: 0; }
+footer code { font-family: var(--font-data); font-size: 12px; color: var(--ink); }
+#err { color: #ff8a7a; }
+</style>
+</head>
+<body>
+<div class="hair"></div>
+<div class="wrap">
+  <nav>
+    <a href="./">← Deepgram Agent Device</a>
+    <a href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent">View the source →</a>
+  </nav>
+  <header>
+    <h1>Voice Orb Motion</h1>
+    <p class="sub">The orb face of the round display, running live. Every dot comes from the board's own geometry code, <code>orb_geometry.c</code>, compiled to WebAssembly.</p>
+  </header>
+
+  <section class="bench">
+    <div class="stage">
+      <div class="bezel"><canvas id="stage" aria-label="Orb animation"></canvas></div>
+      <div class="readout" aria-live="off">
+        <span>state <b id="r-state">idle</b></span>
+        <span>animation <b id="r-mode">shell</b></span>
+        <span>t <b id="r-t">0.00</b>s</span>
+        <span>dots <b id="r-dots">0</b></span>
+        <span>wires <b id="r-lines">0</b></span>
+        <span>level <b id="r-amp">0.000</b></span>
+      </div>
+      <p class="about" id="about"></p>
+      <p id="err" hidden></p>
+    </div>
+
+    <div class="controls">
+      <fieldset>
+        <legend>State</legend>
+        <div class="states" id="states"></div>
+        <button class="primary" id="tour" type="button">Play every transition</button>
+        <p class="hint">Switching state uses the board's 280 ms blend. Shell to shell blends ring by ring; anything to or from Thinking, Connecting or Buffering crossfades.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Voice</legend>
+        <div class="seg" role="radiogroup" aria-label="Voice source">
+          <label><input type="radio" name="voice" id="v-auto" value="auto" checked><span>Simulated speech</span></label>
+          <label><input type="radio" name="voice" id="v-hold" value="hold"><span>Hold a level</span></label>
+        </div>
+        <div class="seg" id="loud-row" role="radiogroup" aria-label="Loudness">
+          <label><input type="radio" name="loud" id="l-quiet" value="0.4"><span>Quiet</span></label>
+          <label><input type="radio" name="loud" id="l-normal" value="0.65" checked><span>Normal</span></label>
+          <label><input type="radio" name="loud" id="l-loud" value="1"><span>Loud</span></label>
+        </div>
+        <div class="row" id="hold-row" hidden>
+          <input type="range" id="level" min="0" max="1" step="0.01" value="0.5" aria-label="Held voice level">
+          <span class="val" id="level-val">0.50</span>
+        </div>
+        <p class="hint">Only Listening and Speaking react. Listening scales to the microphone's measured range, up to 0.227 for a loud peak. Speaking scales to playback, up to 0.75.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Colour</legend>
+        <div class="swatches" id="swatches"></div>
+        <span class="colorname" id="colorname">white</span>
+      </fieldset>
+
+      <fieldset>
+        <legend>Playback</legend>
+        <div class="row">
+          <button type="button" id="play" aria-pressed="false">Pause</button>
+          <div class="seg" role="radiogroup" aria-label="Speed">
+            <label><input type="radio" name="speed" id="s-25" value="0.25"><span>¼×</span></label>
+            <label><input type="radio" name="speed" id="s-50" value="0.5"><span>½×</span></label>
+            <label><input type="radio" name="speed" id="s-100" value="1" checked><span>1×</span></label>
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="board-fps"> Board frame rate, 25 fps</label>
+        <label class="check"><input type="checkbox" id="panel-px"> Panel pixels, 466 × 466</label>
+      </fieldset>
+    </div>
+  </section>
+
+  <section class="all">
+    <h2>Every state, live</h2>
+    <div class="grid" id="grid"></div>
+  </section>
+
+  <footer>
+    <p>Geometry is the firmware's own C, <a href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/blob/main/main/orb_geometry.c"><code>orb_geometry.c</code></a>, compiled unchanged. The state-to-animation mapping, the 280 ms blends, the 90° turn while listening and the level smoothing (45 ms attack, 240 ms release) follow <a href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/blob/main/main/face_orb.c"><code>face_orb.c</code></a> and <code>ui.c</code>. Dots are inked the way <a href="https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/blob/main/main/orb_raster.c"><code>orb_raster.c</code></a> inks them: brighter when nearer, scaled by the chosen colour.</p>
+    <p>The simulated speech is made up. On the board, the level and the three voice bands come from the microphone or the speaker. The other faces (clock, spectrum, touch panel) are not shown here. Rebuild this page with <code>host/orb_web.sh</code>.</p>
+  </footer>
+</div>
+
+<script>
+/*@ORB_MODULE@*/
+</script>
+<script>
+(() => {
+  const SIZE = 466;                 /* BSP_LCD_H_RES: the geometry's frame */
+  const BLEND_MS = 280;             /* face_orb.c */
+  const ATTACK_MS = 45, RELEASE_MS = 240;   /* ui.c AMP_ATTACK_MS / AMP_RELEASE_MS */
+  const LISTEN_ROTATE_DEG = 90;
+  const ALPHA_CULL = 0.02;
+  const B = { IDLE: 0, INITIALIZING: 1, THINKING: 3, CONNECTING: 5, BUFFERING: 6,
+              DISCONNECTED: 7, SPEAKING_FILL: 8, LISTENING_FILL: 9 };
+  const MODE_NAMES = ['shell', 'rubik', 'braid', 'web'];
+
+  /* The screenshot tour's order, which is also the shell's ladder. */
+  const STATES = [
+    { id: 'idle', name: 'Idle', beh: B.IDLE, mode: 0,
+      about: 'Connected and waiting. The shell floats and breathes, and now and then plays a gesture.' },
+    { id: 'initializing', name: 'Initializing', beh: B.INITIALIZING, mode: 0,
+      about: 'A session is starting up.' },
+    { id: 'listening', name: 'Listening', beh: B.LISTENING_FILL, mode: 0, src: 'mic',
+      about: 'You are talking. The orb turns 90° and light closes in from the left and right, as far as your voice is loud.' },
+    { id: 'thinking', name: 'Thinking', beh: B.THINKING, mode: 1,
+      about: 'A lattice solving itself like a puzzle cube. The board maps this state, but no logged session has reached it yet.' },
+    { id: 'speaking', name: 'Speaking', beh: B.SPEAKING_FILL, mode: 0, src: 'agent',
+      about: 'The agent is talking. Light spreads from the middle toward the top and bottom, as far as playback is loud.' },
+    { id: 'connecting', name: 'Connecting', beh: B.CONNECTING, mode: 3,
+      about: 'Joining up. Nodes drift on the sphere, wires form between near neighbours, and bright packets run along them.' },
+    { id: 'buffering', name: 'Buffering', beh: B.BUFFERING, mode: 2,
+      about: 'Waiting on audio. Three strands plait from pole to pole over a faint shell.' },
+    { id: 'disconnected', name: 'Disconnected', beh: B.DISCONNECTED, mode: 0,
+      about: 'No session. The dim shell, which is also the base the two voice fills light up.' },
+  ];
+  const byId = Object.fromEntries(STATES.map((s) => [s.id, s]));
+
+  /* orb_colors.c */
+  const COLORS = [
+    ['white', 0xFFFFFF], ['vira', 0xE9A581], ['tomato', 0xF85044], ['orange', 0xFF7042],
+    ['yellow', 0xFFCF3D], ['lime', 0xC6FF00], ['green', 0x39EA5F], ['teal', 0x64FFDA],
+    ['cyan', 0x57D7FF], ['blue', 0x5393FF], ['indigo', 0x758AFF], ['purple', 0xB54DFF],
+    ['pink', 0xFF669E],
+  ];
+
+  const opts = {
+    voice: 'auto', loud: 0.65, hold: 0.5, speed: 1, playing: true,
+    boardFps: false, panelPx: false, color: 0,
+  };
+
+  /* ---- simulated speech: phrases of syllables at ~5 per second ------------- */
+  const hash = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+  function speech(sec, seed) {
+    if (opts.voice === 'hold') {
+      const L = opts.hold;
+      return { L, low: L * 0.85, mid: L * 0.7, high: L * 0.4 };
+    }
+    const CYC = 4.4;
+    const cyc = Math.floor(sec / CYC), ph = sec - cyc * CYC;
+    const len = 2.6 + 1.0 * hash(cyc + seed);
+    if (ph > len) return { L: 0, low: 0, mid: 0, high: 0 };
+    const sp = ph * 5.2, si = Math.floor(sp), sf = sp - si;
+    const peak = 0.4 + 0.6 * hash(cyc * 31 + si + seed);
+    const shape = Math.pow(Math.sin(Math.PI * sf), 1.4);
+    const pe = Math.max(0, Math.min(1, ph / 0.15, (len - ph) / 0.25));
+    const L = Math.min(1, (peak * shape * 0.9 + 0.1) * pe * opts.loud);
+    const art = 0.5 + 0.7 * hash(si * 7 + cyc + seed);
+    const sib = hash(si * 13 + cyc + seed) > 0.72 ? 0.7 : 0.15;
+    return { L, low: L * 0.9, mid: Math.min(1, L * art), high: Math.min(1, sib * shape * pe * opts.loud) };
+  }
+
+  /* ---- one orb: face_orb.c's render(), on a virtual clock ------------------- */
+  class Orb {
+    constructor(state, seed) {
+      this.state = state; this.seed = seed;
+      this.t0 = null;
+      this.from = this.to = state.beh; this.blendStart = 0;
+      this.modeFrom = this.modeTo = state.mode; this.modeBlend = 0;
+      this.modeFromBeh = state.beh;
+      this.entered = 0;
+      this.lv = { mic: [0, 0, 0, 0], agent: [0, 0, 0, 0] };
+      this.last = null;
+      this.amp = 0;
+    }
+    set(state, now) { if (state !== this.state) { this.state = state; this.entered = now; } }
+    levels(now) {
+      const dt = this.last == null ? 0 : now - this.last;
+      this.last = now;
+      const voice = speech((now - this.entered) / 1000, this.seed);
+      for (const ch of ['mic', 'agent']) {
+        let tgt = [0, 0, 0, 0];
+        if (this.state.src === ch) {
+          /* Measured ranges: the mic runs 0.014 room noise to 0.227 loud; playback is wider. */
+          const k = ch === 'mic' ? 0.6 : 0.85;
+          tgt = ch === 'mic'
+            ? [voice.L > 0 ? 0.014 + voice.L * 0.213 : 0, voice.low * k, voice.mid * k, voice.high * k]
+            : [voice.L * 0.75, voice.low * k, voice.mid * k, voice.high * k];
+        }
+        const cur = this.lv[ch];
+        for (let i = 0; i < 4; i++) {
+          const tau = tgt[i] > cur[i] ? ATTACK_MS : RELEASE_MS;
+          cur[i] += (tgt[i] - cur[i]) * (1 - Math.exp(-dt / tau));
+        }
+      }
+      return this.lv[this.state.src === 'agent' ? 'agent' : 'mic'];
+    }
+    /* Builds into wasm frames 0 (and 1 during a cross-mode fade). */
+    build(M, now) {
+      if (this.t0 == null) this.t0 = now;
+      const t = (now - this.t0) / 1000;
+      const want = this.state.beh;
+      if (want !== this.to) { this.from = this.to; this.to = want; this.blendStart = now; }
+      let mix = 1;
+      if (this.from !== this.to) {
+        mix = (now - this.blendStart) / BLEND_MS;
+        if (mix >= 1) { mix = 1; this.from = this.to; }
+      }
+      const mode = this.state.mode;
+      if (mode !== this.modeTo) {
+        this.modeFrom = this.modeTo; this.modeFromBeh = this.from;
+        this.modeTo = mode; this.modeBlend = now;
+      }
+      let modeMix = 1;
+      if (this.modeFrom !== this.modeTo) {
+        modeMix = (now - this.modeBlend) / BLEND_MS;
+        if (modeMix >= 1) { modeMix = 1; this.modeFrom = this.modeTo; }
+      }
+      const lv = this.levels(now);
+      this.amp = lv[0];
+      const one = (i, m, from, to, mx) => {
+        if (m === 0) {
+          const rot = (from === B.LISTENING_FILL ? LISTEN_ROTATE_DEG : 0) +
+                      ((to === B.LISTENING_FILL ? LISTEN_ROTATE_DEG : 0) -
+                       (from === B.LISTENING_FILL ? LISTEN_ROTATE_DEG : 0)) * mx;
+          M._orbw_shell(i, t, from, to, mx, lv[0], lv[1], lv[2], lv[3], rot);
+        } else {
+          M._orbw_mode(i, m, t);
+        }
+      };
+      one(0, mode, this.from, this.to, mix);
+      const layers = [{ i: 0, k: 1 }];
+      if (this.modeFrom !== this.modeTo) {
+        one(1, this.modeFrom, this.modeFromBeh, this.modeFromBeh, 1);
+        layers[0].k = modeMix;
+        layers.push({ i: 1, k: 1 - modeMix });
+      }
+      this.t = t; this.mode = mode;
+      return layers;
+    }
+  }
+
+  /* ---- drawing: orb_raster.c's ink, on a canvas ---------------------------- */
+  function draw(M, ctx, px, layers, rgb, stats) {
+    const H = M.HEAPF32;
+    const tr = ((rgb >> 16) & 255) / 255, tg = ((rgb >> 8) & 255) / 255, tb = (rgb & 255) / 255;
+    const ink = (w) => {
+      w = w < 0 ? 0 : w > 1 ? 1 : w;
+      const lum = (1 - w) * 255;     /* dark ground, so ink is mirrored: near dots read bright */
+      return `rgb(${(lum * tr + 0.5) | 0},${(lum * tg + 0.5) | 0},${(lum * tb + 0.5) | 0})`;
+    };
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, px, px);
+    const s = px / SIZE;
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    let dots = 0, lines = 0;
+    /* Wires under the dots: a node reads as a node, not a thickening of a wire. */
+    ctx.lineCap = 'round';
+    for (const { i, k } of layers) {
+      const n = M._orbw_line_count(i), p0 = M._orbw_lines(i) >> 2;
+      for (let j = 0; j < n; j++) {
+        const p = p0 + j * 7, a = H[p + 5] * k;
+        if (a < ALPHA_CULL) continue;
+        ctx.globalAlpha = a > 1 ? 1 : a;
+        ctx.strokeStyle = ink(H[p + 4]);
+        ctx.lineWidth = H[p + 6];
+        ctx.beginPath(); ctx.moveTo(H[p], H[p + 1]); ctx.lineTo(H[p + 2], H[p + 3]); ctx.stroke();
+        lines++;
+      }
+    }
+    for (const { i, k } of layers) {
+      const n = M._orbw_count(i), p0 = M._orbw_dots(i) >> 2;
+      for (let j = 0; j < n; j++) {
+        const p = p0 + j * 6, a = H[p + 5] * k;
+        if (a < ALPHA_CULL) continue;
+        ctx.globalAlpha = a > 1 ? 1 : a;
+        ctx.fillStyle = ink(H[p + 4]);
+        ctx.beginPath(); ctx.arc(H[p], H[p + 1], H[p + 3], 0, 6.283185307179586); ctx.fill();
+        dots++;
+      }
+    }
+    if (stats) { stats.dots = dots; stats.lines = lines; }
+  }
+
+  /* ---- page --------------------------------------------------------------- */
+  const $ = (id) => document.getElementById(id);
+  const stageCanvas = $('stage');
+  const stageCtx = stageCanvas.getContext('2d');
+  const panelCanvas = document.createElement('canvas');
+  panelCanvas.width = panelCanvas.height = SIZE;
+  const panelCtx = panelCanvas.getContext('2d');
+
+  let stageState = byId.idle;
+  const stageOrb = new Orb(stageState, 0);
+  const thumbs = STATES.map((s, n) => ({ state: s, orb: new Orb(s, 17 * (n + 1)), canvas: null, ctx: null, btn: null }));
+
+  /* State buttons */
+  const statesEl = $('states');
+  const stateBtns = {};
+  for (const s of STATES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = 'state-' + s.id;
+    b.innerHTML = `<span class="dot"></span>${s.name}`;
+    b.addEventListener('click', () => { stopTour(); selectState(s); });
+    statesEl.appendChild(b);
+    stateBtns[s.id] = b;
+  }
+
+  /* Thumbnails */
+  const grid = $('grid');
+  for (const th of thumbs) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'thumb';
+    b.id = 'thumb-' + th.state.id;
+    const c = document.createElement('canvas');
+    const label = document.createElement('span');
+    label.textContent = th.state.name;
+    b.append(c, label);
+    b.addEventListener('click', () => { stopTour(); selectState(th.state); });
+    grid.appendChild(b);
+    th.canvas = c; th.ctx = c.getContext('2d'); th.btn = b;
+  }
+
+  function selectState(s) {
+    stageState = s;
+    stageOrb.set(s, vnow);
+    for (const id in stateBtns) stateBtns[id].setAttribute('aria-pressed', String(id === s.id));
+    for (const th of thumbs) th.btn.setAttribute('aria-pressed', String(th.state === s));
+    $('about').textContent = s.about;
+    $('r-state').textContent = s.id;
+  }
+
+  /* Colour */
+  const sw = $('swatches');
+  COLORS.forEach(([name, rgb], i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'swatch';
+    b.id = 'color-' + name;
+    b.title = name;
+    b.setAttribute('aria-label', name);
+    b.style.background = '#' + rgb.toString(16).padStart(6, '0');
+    b.addEventListener('click', () => setColor(i));
+    sw.appendChild(b);
+  });
+  function setColor(i) {
+    opts.color = i;
+    const [name, rgb] = COLORS[i];
+    [...sw.children].forEach((b, j) => b.setAttribute('aria-pressed', String(j === i)));
+    $('colorname').textContent = name;
+    document.documentElement.style.setProperty('--tint', i === 0 ? '#f2f3f5' : '#' + rgb.toString(16).padStart(6, '0'));
+  }
+
+  /* Voice */
+  document.querySelectorAll('input[name=voice]').forEach((r) => r.addEventListener('change', () => {
+    opts.voice = r.value;
+    $('hold-row').hidden = opts.voice !== 'hold';
+    $('loud-row').hidden = opts.voice === 'hold';
+  }));
+  document.querySelectorAll('input[name=loud]').forEach((r) => r.addEventListener('change', () => { opts.loud = +r.value; }));
+  $('level').addEventListener('input', (e) => { opts.hold = +e.target.value; $('level-val').textContent = opts.hold.toFixed(2); });
+
+  /* Playback */
+  const playBtn = $('play');
+  function setPlaying(on) {
+    opts.playing = on;
+    playBtn.textContent = on ? 'Pause' : 'Play';
+    playBtn.setAttribute('aria-pressed', String(!on));
+  }
+  playBtn.addEventListener('click', () => setPlaying(!opts.playing));
+  document.querySelectorAll('input[name=speed]').forEach((r) => r.addEventListener('change', () => { opts.speed = +r.value; }));
+  $('board-fps').addEventListener('change', (e) => { opts.boardFps = e.target.checked; });
+  $('panel-px').addEventListener('change', (e) => { opts.panelPx = e.target.checked; });
+
+  /* Tour: every state once, with the board's transitions between them. */
+  const TOUR = [['disconnected', 2.5], ['connecting', 3.5], ['initializing', 2.5], ['idle', 4],
+                ['listening', 4.5], ['thinking', 3], ['buffering', 2.5], ['speaking', 5], ['idle', 3]];
+  let tour = null;
+  const tourBtn = $('tour');
+  function stopTour() { tour = null; tourBtn.textContent = 'Play every transition'; }
+  tourBtn.addEventListener('click', () => {
+    if (tour) { stopTour(); return; }
+    tour = { step: 0, at: vnow };
+    selectState(byId[TOUR[0][0]]);
+    tourBtn.textContent = 'Stop';
+    setPlaying(true);
+  });
+
+  /* Canvas sizing: backing store follows the CSS size and the screen's density. */
+  function fit(canvas) {
+    const r = canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const px = Math.max(64, Math.round(r.width * dpr));
+    if (canvas.width !== px) { canvas.width = canvas.height = px; }
+    return px;
+  }
+
+  /* ---- loop --------------------------------------------------------------- */
+  let vnow = 0, lastReal = null, lastStage = -1e9, frame = 0;
+  const stats = {};
+
+  function tick(M, real) {
+    const dt = lastReal == null ? 0 : Math.min(100, real - lastReal);
+    lastReal = real;
+    if (opts.playing) vnow += dt * opts.speed;
+
+    if (tour && opts.playing) {
+      const [, dur] = TOUR[tour.step];
+      if (vnow - tour.at >= dur * 1000) {
+        tour.step++;
+        if (tour.step >= TOUR.length) stopTour();
+        else { tour.at = vnow; selectState(byId[TOUR[tour.step][0]]); }
+      }
+    }
+
+    const rgb = COLORS[opts.color][1];
+    if (!opts.boardFps || real - lastStage >= 40) {
+      lastStage = real;
+      const layers = stageOrb.build(M, vnow);
+      if (opts.panelPx) {
+        draw(M, panelCtx, SIZE, layers, rgb, stats);
+        const px = fit(stageCanvas);
+        stageCtx.setTransform(1, 0, 0, 1, 0, 0);
+        stageCtx.globalAlpha = 1;
+        stageCtx.imageSmoothingEnabled = false;
+        stageCtx.drawImage(panelCanvas, 0, 0, px, px);
+      } else {
+        draw(M, stageCtx, fit(stageCanvas), layers, rgb, stats);
+      }
+      $('r-mode').textContent = MODE_NAMES[stageOrb.mode];
+      $('r-t').textContent = stageOrb.t.toFixed(2);
+      $('r-dots').textContent = stats.dots;
+      $('r-lines').textContent = stats.lines;
+      $('r-amp').textContent = stageOrb.amp.toFixed(3);
+    }
+    /* Thumbnails at half rate: they are for comparing, not for detail. */
+    if ((frame++ & 1) === 0) {
+      for (const th of thumbs) {
+        draw(M, th.ctx, fit(th.canvas), th.orb.build(M, vnow), rgb, null);
+      }
+    }
+    requestAnimationFrame((r) => tick(M, r));
+  }
+
+  setColor(0);
+  selectState(byId.idle);
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) setPlaying(false);
+
+  OrbModule().then((M) => {
+    if (!M._orbw_init(SIZE)) throw new Error('orb_init failed: the per-dot tables could not be allocated.');
+    requestAnimationFrame((r) => tick(M, r));
+  }).catch((e) => {
+    const el = $('err');
+    el.hidden = false;
+    el.textContent = 'The orb could not start: ' + (e && e.message ? e.message : e);
+  });
+})();
+</script>
+</body>
+</html>

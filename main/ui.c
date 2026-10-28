@@ -38,23 +38,40 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 
 #include "bsp/display.h"
+#include "esp_lcd_panel_ops.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/touch.h"
 #include "esp_lv_adapter.h"
 #include "esp_lv_adapter_input.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_sleep.h"
+#include "driver/gpio.h"
 
+#include "alarm_sched.h"
 #include "audio_io.h"
 #include "battery.h"
 #include "orb_colors.h"
 #include "ui.h"
 #include "arc_text.h"
 #include "ui_face.h"
+#include "ui_clock.h"
+#include "ui_ring.h"
+#include "controls.h"
+#include "ui_panel.h"
+#include "ui_tone.h"
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
+    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST
+#include "screenshot.h"
+#endif
 
 static const char *TAG = "ui";
+
 
 #define CENTER_X (BSP_LCD_H_RES / 2)
 #define CENTER_Y (BSP_LCD_V_RES / 2)
@@ -364,8 +381,13 @@ static inline lv_area_t signal_box(void)
  *
  * 88% of this device's life is spent with the session stopped, and until now it
  * rendered that at full rate and full brightness -- which is where the heat was
- * going. Asleep it keeps drawing, slowly and dim, because a frozen or black panel
- * reads as a crash where a slow breathing orb reads as waiting.
+ * going. Asleep it keeps drawing, slowly, because a frozen or black panel reads
+ * as a crash where a slow breathing orb reads as waiting.
+ *
+ * FULL BRIGHTNESS, now that sleeping shows the orb clock: it is there to be read
+ * across a room, and at 15 % it was not (Ed's call). What saves power asleep is
+ * the 5 fps and the radio's power save. The one sleep that still dims is the
+ * battery-critical one, which exists to stretch the last few percent.
  *
  * 200 ms is 5 fps. The frame timer is the ONLY thing slowed: LVGL itself keeps
  * running, so the touch panel is polled at its usual rate and a tap is as
@@ -374,7 +396,7 @@ static inline lv_area_t signal_box(void)
  * what reads the touch, so nothing but the BOOT button could wake it.
  */
 #define SLEEP_FRAME_MS       200
-#define SLEEP_BRIGHTNESS_PCT 15
+#define DIM_BRIGHTNESS_PCT   15    /* battery-critical sleep only */
 #define AWAKE_BRIGHTNESS_PCT 100
 
 /* How long after the last sample we treat the display as idle. Slightly longer
@@ -498,8 +520,143 @@ static bool s_face_ready[FACE_COUNT];    /* has init() succeeded */
  * the flush, so it must not run while one is in flight.
  */
 static volatile bool s_sleep_want;
+static volatile bool s_sleep_dim;   /* only the battery-critical sleep dims */
 static bool s_asleep;            /* LVGL task only */
+static bool s_dimmed;            /* LVGL task only */
+static volatile int s_bri_pct = 100;   /* the brightness last set, for the TLM line */
+static uint32_t s_asleep_ms;           /* when the panel last fell asleep */
+static bool s_display_off;             /* blanked after CONFIG_UI_SLEEP_OFF_AFTER_MIN */
+#if CONFIG_UI_DEEP_IDLE
+/* Deep idle (see deep_idle_enter): the panel's IO for its sleep commands, the
+ * state, why it last ended, the task that ends it, and when. */
+static esp_lcd_panel_io_handle_t s_panel_io;
+static volatile bool s_deep_idle;
+static const char *volatile s_wake_cause = "";
+static TaskHandle_t s_waker;
+static uint32_t s_deep_exit_ms;
+/* The touch line armed as the wake source: set by the entry, cleared by the
+ * first of the touch hook and the waker, under s_touch_mux -- so exactly one of
+ * them owns the pin's interrupt state on the way out. */
+static volatile bool s_touch_armed;
+static portMUX_TYPE s_touch_mux = portMUX_INITIALIZER_UNLOCKED;
+/* A wake decided off the LVGL task (deep idle's exit): held until the frame
+ * timer has applied it, so the main loop's once-a-second sleep request cannot
+ * overwrite it first. */
+static volatile bool s_wake_pending;
+#endif
+static esp_lcd_panel_handle_t s_panel; /* for the power walk's display off */
+
+#if CONFIG_POWER_STATE_WALK
+/* BENCH AID: the power walk's overrides, applied by the frame timer -- a
+ * brightness (-1 none) and the panel on or off. See ui_bench_power(). */
+static volatile int s_bench_bri = -1;
+static volatile bool s_bench_display_off;
+#endif
+
+/*
+ * THE CLOCK ON DEMAND: a swipe up from the bottom edge shows the orb clock now,
+ * without waiting for sleep -- the mirror of the swipe down that opens the touch
+ * panel, and for the same reason no tap can be mistaken for it: it starts on
+ * the edge, nowhere near the centre button. The session is not touched. Any
+ * press puts the face back, and that press is nobody else's, so dismissing the
+ * clock can never also end a conversation. LVGL task only.
+ */
+#define CLOCK_SWIPE_BAND_PX 40   /* a press must start this close to the bottom edge */
+#define CLOCK_SWIPE_PX      80   /* and travel this far up */
+static bool s_clock_forced;
+static bool s_clock_swipe;       /* this press began on the bottom edge */
+static int32_t s_clock_swipe_x0, s_clock_swipe_y0;
+static bool s_clock_shown;       /* the clock owns the frame */
+static bool s_clock_ok;          /* ui_clock_init() found its PSRAM */
+static bool s_ring_shown;        /* the ring screen owns the frame */
+
+/*
+ * THE STOPWATCH SCREEN: reached by a sideways swipe on the orb clock, or by
+ * voice; a swipe back returns to the clock. The stopwatch itself lives in
+ * controls.c and runs on whether or not this is up. LVGL task only, apart from
+ * the request flag.
+ */
+static bool s_sw_shown;
+static volatile bool s_sw_want;  /* ui_show_stopwatch(), from any task */
+static int s_sw_pressed = -1;    /* the button showing pressed, 0 left, 1 right */
+static uint32_t s_sw_pressed_ms;
+#define SW_PRESSED_MS 150
+/* A press that began on the clock or the stopwatch screen: what it becomes --
+ * a tap, a sideways swipe -- is decided on release. */
+static bool s_screen_press;
+static int32_t s_screen_x0, s_screen_y0;
+#define SCREEN_SWIPE_PX 80
+#define SCREEN_TAP_PX   20
+/* A session started: the on-demand clock gives the face back. Set by
+ * ui_set_stopped() on the session worker, consumed on the LVGL task. */
+static volatile bool s_clock_cancel;
 static lv_timer_t *s_frame_timer;
+
+/* The ring screen's rate: its motion is slow, and the session may be live on
+ * the core it shares with the echo canceller. 10 fps keeps the snooze fade
+ * smooth enough to read. */
+#define RING_FRAME_MS 100
+
+/*
+ * The frame period, from the one rule: the sleep rate while asleep or while the
+ * clock is up on demand, the ring rate under the ring screen, the full rate
+ * otherwise. A clock frame costs 25-60 ms, which at the awake 33 ms period would
+ * hold the LVGL task busy on the core the echo canceller shares. Called wherever
+ * an input changes, on the event that changed it -- never a frame later, which
+ * is the lag a woken panel must not have.
+ */
+static bool sw_running(void)
+{
+    sw_t sw;
+    controls_stopwatch_get(&sw);
+    return sw.state == SW_RUNNING;
+}
+
+/*
+ * The panel awake holds the CPU at full speed (CONFIG_PM_ENABLE): the face's
+ * frame budget was measured at 240 MHz, and a touch must find the panel quick.
+ * Asleep, the clock's 5 fps fits in its 200 ms at any speed, so main.c's power
+ * management may let the CPU drop to its floor. Held from boot.
+ */
+static void pm_awake(bool hold)
+{
+#if CONFIG_PM_ENABLE
+    static esp_pm_lock_handle_t lock;
+    static bool held;
+    if (lock == NULL && esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "awake", &lock) != ESP_OK) {
+        return;
+    }
+    if (hold != held) {
+        held = hold;
+        if (hold) {
+            esp_pm_lock_acquire(lock);
+        } else {
+            esp_pm_lock_release(lock);
+        }
+    }
+#else
+    (void)hold;
+#endif
+}
+
+static void set_frame_period(void)
+{
+    static uint32_t set;
+    if (s_frame_timer == NULL) {
+        return;
+    }
+    /* The stopwatch runs at the ring rate while it counts -- its centiseconds
+     * want frames -- and at the sleep rate while it stands still. */
+    const uint32_t want = s_display_off                ? 1000
+                          : (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
+                          : s_ring_shown               ? RING_FRAME_MS
+                          : s_sw_shown                 ? (sw_running() ? RING_FRAME_MS : SLEEP_FRAME_MS)
+                                                       : FRAME_MS;
+    if (want != set) {
+        set = want;
+        lv_timer_set_period(s_frame_timer, want);
+    }
+}
 
 static volatile int s_face_want = -1;
 
@@ -509,6 +666,9 @@ static volatile int s_face_want = -1;
  * task before anything draws.
  */
 static volatile int s_color_want = -1;
+
+/* The index on screen, for ui_orb_color() and so main.c can save it. */
+static volatile int s_color_index;
 
 /*
  * The live ink colour, replaced with CONFIG_UI_DEFAULT_ORB_COLOR's during
@@ -576,6 +736,9 @@ static volatile bool s_test_want;   /* set from the agent task */
 /* Both defined below select_face(), which they use. */
 static void test_enter(void);
 static void test_advance(void);
+#if CONFIG_UI_SCREENSHOT_TOUR
+static void tour_frame(uint32_t now);
+#endif
 static bool s_test_active;          /* LVGL task only, below here */
 static size_t s_test_step;
 static size_t s_test_face_restore;
@@ -783,8 +946,9 @@ static uint32_t s_flash_until_ms;
 
 static volatile bool s_stopped;
 
-#if CONFIG_BATTERY_SHOW_DOTS
-/* Written by ui_set_battery from main's telemetry task, read by the frame timer.
+#if CONFIG_BATTERY
+/* Written by ui_set_battery from main's telemetry task, read by the frame timer:
+ * by the orb clock's status row, and by the edge dots when they are built in.
  * Four independent words, per the setter contract in ui.h: store here, apply
  * there. Nothing in this file reads the AXP2101 -- an I2C transfer on the LVGL
  * task would land straight in the frame budget. */
@@ -792,6 +956,9 @@ static volatile int  s_bat_percent;
 static volatile bool s_bat_charging;
 static volatile bool s_bat_low;
 static volatile bool s_bat_valid;
+#endif
+
+#if CONFIG_BATTERY_SHOW_DOTS
 
 /* Whether ink from this overlay is currently on the canvas. LVGL task only.
  *
@@ -802,19 +969,35 @@ static volatile bool s_bat_valid;
 static bool s_bat_drawn;
 #endif
 
-#if CONFIG_WIFI_SIGNAL_SHOW_BARS
-/* Written by ui_set_signal from main's telemetry task, read by the frame timer.
+#if CONFIG_WIFI_SIGNAL
+/* Written by ui_set_signal from main's telemetry task, read by the frame timer:
+ * by the orb clock's status row, and by the edge glyph when it is built in.
  * Independent words, per the setter contract in ui.h: store here, apply there.
  * Nothing in this file calls into the Wi-Fi driver. */
 static volatile int  s_sig_bars;
 static volatile bool s_sig_weak;
 static volatile bool s_sig_valid;
+#endif
+
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
 
 /* Whether ink from this overlay is currently on the canvas -- the same
  * load-bearing flag as s_bat_drawn, for the same reason. LVGL task only. */
 static bool s_sig_drawn;
 #endif
 static volatile bool s_failed;
+
+/* The sleep clock, from ui_set_clock(). Store here, apply there, like the rest. */
+static volatile bool s_clk_valid;
+static volatile int  s_clk_hh, s_clk_mm;
+static volatile int  s_next_day = -1;
+static volatile int  s_next_hh, s_next_mm;
+static volatile bool s_clk_h12;
+/* What is ringing, from alarms.c on the main loop: copied whole under the lock,
+ * since it carries a string. s_ringing is the LVGL task's copy of .ringing. */
+static portMUX_TYPE s_ring_lock = portMUX_INITIALIZER_UNLOCKED;
+static ui_ring_t s_ring_in;
+static bool s_ringing;
 
 /*
  * The connection phase the session layer last reported, or NONE.
@@ -1048,9 +1231,22 @@ void ui_set_gesture_handler(void (*handler)(ui_gesture_t gesture))
     s_gesture_handler = handler;
 }
 
-void ui_set_sleep(bool sleep)
+void ui_set_sleep(bool sleep, bool dim)
 {
+    s_sleep_dim = dim;
+#if CONFIG_UI_DEEP_IDLE
+    if (sleep && s_wake_pending) {
+        return;   /* deep idle's exit is waking the panel; it outranks this */
+    }
+#endif
     s_sleep_want = sleep;
+#if CONFIG_UI_DEEP_IDLE
+    /* The LVGL task is parked in deep idle and would never apply this. */
+    if (!sleep && s_deep_idle && s_waker != NULL) {
+        s_wake_cause = "wake";
+        xTaskNotifyGive(s_waker);
+    }
+#endif
 }
 
 bool ui_is_asleep(void)
@@ -1060,12 +1256,15 @@ bool ui_is_asleep(void)
 
 void ui_set_stopped(bool stopped)
 {
+    if (!stopped && s_stopped) {
+        s_clock_cancel = true;
+    }
     s_stopped = stopped;
 }
 
 void ui_set_signal(int bars, bool weak, bool valid)
 {
-#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+#if CONFIG_WIFI_SIGNAL
     s_sig_bars = bars;
     s_sig_weak = weak;
     s_sig_valid = valid;
@@ -1076,9 +1275,58 @@ void ui_set_signal(int bars, bool weak, bool valid)
 #endif
 }
 
+void ui_set_clock(bool valid, int hh, int mm, int next_day, int next_hh, int next_mm,
+                  bool h12)
+{
+    s_clk_h12 = h12;
+    s_clk_hh = hh;
+    s_clk_mm = mm;
+    s_next_day = next_day;
+    s_next_hh = next_hh;
+    s_next_mm = next_mm;
+    s_clk_valid = valid;
+}
+
+int ui_brightness_pct(void)
+{
+    return s_bri_pct;
+}
+
+#if CONFIG_POWER_STATE_WALK
+void ui_bench_power(int brightness_pct, bool display_off)
+{
+    s_bench_bri = brightness_pct;
+    s_bench_display_off = display_off;
+}
+#endif
+
+void ui_show_stopwatch(void)
+{
+    s_sw_want = true;
+}
+
+bool ui_stopwatch_holds_awake(void)
+{
+    return s_sw_shown && sw_running();
+}
+
+void ui_set_ring(const ui_ring_t *ring)
+{
+    portENTER_CRITICAL(&s_ring_lock);
+    s_ring_in = *ring;
+    portEXIT_CRITICAL(&s_ring_lock);
+}
+
+static void ring_snapshot(ui_ring_t *out)
+{
+    portENTER_CRITICAL(&s_ring_lock);
+    *out = s_ring_in;
+    portEXIT_CRITICAL(&s_ring_lock);
+}
+
 void ui_set_battery(int percent, bool charging, bool low, bool valid)
 {
-#if CONFIG_BATTERY_SHOW_DOTS
+#if CONFIG_BATTERY
     s_bat_percent = percent;
     s_bat_charging = charging;
     s_bat_low = low;
@@ -1106,6 +1354,31 @@ void ui_set_face(int index)
         return;
     }
     s_face_want = index;
+}
+
+/*
+ * THE ORB COLOUR IS THE WHOLE SCREEN'S COLOUR. The words take it,
+ * lifted towards white on the darker colours so they stay readable, and the grey
+ * hints take its hue at their own brightness -- ui_tone.h has the rules, which
+ * leave everything exactly as designed on white. LVGL task only; called when the
+ * colour changes and once from build_ui().
+ */
+static void apply_tint(void)
+{
+    const lv_color_t ink = lv_color_hex(ui_tone_ink(s_tint_rgb));
+    const lv_color_t grey = lv_color_hex(ui_tone_grey(s_tint_rgb, UI_HINT_RGB));
+    lv_obj_set_style_text_color(status_label, ink, LV_PART_MAIN);
+#if CONFIG_UI_SHOW_INDICATORS
+    lv_obj_set_style_text_color(hint_label, grey, LV_PART_MAIN);
+#else
+    (void)grey;
+#endif
+    /* The orb clock reads s_tint_rgb itself, every frame. */
+}
+
+int ui_orb_color(void)
+{
+    return s_color_index;
 }
 
 void ui_set_orb_color(int index)
@@ -1366,7 +1639,8 @@ static void draw_arc_status(uint32_t now)
             arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
             lv_canvas_finish_layer(canvas_obj, &layer);
             lv_obj_invalidate_area(canvas_obj, &s_arc_box);
-            lv_obj_remove_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+            /* The centre label comes back in update_status_shown(), which
+             * owns its HIDDEN flag. */
         }
         return;
     }
@@ -1397,10 +1671,7 @@ static void draw_arc_status(uint32_t now)
         return;
     }
 
-    if (!s_arc_drawn) {
-        s_arc_drawn = true;
-        lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
-    }
+    s_arc_drawn = true;   /* update_status_shown() hides the centre label off this */
 
     lv_canvas_init_layer(canvas_obj, &layer);
     /* Black the ground every frame, not only on a change: the faces repaint
@@ -1408,9 +1679,271 @@ static void draw_arc_status(uint32_t now)
      * keeps that picture wherever the glyph has thinned. Same reasoning the
      * battery overlay records. */
     arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
-    arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24, lv_color_white(), opa);
+    arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24,
+                  lv_color_hex(ui_tone_ink(s_tint_rgb)), opa);
     lv_canvas_finish_layer(canvas_obj, &layer);
     lv_obj_invalidate_area(canvas_obj, &s_arc_box);
+}
+
+/*
+ * THE ORB CLOCK: the sleeping panel, once the time is known. ui_clock.c paints
+ * it; this decides when, and hands it the state as plain values.
+ *
+ * Asleep only, and never over the QR code or the display test, both of which
+ * own the screen. A touch wakes the panel on the press (gesture_event_cb), so
+ * the clock is gone on the same frame the conversation face comes back. Before
+ * the first time sync there is nothing for the rings to show, so sleep keeps
+ * the plain orb until there is.
+ */
+#if CONFIG_UI_CLOCK_PREVIEW
+/*
+ * BENCH AID: the clock in the states worth looking at, captured over serial so
+ * host/shot2png.py can show them side by side with the mockup. The first is
+ * the mockup's own: 2:38 PM, 82 %, white.
+ */
+static const struct {
+    int hh, mm;
+    bool h12;
+    const char *next;
+    int color;          /* orb_colors.c index */
+    int bat;
+    bool low, charging;
+    int bars;
+} PREVIEW[] = {
+    {14, 38, true, "", 0, 82, false, false, 4},
+    {14, 38, true, "", 11, 82, false, false, 4},                 /* purple */
+    {9, 5, true, "alarm 7:30 AM", 0, 15, true, false, 2},       /* low, an alarm */
+    {21, 52, false, "alarm Wed 07:30", 8, 64, false, true, 1},  /* 24 h, charging */
+};
+#define PREVIEW_START_MS 10000
+#define PREVIEW_STEP_MS  3000
+
+/* The preview step showing at `now`, or -1. */
+static int preview_step(uint32_t now)
+{
+    if (now < PREVIEW_START_MS) {
+        return -1;
+    }
+    const uint32_t k = (now - PREVIEW_START_MS) / PREVIEW_STEP_MS;
+    return k < sizeof(PREVIEW) / sizeof(PREVIEW[0]) ? (int)k : -1;
+}
+#endif
+
+static bool clock_wanted(uint32_t now)
+{
+#if CONFIG_UI_CLOCK_PREVIEW
+    if (preview_step(now) >= 0) {
+        return true;
+    }
+#else
+    (void)now;
+#endif
+    /* Anything that owns the whole screen, or a session starting, ends the
+     * on-demand clock outright rather than leaving it to come back afterwards. */
+    const bool cancel = s_clock_cancel;
+    if (cancel) {
+        s_clock_cancel = false;
+    }
+    if (s_clock_forced && (cancel || s_ringing || s_test_active || s_qr_payload != NULL)) {
+        s_clock_forced = false;
+        set_frame_period();
+    }
+    /* The stopwatch screen goes for the same, and for sleep while it stands
+     * still -- it holds the panel awake only while it runs. It runs on. */
+    if (s_sw_shown && (cancel || s_ringing || s_test_active || s_qr_payload != NULL ||
+                       (s_asleep && !sw_running()))) {
+        s_sw_shown = false;
+        set_frame_period();
+    }
+    /*
+     * Asleep, only while STOPPED: the battery-critical sleep keeps a live
+     * conversation's face, dim, with its caption -- main.c holds the panel asleep
+     * then without ending the session, and a clock over the agent would hide
+     * every state it is in.
+     */
+    return s_clock_ok && ((s_asleep && s_stopped) || s_clock_forced) && s_clk_valid &&
+           !s_ringing && !s_test_active && s_qr_payload == NULL;
+}
+
+/* A press on the stopwatch screen at (x, y): its buttons act on the press, as
+ * the ring screen's do -- the right plays or pauses, the left laps while it
+ * runs and resets otherwise. True if it landed on one. */
+static bool stopwatch_press(int32_t x, int32_t y)
+{
+    const int hit = ui_clock_stopwatch_hit(x, y);
+    if (hit < 0) {
+        return false;
+    }
+    s_sw_pressed = hit;
+    s_sw_pressed_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (hit == 1) {
+        controls_stopwatch_toggle();
+    } else if (sw_running()) {
+        controls_stopwatch_lap();
+    } else {
+        controls_stopwatch_reset();
+    }
+    set_frame_period();
+    return true;
+}
+
+#if CONFIG_UI_STOPWATCH_SELFTEST
+/*
+ * BENCH AID, NOT A FEATURE: 10 s after boot, opens the stopwatch screen and
+ * presses its buttons through the same hit test a finger uses -- play, lap,
+ * pause, reset -- capturing it ready, running, running with a lap, and paused,
+ * then hands back to the face.
+ */
+static void stopwatch_selftest(uint32_t now)
+{
+    static const struct { uint32_t at; char what; } STEPS[] = {
+        {10000, 'o'}, {11500, 's'}, {12000, 'R'}, {14000, 's'}, {15000, 'L'},
+        {16500, 's'}, {18000, 'R'}, {19500, 's'}, {21000, 'L'}, {22500, 's'},
+        {24000, 'c'},
+    };
+    static size_t k;
+    if (k >= sizeof(STEPS) / sizeof(STEPS[0]) || now < STEPS[k].at) {
+        return;
+    }
+    const int32_t c = BSP_LCD_H_RES / 2;
+    switch (STEPS[k].what) {
+    case 'o': s_sw_shown = true; ESP_LOGI(TAG, "EVT stopwatch selftest open"); break;
+    case 'c': s_sw_shown = false; ESP_LOGI(TAG, "EVT stopwatch selftest done"); break;
+    case 'R': stopwatch_press(c + 35, c + 143); break;   /* the right button */
+    case 'L': stopwatch_press(c - 35, c + 143); break;   /* the left */
+    case 's': {
+        static unsigned n;
+        char tag[24];
+        snprintf(tag, sizeof(tag), "sw-%u", n);
+        lv_draw_buf_t *buf = lv_canvas_get_draw_buf(canvas_obj);
+        if (!screenshot_capture((const uint16_t *)buf->data,
+                                buf->header.stride / sizeof(uint16_t), BSP_LCD_H_RES,
+                                BSP_LCD_V_RES, tag)) {
+            return;   /* the last one still printing: try again next frame */
+        }
+        n++;
+        break;
+    }
+    }
+    k++;
+}
+#endif
+
+/* The stopwatch screen: the clock's status row and colour, its own state. */
+static void paint_stopwatch(uint32_t now)
+{
+    const ui_clock_state_t st = {
+        .now_ms = now,
+        .tint_rgb = s_tint_rgb,
+#if CONFIG_BATTERY
+        .bat_valid = s_bat_valid,
+        .bat_low = s_bat_low,
+        .bat_charging = s_bat_charging,
+        .bat_percent = s_bat_percent,
+#endif
+#if CONFIG_WIFI_SIGNAL
+        .sig_valid = s_sig_valid,
+        .sig_bars = s_sig_bars,
+#endif
+    };
+    sw_t sw;
+    controls_stopwatch_get(&sw);
+    const int pressed = (s_sw_pressed >= 0 && now - s_sw_pressed_ms < SW_PRESSED_MS) ? s_sw_pressed
+                                                                                     : -1;
+    ui_clock_stopwatch_frame(&st, &sw, pressed);
+}
+
+static void paint_clock(uint32_t now)
+{
+    static const char *const WDAY[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    char next[32] = "";
+    const bool h12 = s_clk_h12;
+    const int day = s_next_day;
+    if (day >= 0 && day <= 7) {
+        char hm[12];
+        alarm_fmt_time(s_next_hh, s_next_mm, h12, hm, sizeof(hm));
+        if (day == 7) {
+            snprintf(next, sizeof(next), "alarm %s", hm);
+        } else {
+            snprintf(next, sizeof(next), "alarm %s %s", WDAY[day], hm);
+        }
+    }
+
+    ui_clock_state_t st = {
+        .now_ms = now,
+        .hh = s_clk_hh,
+        .mm = s_clk_mm,
+        .h12 = h12,
+        .next = next,
+        .tint_rgb = s_tint_rgb,
+#if CONFIG_BATTERY
+        .bat_valid = s_bat_valid,
+        .bat_low = s_bat_low,
+        .bat_charging = s_bat_charging,
+        .bat_percent = s_bat_percent,
+#endif
+#if CONFIG_WIFI_SIGNAL
+        .sig_valid = s_sig_valid,
+        .sig_bars = s_sig_bars,
+#endif
+    };
+
+#if CONFIG_UI_CLOCK_PREVIEW
+    const int k = preview_step(now);
+    if (k >= 0) {
+        st.hh = PREVIEW[k].hh;
+        st.mm = PREVIEW[k].mm;
+        st.h12 = PREVIEW[k].h12;
+        st.next = PREVIEW[k].next;
+        st.tint_rgb = orb_colors_rgb((size_t)PREVIEW[k].color);
+        st.bat_valid = true;
+        st.bat_percent = PREVIEW[k].bat;
+        st.bat_low = PREVIEW[k].low;
+        st.bat_charging = PREVIEW[k].charging;
+        st.sig_valid = true;
+        st.sig_bars = PREVIEW[k].bars;
+    }
+#endif
+
+    ui_clock_frame(&st);
+
+#if CONFIG_UI_CLOCK_PREVIEW
+    /* Two captures a step, a second apart, so the motion shows between them. */
+    static int shot_step = -1;
+    static unsigned shots;
+    if (k != shot_step) {
+        shot_step = k;
+        shots = 0;
+    }
+    const uint32_t in = k >= 0 ? (now - PREVIEW_START_MS) % PREVIEW_STEP_MS : 0;
+    if (k >= 0 && shots < 2 && in >= 1000u + 1000u * shots && !screenshot_busy()) {
+        char tag[24];
+        snprintf(tag, sizeof(tag), "clock-%d-%u", k, shots + 1);
+        lv_draw_buf_t *buf = lv_canvas_get_draw_buf(canvas_obj);
+        if (screenshot_capture((const uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t),
+                               BSP_LCD_H_RES, BSP_LCD_V_RES, tag)) {
+            ESP_LOGI(TAG, "EVT shot %s", tag);
+            shots++;
+        }
+    }
+#endif
+}
+
+/*
+ * The one place the centre label's HIDDEN flag is decided while the face is
+ * up: the caption bent round the rim is the same word moved, so the two never
+ * show at once. (The clock and the panel hide it on their way in.)
+ */
+static void update_status_shown(void)
+{
+    const bool hide_status = s_arc_drawn;
+    if (hide_status != lv_obj_has_flag(status_label, LV_OBJ_FLAG_HIDDEN)) {
+        if (hide_status) {
+            lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 #if CONFIG_UI_SHOW_INDICATORS
@@ -1477,7 +2010,8 @@ static void draw_indicators(void)
 
     lv_draw_arc_dsc_t dsc;
     lv_draw_arc_dsc_init(&dsc);
-    dsc.color = lv_color_hex(interrupt ? INDICATOR_RGB_INTERRUPT : INDICATOR_RGB_IDLE);
+    dsc.color = lv_color_hex(interrupt ? INDICATOR_RGB_INTERRUPT
+                                         : ui_tone_grey(s_tint_rgb, INDICATOR_RGB_IDLE));
     dsc.width = INDICATOR_WIDTH;
     dsc.center.x = CENTER_X;
     dsc.center.y = CENTER_Y;
@@ -1681,8 +2215,10 @@ static void draw_battery(void)
  */
 static void draw_signal(void)
 {
-    const bool show = s_sig_valid && s_qr_payload == NULL && !s_test_active &&
-                      (s_stopped || s_asleep || s_sig_weak);
+    /* A warning only, now: weak, and nothing else. The orb clock's status row
+     * is where the signal is read at rest; this is for the moment it matters,
+     * mid-conversation included. */
+    const bool show = s_sig_valid && s_qr_payload == NULL && !s_test_active && s_sig_weak;
 
     const lv_area_t box = signal_box();
     lv_layer_t layer;
@@ -2069,6 +2605,7 @@ void ui_get_telemetry(ui_telemetry_t *out)
     out->peak_agent = s_amp_peak_agent;
     out->face = (s_face != NULL) ? s_face->name : "none";
     out->face_changed = s_face_changed;
+    out->panel = ui_panel_page();
     s_face_changed = false;
     out->behaviour = behaviour_name(s_behaviour_now);
     /* What was selected, matching amp= on the same line. */
@@ -2103,25 +2640,253 @@ void ui_get_telemetry(ui_telemetry_t *out)
 /*
  * Enter or leave sleep. LVGL task only -- it touches the panel and an lv_timer.
  *
- * Refuses to sleep during the display test. The test runs with the session
+ * Refuses to sleep during the display test, or while the touch panel is open. The test runs with the session
  * stopped and can outlast the sleep timer -- main.c records a measured 41 s run
  * against a 30 s threshold -- so without this it would dim and slow down in the
  * middle of someone stepping through it.
  */
 static void apply_sleep(bool want)
 {
-    if (want == s_asleep) {
+    const bool dim = want && s_sleep_dim;
+    if (want == s_asleep && dim == s_dimmed) {
         return;
     }
-    if (want && s_test_active) {
+    if (want && !s_asleep && s_test_active) {
         return;
     }
-    s_asleep = want;
-    if (s_frame_timer != NULL) {
-        lv_timer_set_period(s_frame_timer, want ? SLEEP_FRAME_MS : FRAME_MS);
+    /*
+     * Nor while the touch panel is open: someone is using it, and the stopped
+     * device's 30 s sleep timer knows nothing about that. The panel closes
+     * itself 8 s after the last touch, and the sleep that was waiting then
+     * lands on the next frame.
+     */
+    if (want && !s_asleep && ui_panel_is_open()) {
+        return;
     }
-    bsp_display_brightness_set(want ? SLEEP_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
-    ESP_LOGI(TAG, "EVT %s", want ? "sleep" : "wake");
+    if (want != s_asleep) {
+        s_asleep = want;
+        s_asleep_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!want && s_display_off && s_panel != NULL) {
+            esp_lcd_panel_disp_on_off(s_panel, true);
+            s_display_off = false;
+        }
+        set_frame_period();
+        pm_awake(!want);
+    }
+    /* Also when only the dimming changed: a cell that turns critical while the
+     * panel already sleeps dims it, and the charger un-dims it. */
+    s_dimmed = dim;
+    s_bri_pct = dim ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT;
+    bsp_display_brightness_set(s_bri_pct);
+    ESP_LOGI(TAG, "EVT %s%s", want ? "sleep" : "wake", dim ? " dim" : "");
+}
+
+/*
+ * THE LONGER IT SLEEPS, THE LESS IT LIGHTS. The orb clock comes up at full
+ * brightness, to be read across a room; past CONFIG_UI_SLEEP_DIM_AFTER_MIN
+ * nobody has looked for a while, and it dims to CONFIG_UI_SLEEP_DIM_PCT.
+ * Past CONFIG_UI_SLEEP_OFF_AFTER_MIN (0, never, by default) the panel goes
+ * off altogether. An AMOLED's draw is its lit pixels times the brightness, and
+ * this is where the device spends its life. A touch, a session or an alarm
+ * wakes it all back up. Not over the battery-critical dim, which is lower.
+ */
+static void sleep_deepens(uint32_t now)
+{
+    if (!s_asleep || s_dimmed) {
+        return;
+    }
+#if CONFIG_POWER_STATE_WALK
+    if (s_bench_bri >= 0 || s_bench_display_off) {
+        return;   /* the walk is pricing brightness itself */
+    }
+#endif
+    const uint32_t mins = (now - s_asleep_ms) / 60000;
+#if CONFIG_UI_SLEEP_OFF_AFTER_MIN > 0
+    if (mins >= CONFIG_UI_SLEEP_OFF_AFTER_MIN && !s_display_off && s_panel != NULL) {
+        esp_lcd_panel_disp_on_off(s_panel, false);
+        s_display_off = true;
+        s_bri_pct = 0;
+        set_frame_period();
+        ESP_LOGI(TAG, "EVT sleep display off");
+        return;
+    }
+#endif
+#if CONFIG_UI_SLEEP_DIM_AFTER_MIN > 0
+    if (mins >= CONFIG_UI_SLEEP_DIM_AFTER_MIN && !s_display_off &&
+        s_bri_pct != CONFIG_UI_SLEEP_DIM_PCT) {
+        s_bri_pct = CONFIG_UI_SLEEP_DIM_PCT;
+        bsp_display_brightness_set(s_bri_pct);
+        ESP_LOGI(TAG, "EVT sleep dim %d%%", s_bri_pct);
+    }
+#endif
+    (void)mins;
+}
+
+/*
+ * DEEP IDLE: THE CHIP SLEEPS WHILE THE PANEL IS DARK.
+ *
+ * Once sleep_deepens() has turned the panel off, nothing the device does
+ * needs the CPU more than once a second -- the main loop's alarm check -- and
+ * the rest of the time it could be in light sleep (main.c). Three things kept
+ * it awake: this task's own 1 ms tick, the audio link's power-management
+ * locks, and the panel controller still running. So, on entry: the panel's
+ * controller into its sleep mode (SLPIN), the audio link closed
+ * (audio_io_deep_idle), the touch line armed as a wake source, and the LVGL
+ * adapter paused -- which stops its tick and parks this task.
+ *
+ * A paused LVGL task cannot wake itself, so one small task does every exit:
+ * a touch (the touch ISR's hook pokes it), or ui_set_sleep(false) from the main
+ * loop for a session, an alarm or the stopwatch. It undoes the entry in
+ * reverse and resumes LVGL; the existing paths then wake the panel exactly as
+ * they always have -- the press is still in the touch driver's queue.
+ *
+ * Not re-entered for DEEP_IDLE_REENTER_MS after an exit, so a press is read
+ * before the dark panel can put the device back under; a touch that turns out
+ * to be nothing (an INT pulse with no point) simply re-enters after it.
+ */
+#if CONFIG_UI_DEEP_IDLE
+#define DEEP_IDLE_REENTER_MS 10000
+#define PANEL_SLPIN  0x10
+#define PANEL_SLPOUT 0x11
+#define PANEL_SLPOUT_WAIT_MS 120
+
+/* A bare command to the CO5300 over QSPI, framed as its driver frames them. */
+static void panel_cmd(uint8_t cmd)
+{
+    if (s_panel_io != NULL) {
+        esp_lcd_panel_io_tx_param(s_panel_io, (int)((0x02u << 24) | ((uint32_t)cmd << 8)),
+                                  NULL, 0);
+    }
+}
+
+static void deep_idle_enter(uint32_t now)
+{
+    if (s_deep_idle || s_waker == NULL || s_panel_io == NULL || !s_display_off ||
+        !s_sleep_want || s_wake_pending ||
+        (s_deep_exit_ms != 0 && now - s_deep_exit_ms < DEEP_IDLE_REENTER_MS)) {
+        return;
+    }
+    panel_cmd(PANEL_SLPIN);
+    audio_io_deep_idle(true);
+    /*
+     * In this order, and s_deep_idle last. The touch line is armed before
+     * anything can ask the waker to disarm it (the hook and ui_set_sleep() both
+     * act only once s_deep_idle is set). And the pause is requested before the
+     * waker can resume: from this task it only sets the flag and returns, the
+     * task parking once this callback is done -- so a resume that follows at
+     * once, from the other core, clears it and the task never parks.
+     */
+    portENTER_CRITICAL(&s_touch_mux);
+    /* Level, not edge: only a level can wake a light-sleeping chip. It also
+     * replaces the pin's falling-edge interrupt until the exit restores it. */
+    gpio_wakeup_enable(BSP_LCD_TOUCH_INT, GPIO_INTR_LOW_LEVEL);
+    s_touch_armed = true;
+    portEXIT_CRITICAL(&s_touch_mux);
+    esp_lv_adapter_pause(0);
+    s_deep_idle = true;
+    ESP_LOGI(TAG, "EVT deepidle enter");
+    /* A wake asked for between this frame's apply_sleep() and the line above
+     * found s_deep_idle false and poked no one: catch it here. */
+    if (!s_sleep_want) {
+        s_wake_cause = "wake";
+        xTaskNotifyGive(s_waker);
+    }
+}
+
+/* ISR context, inside the LVGL adapter's touch ISR (the GPIO interrupt service
+ * is not IRAM -- boot_button.c -- so flash code is fine here). The level
+ * trigger would refire for as long as a finger rests, so it is switched off
+ * at once; the waker restores the edge interrupt. */
+static void touch_irq_hook(esp_lcd_touch_handle_t tp, void *ctx)
+{
+    LV_UNUSED(tp);
+    LV_UNUSED(ctx);
+    bool first = false;
+    portENTER_CRITICAL_ISR(&s_touch_mux);
+    if (s_touch_armed) {
+        s_touch_armed = false;
+        gpio_intr_disable(BSP_LCD_TOUCH_INT);
+        first = true;
+    }
+    portEXIT_CRITICAL_ISR(&s_touch_mux);
+    if (first && s_waker != NULL) {
+        s_wake_cause = "touch";
+        BaseType_t woken = pdFALSE;
+        vTaskNotifyGiveFromISR(s_waker, &woken);
+        portYIELD_FROM_ISR(woken);
+    }
+}
+
+static void deep_idle_waker(void *arg)
+{
+    LV_UNUSED(arg);
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (!s_deep_idle) {
+            continue;
+        }
+        /* Disarm and put the edge interrupt back in one step against the hook:
+         * if it fired first it has already disabled the pin, and this enables
+         * it after; if this is first, the hook sees nothing armed and leaves
+         * the pin alone -- a finger still pulsing INT cannot switch it off. */
+        portENTER_CRITICAL(&s_touch_mux);
+        s_touch_armed = false;
+        gpio_wakeup_disable(BSP_LCD_TOUCH_INT);
+        gpio_set_intr_type(BSP_LCD_TOUCH_INT, GPIO_INTR_NEGEDGE);
+        gpio_intr_enable(BSP_LCD_TOUCH_INT);
+        portEXIT_CRITICAL(&s_touch_mux);
+        /* The touch IS the wake: a quick tap may be over before LVGL, resumed
+         * after the panel's wake-up below, gets to read it. */
+        s_wake_pending = true;
+        s_sleep_want = false;
+        audio_io_deep_idle(false);
+        panel_cmd(PANEL_SLPOUT);
+        vTaskDelay(pdMS_TO_TICKS(PANEL_SLPOUT_WAIT_MS));
+        s_deep_exit_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        s_deep_idle = false;
+        esp_lv_adapter_resume();
+        /* The frame timer runs once a second while the panel is off; run it now,
+         * so the panel is back within the wake-up wait above, not a second on. */
+        if (esp_lv_adapter_lock(100) == ESP_OK) {
+            if (s_frame_timer != NULL) {
+                lv_timer_ready(s_frame_timer);
+            }
+            esp_lv_adapter_unlock();
+        }
+        ESP_LOGI(TAG, "EVT deepidle exit %s", (const char *)s_wake_cause);
+#if CONFIG_PM_PROFILING
+        /* How the chip spent its time, light sleep included (mode SLEEP):
+         * after a run on battery, replug and tap to read it. */
+        esp_pm_dump_locks(stdout);
+#endif
+    }
+}
+
+static void deep_idle_start(lv_indev_t *touch)
+{
+    if (s_panel_io == NULL || touch == NULL) {
+        return;
+    }
+    const esp_lv_adapter_touch_callbacks_t cbs = {.on_interrupt = touch_irq_hook};
+    esp_lv_adapter_set_touch_callbacks(touch, &cbs);
+    esp_sleep_enable_gpio_wakeup();
+    /* Stack in PSRAM: internal RAM is what the TLS handshake runs short of,
+     * and this task never touches flash, the one thing a PSRAM stack forbids. */
+    if (xTaskCreatePinnedToCoreWithCaps(deep_idle_waker, "deep_idle", 3072, NULL, 5, &s_waker,
+                                        tskNO_AFFINITY, MALLOC_CAP_SPIRAM) != pdPASS) {
+        s_waker = NULL;
+        ESP_LOGE(TAG, "deep idle waker did not start; deep idle off");
+    }
+}
+#endif
+
+bool ui_deep_idle(void)
+{
+#if CONFIG_UI_DEEP_IDLE
+    return s_deep_idle;
+#else
+    return false;
+#endif
 }
 
 static void frame_timer_cb(lv_timer_t *timer)
@@ -2131,6 +2896,39 @@ static void frame_timer_cb(lv_timer_t *timer)
 
     /* Before anything draws, like the face and colour switches below. */
     apply_sleep(s_sleep_want);
+#if CONFIG_UI_DEEP_IDLE
+    if (s_wake_pending && !s_asleep) {
+        s_wake_pending = false;   /* applied: the main loop sees the wake edge */
+    }
+#endif
+    sleep_deepens((uint32_t)(esp_timer_get_time() / 1000));
+    if (s_display_off) {
+        /* Nothing to draw on a blank panel; a press turns it back on. */
+        tlm_accumulate_frame(esp_timer_get_time());
+#if CONFIG_UI_DEEP_IDLE
+        deep_idle_enter((uint32_t)(esp_timer_get_time() / 1000));
+#endif
+        return;
+    }
+#if CONFIG_POWER_STATE_WALK
+    {
+        /* The power walk's overrides, on the task that owns the panel's bus. */
+        static int bri_applied = -1;
+        static bool off_applied;
+        const int bri = s_bench_bri;
+        if (bri != bri_applied) {
+            bri_applied = bri;
+            s_bri_pct = bri >= 0 ? bri : (s_dimmed ? DIM_BRIGHTNESS_PCT : AWAKE_BRIGHTNESS_PCT);
+            bsp_display_brightness_set(s_bri_pct);
+        }
+        const bool off = s_bench_display_off;
+        if (off != off_applied && s_panel != NULL) {
+            off_applied = off;
+            esp_lcd_panel_disp_on_off(s_panel, !off);
+            s_bri_pct = off ? 0 : s_bri_pct;
+        }
+    }
+#endif
 
     int64_t draw_start_us = esp_timer_get_time();
     bool idle = ((uint32_t)(draw_start_us / 1000) - s_last_feed_ms) > IDLE_MS;
@@ -2168,15 +2966,127 @@ static void frame_timer_cb(lv_timer_t *timer)
     int cwant = s_color_want;
     if (cwant >= 0) {
         s_color_want = -1;
+        /* The index whatever the RGB: it is what main.c saves and what the
+         * picker marks, and it must be a real one even when the ink is not
+         * changing. */
+        s_color_index = cwant;
         uint32_t rgb = orb_colors_rgb((size_t)cwant);
         if (rgb != s_tint_rgb) {
             ESP_LOGI(TAG, "EVT color %s (0x%06" PRIX32 ")",
                      orb_colors_name((size_t)cwant), rgb);
             s_tint_rgb = rgb;
+            apply_tint();
         }
     }
 
     update_qr();
+
+    /*
+     * THREE THINGS CAN OWN THE FRAME, and when one does the face, its overlays
+     * and the labels all stand down and nothing below runs:
+     *
+     *   the ring screen, while a timer or alarm rings -- first, because it is
+     *     the one that must be answered;
+     *   the touch panel, while it is open;
+     *   the orb clock, asleep or on demand.
+     *
+     * Anything that owns the whole screen by design closes the panel first -- a
+     * ring, the setup QR code, the display test. The panel's frame is called
+     * every frame regardless, because its deferred save of volume and mic gain
+     * runs from it even after it has closed.
+     */
+    ui_ring_t ring;
+    ring_snapshot(&ring);
+    s_ringing = ring.ringing;
+    if (s_ringing || s_test_active || s_qr_payload != NULL) {
+        ui_panel_close(s_ringing ? "alarm" : "screen taken");
+    }
+    const uint32_t now_ms = (uint32_t)(draw_start_us / 1000);
+    static bool s_panel_shown;
+#if CONFIG_UI_STOPWATCH_SELFTEST
+    stopwatch_selftest((uint32_t)(draw_start_us / 1000));
+#endif
+    if (s_sw_want) {
+        s_sw_want = false;
+        if (s_clock_ok) {
+            s_sw_shown = true;
+            s_clock_forced = false;
+            ESP_LOGI(TAG, "EVT stopwatch shown");
+        }
+    }
+    const bool ring_up = !s_test_active && s_qr_payload == NULL && ui_ring_wanted(&ring);
+    const bool panel = ui_panel_frame(now_ms, s_tint_rgb, s_session_live);
+    /* The order decides, though little overlaps: the panel cannot be open
+     * asleep or under a ring, and clock_wanted() closes the stopwatch screen
+     * for the ring, the QR code and the test. */
+    const bool clock_now = clock_wanted(now_ms);
+    const bool sw_up = !ring_up && !panel && s_sw_shown && s_clock_ok;
+    const bool clock = !panel && !ring_up && !sw_up && clock_now;
+    static bool s_sw_up;
+    if (panel != s_panel_shown || clock != s_clock_shown || ring_up != s_ring_shown ||
+        sw_up != s_sw_up) {
+        const bool was_taken = s_panel_shown || s_clock_shown || s_ring_shown || s_sw_up;
+        if (s_ring_shown && !ring_up) {
+            ui_ring_leave();
+        }
+        if ((s_clock_shown && !clock) || (s_sw_up && !sw_up) || (clock && s_sw_up) ||
+            (sw_up && s_clock_shown)) {
+            /* The clock and the stopwatch share a painter: one handing over to
+             * the other restarts it, and to anything else blacks the canvas for
+             * the face -- unless the panel or the ring took over, having
+             * already painted the whole canvas this frame. */
+            ui_clock_leave(!panel && !ring_up && !clock && !sw_up);
+        }
+        s_panel_shown = panel;
+        s_clock_shown = clock;
+        s_sw_up = sw_up;
+        if (ring_up != s_ring_shown) {
+            s_ring_shown = ring_up;
+            set_frame_period();
+        }
+        if ((panel || clock || ring_up || sw_up) && !was_taken) {
+            /* Painted over everything, so no overlay's record of what it last
+             * drew is true any more; each draws afresh once it is gone.
+             * update_status_shown() puts the status word back on the first
+             * frame after. */
+            lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+#if CONFIG_BATTERY_SHOW_DOTS
+            s_bat_drawn = false;
+#endif
+#if CONFIG_WIFI_SIGNAL_SHOW_BARS
+            s_sig_drawn = false;
+#endif
+            s_arc_drawn = false;
+            s_arc_shown = NULL;
+        }
+#if CONFIG_UI_SHOW_INDICATORS
+        if (panel || clock || ring_up || sw_up) {
+            lv_obj_add_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
+        }
+#endif
+    }
+    set_frame_period();   /* cheap when nothing changed; the stopwatch's rate moves */
+    if (ring_up) {
+        ui_ring_frame(&ring, now_ms, s_tint_rgb, s_clk_h12);
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
+    if (sw_up) {
+        paint_stopwatch(now_ms);
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
+    if (panel) {
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
+    if (clock) {
+        paint_clock(now_ms);
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
 
     ui_behaviour_t beh = resolve_behaviour(idle, draw_start_us);
 
@@ -2298,6 +3208,13 @@ static void frame_timer_cb(lv_timer_t *timer)
      * signal bars. This overlay has nothing to do with either indicator.
      */
     draw_arc_status((uint32_t)(draw_start_us / 1000));
+    /* After the caption: it reads s_arc_drawn to decide the centre label. */
+    update_status_shown();
+
+#if CONFIG_UI_SCREENSHOT_TOUR
+    /* Last, so what it copies is the finished frame. */
+    tour_frame((uint32_t)(draw_start_us / 1000));
+#endif
 
     tlm_accumulate_frame(draw_start_us);
 }
@@ -2347,10 +3264,122 @@ static void gesture_event_cb(lv_event_t *e)
          * button's job -- any touch means someone is there.
          */
         s_sleep_want = false;
+        s_clock_swipe = false;
+        s_screen_press = false;
+        {
+            lv_point_t sp = {0};
+            lv_indev_t *sin = lv_event_get_indev(e);
+            if (sin != NULL) {
+                lv_indev_get_point(sin, &sp);
+            }
+            s_screen_x0 = sp.x;
+            s_screen_y0 = sp.y;
+        }
+        /*
+         * A press on the CLOCK -- asleep or on demand -- keeps it up until the
+         * release says what the press was: a tap puts the face back, a sideways
+         * swipe brings the stopwatch. So a press on a sleeping clock wakes the
+         * panel and holds the clock up on demand, for the swipe it may become.
+         * Set BEFORE the wake below, so the frame period it sets is right on
+         * this very event.
+         */
+        const bool on_clock = s_clock_shown;
+        if (on_clock) {
+            s_clock_forced = true;
+        }
         apply_sleep(false);
+        set_frame_period();
+        if (on_clock || s_sw_shown) {
+            s_press_in_button = false;
+            s_press_active = false;
+            s_screen_press = true;
+            /* The panel still sees the press: a drag down from the top edge
+             * opens it over the clock or the stopwatch, as over the face. */
+            ui_panel_pressed(s_screen_x0, s_screen_y0, s_qr_payload == NULL && !s_test_active);
+            if (s_sw_shown && !on_clock) {
+                /* The stopwatch's buttons act on the press, as the ring
+                 * screen's do. */
+                if (stopwatch_press(s_screen_x0, s_screen_y0)) {
+                    s_screen_press = false;   /* a button press is not a swipe */
+                }
+            }
+            break;
+        }
+        /*
+         * The ring screen takes every press while it is up: its Stop and snooze
+         * buttons are the only targets, and a press on neither does nothing.
+         * The press is then nobody else's -- clearing the button gate here is
+         * what stops the release turning into a tap that toggles the session,
+         * or a hold that offers to forget it.
+         */
+        if (s_ring_shown) {
+            s_press_in_button = false;
+            s_press_active = false;
+            lv_point_t rp = {0};
+            lv_indev_t *rin = lv_event_get_indev(e);
+            if (rin != NULL) {
+                lv_indev_get_point(rin, &rp);
+            }
+            ui_ring_t ring;
+            ring_snapshot(&ring);
+            ui_ring_pressed(&ring, rp.x, rp.y, (uint32_t)(esp_timer_get_time() / 1000));
+            break;
+        }
+        /*
+         * The touch panel next. Open, it takes the press whole: the centre button
+         * means nothing under it, so a tap meant for a setting can never also
+         * interrupt or end the conversation. Closed, it only notes a press that
+         * began on the top edge, which can never be the button either -- a drag
+         * from there is how the panel opens.
+         */
+        {
+            lv_point_t p = {0};
+            lv_indev_t *indev = lv_event_get_indev(e);
+            if (indev != NULL) {
+                lv_indev_get_point(indev, &p);
+            }
+            const bool can_open = s_qr_payload == NULL && !s_test_active;
+            if (ui_panel_pressed(p.x, p.y, can_open)) {
+                s_press_in_button = false;
+                s_press_active = false;
+                break;
+            }
+            /* Noted only; the drag decides, in PRESSING. */
+            s_clock_swipe = can_open && !ui_panel_is_open() &&
+                            p.y >= BSP_LCD_V_RES - CLOCK_SWIPE_BAND_PX;
+            s_clock_swipe_x0 = p.x;
+            s_clock_swipe_y0 = p.y;
+        }
         s_press_in_button = press_is_in_button(e);
         s_press_active = s_press_in_button;
         break;
+
+    case LV_EVENT_PRESSING: {
+        lv_point_t p = {0};
+        lv_indev_t *indev = lv_event_get_indev(e);
+        if (indev != NULL) {
+            lv_indev_get_point(indev, &p);
+        }
+        ui_panel_pressing(p.x, p.y);
+        if (s_clock_swipe) {
+            const int32_t up = s_clock_swipe_y0 - p.y;
+            const int32_t side = p.x > s_clock_swipe_x0 ? p.x - s_clock_swipe_x0 : s_clock_swipe_x0 - p.x;
+            if (up >= CLOCK_SWIPE_PX && side < up) {
+                s_clock_swipe = false;
+                s_press_in_button = false;
+                s_press_active = false;
+                if (s_clk_valid && s_clock_ok) {
+                    s_clock_forced = true;
+                    set_frame_period();
+                    ESP_LOGI(TAG, "EVT clock on demand");
+                } else {
+                    /* Nothing for the rings to show before the first sync. */
+                    ESP_LOGI(TAG, "EVT clock refused (time not set)");
+                }
+            }
+        }
+        break;
+    }
 
     case LV_EVENT_RELEASED:
     case LV_EVENT_PRESS_LOST:
@@ -2362,6 +3391,46 @@ static void gesture_event_cb(lv_event_t *e)
          * on the next PRESSED, so leaving it set costs nothing.
          */
         s_press_active = false;
+        /* The drag that opened the panel began off the button, so its click is
+         * already gated out; this only has to finish the panel's own gesture. */
+        const bool panel_took = ui_panel_released(lv_event_get_code(e) == LV_EVENT_PRESS_LOST) ||
+                                ui_panel_is_open();
+        if (s_screen_press && panel_took) {
+            /* The press opened the panel. The on-demand clock it began on is
+             * done with; the stopwatch screen comes back when the panel goes. */
+            s_screen_press = false;
+            s_clock_forced = false;
+            set_frame_period();
+        }
+        if (s_screen_press) {
+            s_screen_press = false;
+            lv_point_t rp = {0};
+            lv_indev_t *rin = lv_event_get_indev(e);
+            if (rin != NULL) {
+                lv_indev_get_point(rin, &rp);
+            }
+            const int32_t dx = rp.x - s_screen_x0, dy = rp.y - s_screen_y0;
+            const int32_t adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+            const bool swipe = adx >= SCREEN_SWIPE_PX && adx > 2 * ady;
+            const bool tap = adx <= SCREEN_TAP_PX && ady <= SCREEN_TAP_PX;
+            if (s_sw_shown) {
+                if (swipe) {
+                    s_sw_shown = false;
+                    s_clock_forced = true;
+                    ESP_LOGI(TAG, "EVT stopwatch -> clock");
+                }
+            } else if (s_clock_forced) {
+                if (swipe && s_clock_ok) {
+                    s_clock_forced = false;
+                    s_sw_shown = true;
+                    ESP_LOGI(TAG, "EVT clock -> stopwatch");
+                } else if (tap) {
+                    s_clock_forced = false;
+                    ESP_LOGI(TAG, "EVT clock dismissed");
+                }
+            }
+            set_frame_period();
+        }
         break;
 
     case LV_EVENT_SHORT_CLICKED:
@@ -2441,6 +3510,7 @@ static lv_display_t *display_start(void)
     if (bsp_display_new(&panel_cfg, &panel, &panel_io) != ESP_OK) {
         return NULL;
     }
+    s_panel = panel;
 
     esp_lv_adapter_display_config_t disp_cfg = {
         .panel = panel,
@@ -2483,7 +3553,16 @@ static lv_display_t *display_start(void)
         return NULL;
     }
     const esp_lv_adapter_touch_config_t tcfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, tp);
+    /* The GPIO interrupt service is already installed (boot_button.c, which
+     * explains why); the touch driver's own install finds it so, correctly,
+     * and the GPIO driver logs that as an error. Muted for this one call. */
+    esp_log_level_set("gpio", ESP_LOG_NONE);
     s_touch = esp_lv_adapter_register_touch(&tcfg);
+    esp_log_level_set("gpio", ESP_LOG_INFO);
+#if CONFIG_UI_DEEP_IDLE
+    s_panel_io = panel_io;
+    deep_idle_start(s_touch);
+#endif
     if (s_touch == NULL) {
         return NULL;
     }
@@ -2590,6 +3669,59 @@ static void test_advance(void)
     }
 }
 
+#if CONFIG_UI_SCREENSHOT_TOUR
+/*
+ * The display test, on a timer instead of taps, with the canvas captured three
+ * times into each step -- 1.5, 2.5 and 3.5 s in, so the states that animate are
+ * seen at three points of their motion -- then advanced at 4 s. A capture still
+ * printing holds the step; the serial link sets the pace, not this.
+ */
+static void tour_frame(uint32_t now)
+{
+    static const uint32_t SHOT_AT_MS[] = {1500, 2500, 3500};
+    static size_t step = SIZE_MAX;
+    static uint32_t step_ms;
+    static unsigned shots;
+    if (!s_test_active) {
+        step = SIZE_MAX;
+        return;
+    }
+    if (step != s_test_step) {
+        step = s_test_step;
+        step_ms = now;
+        shots = 0;
+    }
+    const uint32_t in = now - step_ms;
+    const unsigned n_shots = sizeof(SHOT_AT_MS) / sizeof(SHOT_AT_MS[0]);
+    if (shots < n_shots && in >= SHOT_AT_MS[shots] && !screenshot_busy()) {
+        char tag[48];
+        int k = snprintf(tag, sizeof(tag), "s%u-", (unsigned)step);
+        /* "listening (fill, in)" -> "listening-fill-in" */
+        for (const char *c = s_test_steps[step].label; *c && k < (int)sizeof(tag) - 4; c++) {
+            const bool alnum = (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9');
+            if (alnum) {
+                tag[k++] = *c;
+            } else if (k > 0 && tag[k - 1] != '-') {
+                tag[k++] = '-';
+            }
+        }
+        if (tag[k - 1] == '-') {
+            k--;
+        }
+        snprintf(tag + k, sizeof(tag) - (size_t)k, "-%u", shots + 1);
+        lv_draw_buf_t *buf = lv_canvas_get_draw_buf(canvas_obj);
+        if (screenshot_capture((const uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t),
+                               BSP_LCD_H_RES, BSP_LCD_V_RES, tag)) {
+            ESP_LOGI(TAG, "EVT shot %s", tag);
+            shots++;
+        }
+    }
+    if (shots == n_shots && in >= 4000 && !screenshot_busy()) {
+        test_advance();
+    }
+}
+#endif
+
 static esp_err_t build_ui(void)
 {
     lv_obj_t *scr = lv_screen_active();
@@ -2620,7 +3752,6 @@ static esp_err_t build_ui(void)
     lv_label_set_text(status_label, s_status);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_text_color(status_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_center(status_label);
 
 #if CONFIG_UI_SHOW_INDICATORS
@@ -2634,7 +3765,6 @@ static esp_err_t build_ui(void)
     lv_label_set_text(hint_label, "");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(hint_label, lv_color_hex(0x8b96a0), LV_PART_MAIN);
     lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 34);
 #endif
 
@@ -2647,14 +3777,31 @@ static esp_err_t build_ui(void)
      * too: LVGL suppresses LONG_PRESSED while a scroll object is latched.
      */
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-    /* Not a static initialiser because it is a table lookup; orb_colors_rgb()
-     * returns white for an out-of-range index, so a Kconfig list that has drifted
-     * out of step with the table degrades to the default look. */
-    s_tint_rgb = orb_colors_rgb(CONFIG_UI_DEFAULT_ORB_COLOR);
+    /* The colour it was left in, else the Kconfig default. Not a static
+     * initialiser because both are lookups; orb_colors_rgb() returns white for an
+     * out-of-range index, so a Kconfig list that has drifted out of step with the
+     * table degrades to the default look. */
+    const int saved_color = orb_colors_saved();
+    s_color_index = saved_color >= 0 ? saved_color : CONFIG_UI_DEFAULT_ORB_COLOR;
+    if (s_color_index < 0 || (size_t)s_color_index >= orb_colors_count()) {
+        s_color_index = 0;   /* white: what orb_colors_rgb() would show anyway */
+    }
+    s_tint_rgb = orb_colors_rgb((size_t)s_color_index);
+    apply_tint();
+
+    ui_panel_init(canvas_obj);
+    pm_awake(true);   /* the panel starts awake */
+    s_clock_ok = ui_clock_init(canvas_obj);
+    ui_ring_init(canvas_obj);
+#if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
+    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST
+    screenshot_init();
+#endif
 
     /* Before the frame timer and before any tap is attached, which is what makes
      * publish_level() free of a first-use check. See s_pole_low. */

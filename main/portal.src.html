@@ -83,6 +83,12 @@ spellcheck='false' placeholder='paste your key'>
 <label class='chk'><input type='checkbox' id='showk'> Show key</label>
 <p class='hint' id='keyhint'></p>
 
+<label for='tz'>Timezone</label>
+<input type='text' id='tz' autocapitalize='none' autocorrect='off'
+spellcheck='false' placeholder='e.g. America/Chicago'>
+<p class='hint'>For the clock and alarms. Filled in from this phone; you can also
+change it later by asking the device.</p>
+
 <button type='submit' id='go'>Save and connect</button>
 </form>
 <div id='msg'></div>
@@ -100,6 +106,8 @@ fetch('/scan').then(function(r){return r.json()}).then(function(d){
 sel.innerHTML='';
 d.nets.forEach(function(n){opt(n.ssid,n.ssid+'  ('+n.rssi+' dBm)'+(n.open?'  open':''))});
 opt('__other__','Other / hidden network...');
+var tz=document.getElementById('tz');
+try{tz.value=d.tz||Intl.DateTimeFormat().resolvedOptions().timeZone||''}catch(x){tz.value=d.tz||''}
 hint.textContent=d.key_set?'A key is already stored. Leave this blank to keep it.'
 :'No key stored yet - this device cannot talk until one is set.';
 }).catch(function(){sel.innerHTML='';opt('__other__','scan failed - enter manually');
@@ -120,7 +128,8 @@ fetch('/save',{method:'POST',
 headers:{'Content-Type':'application/x-www-form-urlencoded'},
 body:'ssid='+encodeURIComponent(s)+'&pass='+
 encodeURIComponent(document.getElementById('pass').value)+'&key='+
-encodeURIComponent(document.getElementById('key').value.trim())})
+encodeURIComponent(document.getElementById('key').value.trim())+'&tz='+
+encodeURIComponent(document.getElementById('tz').value.trim())})
 .then(function(){msg.textContent='Saved. Restarting to join '+s+'. '
 +'This page will stop responding, and the setup network will disappear.'})
 .catch(function(){msg.textContent='Save failed. Try again.';

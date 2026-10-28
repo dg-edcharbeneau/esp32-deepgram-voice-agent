@@ -3,11 +3,13 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 
 #include "audio_io.h"
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "ui.h"
+#include "wifi_sta.h"
 
 static const char *TAG = "session_ctl";
 
@@ -41,6 +43,7 @@ typedef enum {
     REQ_RELOAD,   /* same work as RESTART, but keeps the conversation */
     REQ_STOP,     /* stop if running; never starts */
     REQ_RELOAD_SOON, /* like RELOAD, but a no-op when nothing is running */
+    REQ_START_SOON,  /* start if stopped; a no-op when already running */
 } request_t;
 
 static TaskHandle_t s_task;
@@ -61,6 +64,9 @@ static volatile bool s_flush_wanted;
  * not do that -- it runs on iot_button's task, with the audio path one
  * priority level away. */
 static volatile bool s_ns_save_wanted;
+/* And again for the touch panel's volume and mic gain, which it applies at once
+ * on the LVGL task and leaves here to save. */
+static volatile bool s_settings_save_wanted;
 /*
  * "Reopen the session when you get a moment, and only if there is one."
  *
@@ -74,6 +80,15 @@ static volatile bool s_ns_save_wanted;
  * the no-op it should always have been.
  */
 static volatile bool s_reload_wanted;
+/*
+ * "Open a session as soon as you can." The alarm's request, and a flag for the
+ * same reason as the two above, plus one of its own: request() DROPS anything
+ * that lands while the worker is busy or inside the cooldown, and an alarm that
+ * fires a second after the idle timeout stopped the session lands in exactly
+ * that window. A gesture dropped there is fine -- the user taps again. An alarm
+ * has nobody to tap again, so its start must wait its turn instead of losing it.
+ */
+static volatile bool s_start_wanted;
 /* Whether the last start attempt failed, so the idle label can say so. */
 static volatile bool s_start_failed;
 static dg_agent_callbacks_t s_callbacks;
@@ -141,6 +156,33 @@ bool session_ctl_is_running(void)
     return s_running;
 }
 
+/*
+ * A live session holds the CPU at full speed (CONFIG_PM_ENABLE): echo
+ * cancellation, noise suppression and the uplink run on a 64 ms budget that was
+ * measured at 240 MHz. With no session, main.c's power management may let the
+ * clock drop while the panel sleeps.
+ */
+static void pm_session(bool hold)
+{
+#if CONFIG_PM_ENABLE
+    static esp_pm_lock_handle_t lock;
+    static bool held;
+    if (lock == NULL && esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "session", &lock) != ESP_OK) {
+        return;
+    }
+    if (hold != held) {
+        held = hold;
+        if (hold) {
+            esp_pm_lock_acquire(lock);
+        } else {
+            esp_pm_lock_release(lock);
+        }
+    }
+#else
+    (void)hold;
+#endif
+}
+
 static void do_stop(void)
 {
     if (!s_running) {
@@ -174,6 +216,7 @@ static void do_stop(void)
     audio_io_reset();
 
     s_running = false;
+    pm_session(false);
     ui_set_stopped(true);
     /*
      * "saved" is the only sign, while the device is quiet, that there is still
@@ -212,12 +255,21 @@ static void do_start(void)
      * conversation outlived whatever just happened, before a word is spoken. */
     ui_set_status(dg_agent_has_history() ? "resuming" : "connecting", false);
 
+    /* Full CPU speed for the session's audio before anything of it starts. */
+    pm_session(true);
+
+    /* The radio at full attention before the first packet: asleep it may be in
+     * maximum modem sleep, sleeping through beacons, and main.c's loop -- which
+     * owns the policy -- would only notice a second later. */
+    wifi_sta_set_power_save_mode(WIFI_STA_PS_NONE);
+
     esp_err_t err = dg_agent_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "start failed: %s", esp_err_to_name(err));
         s_start_failed = true;
         ui_set_stopped(true);
         ui_set_status("error", false);
+        pm_session(false);
         return;
     }
 
@@ -248,6 +300,15 @@ static void session_ctl_task(void *arg)
             if (req == 0) {
                 s_reload_wanted = false;
                 req = REQ_RELOAD_SOON;
+            } else {
+                xTaskNotify(s_task, 0, eNoAction);
+            }
+        }
+        /* Same promotion, same deference to a real request in hand. */
+        if (s_start_wanted) {
+            if (req == 0) {
+                s_start_wanted = false;
+                req = REQ_START_SOON;
             } else {
                 xTaskNotify(s_task, 0, eNoAction);
             }
@@ -294,6 +355,10 @@ static void session_ctl_task(void *arg)
             audio_io_ns_persist();
         }
 #endif
+        if (s_settings_save_wanted) {
+            s_settings_save_wanted = false;
+            audio_io_settings_persist();
+        }
 
         if (req == 0) {
             continue;
@@ -358,6 +423,18 @@ static void session_ctl_task(void *arg)
             }
             ESP_LOGI(TAG, "reloading session (deferred)");
             do_stop();
+            do_start();
+            break;
+        case REQ_START_SOON:
+            /* Already up: the alarm's announcement goes out on the live session,
+             * so there is nothing to do here -- and `continue`, for the reason
+             * REQ_RELOAD_SOON gives, so a no-op is not charged a cooldown. */
+            if (s_running) {
+                s_busy = false;
+                s_busy_since_ms = 0;
+                continue;
+            }
+            ESP_LOGI(TAG, "starting session (deferred)");
             do_start();
             break;
         case REQ_RELOAD:
@@ -527,10 +604,28 @@ void session_ctl_request_ns_save(void)
 }
 #endif
 
+/* The same again: see s_settings_save_wanted. */
+void session_ctl_request_settings_save(void)
+{
+    s_settings_save_wanted = true;
+    if (s_task != NULL) {
+        xTaskNotify(s_task, 0, eNoAction);
+    }
+}
+
 /* Same mechanism, same reason: see s_reload_wanted. */
 void session_ctl_request_reload_soon(void)
 {
     s_reload_wanted = true;
+    if (s_task != NULL) {
+        xTaskNotify(s_task, 0, eNoAction);
+    }
+}
+
+/* Same mechanism again: see s_start_wanted. */
+void session_ctl_request_start_soon(void)
+{
+    s_start_wanted = true;
     if (s_task != NULL) {
         xTaskNotify(s_task, 0, eNoAction);
     }

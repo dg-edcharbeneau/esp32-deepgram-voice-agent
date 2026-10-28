@@ -436,155 +436,12 @@ The feature ships; these are the threads left, in the order I would pull them.
   property of aggressive suppression rather than of that one library, and one
   esp-sr run hinted at it ("A quick brown fox **jumped**"). A single utterance,
   so not conclusive — which is exactly why it is worth a deliberate run.
-- **`CONFIG_AEC_UPLINK_VAD_PEAK` has not been re-tuned for a denoised signal.**
-  Moving NS below the VAD restored barge-in to baseline, so nothing is broken,
-  but the threshold is still the one chosen for the undenoised floor.
-- **Long-run heap behaviour, under real conversation.** A 35-minute run is
-  recorded below and found no drift at all — but nobody spoke during it, so the
-  allocation churn that actually fragments this heap never happened. That is the
-  part still untested.
-
-### Long run, 2026-09-21: the heap does not drift, but nobody spoke
-
-35 minutes (2,099 s), 2,093 telemetry samples, 2,091 with a live session, NS
-running at mode 2, `CONFIG_HEAP_PROBE=y`, idle timeout pinned off.
-**Zero crashes, zero reboots.**
-
-| | 1 Hz observed min | 50 ms true floor |
-|---|---|---|
-| internal free | 39,551 | **22,163** |
-| largest DMA block | 19,456 | **8,704** |
-
-The finding is *when* that floor was reached: **`lowdma` hit 8,704 at t = 4.2 s
-and did not move again for the remaining 35 minutes.** `dmamax` sat pinned at
-19,456 the whole time, `rxovf` never left 120, and fps held 10.4–10.6 from the
-five-minute mark onward. The `heap_probe` boot lines show the whole collapse
-happening inside the first two seconds, as Wi-Fi, TLS and the display come up.
-
-So the risk window is **startup, not longevity** — at least for this workload.
-That is the opposite of what the open item assumed, and it is worth knowing
-before anyone budgets for a slow leak that does not appear to exist.
-
-**The caveat is the whole caveat, so it goes in bold: nobody spoke.**
-`turns=0`, `played=0`, `rx=0`, no playback blocks. The device streamed 67 MB of
-microphone audio upstream and was otherwise idle. What this run establishes is
-that the *uplink path* — capture → AEC → NS → WebSocket — neither leaks nor
-fragments over 35 minutes. What it does not touch is the churn a conversation
-brings: TTS playback buffers, history writes to flash, face changes, reconnects.
-The 6,144 B previously recorded over ~22 minutes almost certainly came from that
-kind of use, and nothing here contradicts it.
-
-> **This run's fps is an outlier and should not be quoted.** It averaged 10.56,
-> and three later replicates of a byte-identical configuration read 15.00, 14.96
-> and 14.81 — a spread of 0.19 fps. So the 10.56 is ~30% below where that build
-> actually sits, and it is not normal variance. See the fps section below; note
-> also that this run is the only one in the whole exercise that logged transport
-> congestion (`txdrop=46`, `updrop=73`, against zero in every replicate), and
-> that the board was power-cycled between it and the replicates. The heap
-> findings above stand, but they were taken on an atypically slow run.
-
-### What the denoiser actually costs in frame rate
-
-Measured 2026-09-21, five arms in one sitting, 300 s each, ~279 steady-state
-samples per arm, same face, session pinned open. Three of them are replicates of
-one configuration, which is what makes the spread readable.
-
-| arm | fps mean | min | draw avg | amp |
-|---|---|---|---|---|
-| NS off, probe off | **17.74** | 16.1 | 17.5 ms | 0.015 |
-| NS on, probe off | **14.87** | 13.6 | 21.2 ms | 0.005 |
-| NS on, probe on | 15.00 | 13.5 | 21.3 ms | 0.005 |
-| NS on, probe on (replicate) | 14.96 | 13.6 | 21.4 ms | 0.005 |
-| NS on, probe on (replicate) | 14.81 | 13.5 | 21.4 ms | 0.005 |
-
-**Here the denoiser costs 2.87 fps, or −16.2%. The 2026-09-07 table above says
-−5.20 fps, or −26%, and both were measured in one sitting** — so this is two
-honest measurements of the same quantity disagreeing, not an artefact of
-comparing across runs. (An earlier draft of this section claimed the older
-numbers came from separate sittings. They did not; that was wrong.)
-
-What reproduces and what does not is the interesting part:
-
-| | 2026-09-07 | 2026-09-21 |
-|---|---|---|
-| NS on | 14.80 | 14.87 (and 15.00 / 14.96 / 14.81) |
-| NS off | **20.00** | **17.74** |
-
-**The NS-on figure is stable to within 0.2 fps across two weeks. The baseline
-moved by 2.26.**
-
-`CONFIG_AUDIO_CAPTURE_ALWAYS` was the leading suspect — the September bench set
-it and the later one did not — and **it is ruled out in both rows of a full
-2×2.** Measured 2026-09-22, ~280 samples per arm:
-
-| | `CAPTURE_ALWAYS=n` | `CAPTURE_ALWAYS=y` | flag effect |
-|---|---|---|---|
-| **NS off** | 17.37 | 17.24 | −0.13 |
-| **NS on** | 14.91 | 14.89 | −0.02 |
-
-Both differences sit inside the ±0.6% replicate spread. The flag does nothing.
-NS on reproduces the 14.81–15.00 measured the day before, and 14.80 measured
-two weeks before that.
-
-> **A note on the fourth arm, because it fails a rule stated elsewhere in this
-> document.** Its raw ambient (`mic peak L` mean 46.7) ran 38% above the other
-> three arms (32.6 / 34.6 / 34.1), which the ±20% rule in the bench notes would
-> reject. It is kept, on the mechanism rather than on convenience: what drives
-> the orb's pixel work — and therefore fps — is the **post-NS** level the
-> visualiser receives, and that was 0.0052 against arm 3's 0.0071. Arm 4 drew
-> *less*, so if ambient had biased it, it would have biased it **faster**, and it
-> read 0.02 fps slower. The ±20% rule is about raw level because raw level is
-> what the transcription and suppression-depth comparisons turn on; for fps the
-> denoiser decouples the two.
->
-> That decoupling is itself worth recording: **with NS on, frame rate is
-> insensitive to room noise.** Raw ambient rose 38% and post-NS `amp` did not
-> follow, so the display cost stayed flat. Nobody was looking for that, and it is
-> a genuine second-order benefit of the denoiser.
-
-So the shift is not a bench flag, and that makes it harder to explain rather
-than easier: **none of the code that changed between the two sittings touches
-the NS-off path.** The VAD reorder is inside `#if CONFIG_MIC_NS_ENABLE`, which
-is compiled out in these arms; `rxovf` and `lowint`/`lowdma` are three calls a
-second; `ui_flash_status` short-circuits on a NULL check.
-
-**The code is exonerated, and that settles it.** The September tree itself —
-`a98b094`, checked out into a worktree, built with NS off and flashed today —
-reads **17.22 fps** at ambient 31.4, against 17.37 at ambient 32.6 for current
-`HEAD`. Same code that recorded 20.00, same device, 2.8 fps slower.
-
-So all three candidate explanations are dead: it is not `CONFIG_HEAP_PROBE`
-(+0.9%), not `CONFIG_AUDIO_CAPTURE_ALWAYS` (0.02–0.13 fps), and not the two
-weeks of code between the sittings (0.15 fps, measured directly).
-
-That leaves the 2026-09-07 reading itself. It cannot be reproduced from its own
-source tree, and it was internally odd at the time: it ran at `amp` ≈ 0.028
-against 0.013 here, and higher amplitude is *more* pixel work for the orb, so it
-should have been **slower** than today's runs rather than 16% faster.
-
-**Treat 20.00 as unreliable and stop quoting −26%.** The denoiser costs about
-**−14%** — eight NS-off readings now span 17.22–17.74 and none approach 20.00,
-while NS-on has reproduced at 14.80–15.00 on four separate days. The older
-tables keep their original numbers as the record of what that sitting reported,
-with this note attached.
-
-Note the confound runs *against* the finding, as it did in the acoustic work:
-`amp` falls 0.015 → 0.005 because the denoiser quiets what the orb draws, which
-should make drawing cheaper. Draw time rose anyway, 17.5 → 21.2 ms. The CPU cost
-is real and if anything understated here.
-
-**`CONFIG_HEAP_PROBE` is free.** 14.87 → 15.00, a +0.9% difference sitting inside
-a ±0.6% replicate spread. The 50 ms sampler at priority 1 on core 0 does not
-measurably cost frame rate, which was a live hypothesis and is now dead.
-
-**fps is reproducible to ±0.6% within a sitting** (15.00 / 14.96 / 14.81), so
-these numbers are solid — as long as nothing is compared across sittings. That
-makes the 10.56 from the 35-minute run genuinely anomalous rather than noisy,
-and it remains unexplained. The two things that distinguish it: it is the only
-run that logged transport congestion, and the board was power-cycled between it
-and the replicates. If a ~30% frame-rate deficit that survives a reset but
-clears on a power cycle is real, it matters more than the denoiser does — worth
-watching for, not yet worth a theory.
+- **`CONFIG_AEC_UPLINK_VAD_PEAK` was re-tuned in October, for the gain, not the
+  denoiser.** See "Barge-in at volume 70" below; the October runs passed with
+  noise suppression on and off alike, and caught interruptions more readily on.
+- **Long-run heap behaviour.** Every capture started from a boot-fresh heap. A
+  board twenty minutes into use fragments further — `intmax` has been recorded
+  dipping to 6,144 over ~22 minutes against the 25,600 measured here.
 
 ### Bench notes worth keeping
 
@@ -632,3 +489,46 @@ default. This is the order `bsp_extra` uses.
 ---
 
 [Back to the README](../README.md)
+
+## Barge-in at volume 70, October 2026
+
+Barge-in stopped working at volume 70 and above (50 still worked) with nothing
+changed on the device. The firmware was ruled out on the board, not on paper:
+0.7.0 and `85f3518` -- the 30 August build whose commit records "barge-in fires"
+at 70 and 100 -- both failed the same way, on the same settings, with echo levels
+at the microphone matching August's. Whatever moved is outside this repo.
+
+A recording of each session (`CONFIG_AUDIO_RECORD`: the raw mic and exactly what
+was sent) split the failure in two:
+
+- **At 24 dB the interruption never left the device intact.** The echo plus a
+  voice over it pinned the mic at 32,768, and the canceller cannot subtract what
+  clipped. Replaying the recorded uplink into Flux STT on its own
+  (`host/flux_replay.py`) found no turn at those moments either.
+- **At 18 dB it does, and the agent sometimes still does not act.** Session
+  `01a165b8-6a6f-7180-96d0-c5210810b4a2`: Flux STT finds a StartOfTurn at about
+  22.7 s in the replayed uplink; the live agent did not barge in there. That half
+  is Deepgram-side, and the recording reproduces it.
+
+What fixed the device half, measured: `CONFIG_MIC_IN_GAIN` 24 -> 18 dB (no
+clipping; residual echo under 100 in quiet passages), `CONFIG_AEC_UPLINK_VAD_PEAK` 400 -> 200 (the
+same threshold at the lower gain -- left at 400 it chopped a talking-over voice
+into fragments, and interruptions only landed in the agent's pauses), with noise
+suppression on. 30 dB was tried and is worse than 24: the device heard itself read
+the time and answered it.
+
+The language model was a separate problem. After a working barge-in on "okay",
+gpt-4o-mini picked the story back up; a prompt rule against it was ignored.
+gpt-5.4-mini stopped and stayed stopped, and is the model now.
+
+**Ducking was tried and does not work here, and neither would a local barge-in.**
+The idea was to turn the agent down (-12 dB) the moment the post-cancellation
+signal showed someone talking over it, so the canceller had less echo to fight
+during double-talk. It fired on the agent's own voice: 4 times in one reply and 12
+in another, with nobody talking, and the agent's volume pumped up and down.
+Residual echo is under 100 in quiet passages but crosses 400 in loud ones, and a
+voice over the agent lands in the same range -- there is no threshold on this
+signal that separates the two, so the device cannot make that call by itself.
+Muting the agent on it ("local barge-in") would cut the agent off instead of
+fading it. The decision has to stay with Deepgram, which hears the whole signal.
+

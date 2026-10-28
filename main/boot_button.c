@@ -3,7 +3,9 @@
 #include "esp_timer.h"
 #include "iot_button.h"
 #include "button_gpio.h"
+#include "driver/gpio.h"
 
+#include "alarms.h"
 #include "audio_io.h"
 #include "boot_button.h"
 #include "session_ctl.h"
@@ -27,6 +29,42 @@ static const char *TAG = "boot_btn";
 
 static bool s_forgetting;
 
+/*
+ * A PRESS THAT STOPPED AN ALARM BELONGS TO THE ALARM, whatever it turns into.
+ *
+ * Dismissing on the click was not enough. A sleepy hand holds the button until
+ * the noise stops, and the hold is "forget wi-fi" at 3 s -- the chime never
+ * stopped, because no click fires while the button is down, and the device
+ * erased its credentials and rebooted into the portal. Two quick presses were
+ * a noise-suppression toggle and left the chime going.
+ *
+ * So the alarm is dismissed on the press itself, and every gesture that press
+ * (or a second one hard behind it) completes -- click, double click, hold -- is
+ * swallowed. The flag is cleared by the next press that is neither during a
+ * ring nor within SWALLOW_MS of the dismiss, which keeps an impatient second
+ * press from slipping through as half of a double click.
+ */
+#define SWALLOW_MS 1500
+static volatile bool s_swallow;
+static volatile uint32_t s_dismiss_ms;
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static void on_press_down(void *arg, void *usr_data)
+{
+    if (alarms_ringing()) {
+        ESP_LOGI(TAG, "EVT bootpress -- alarm dismissed");
+        alarms_dismiss();
+        s_dismiss_ms = now_ms();
+        s_swallow = true;
+    } else if (s_swallow && (now_ms() - s_dismiss_ms) >= SWALLOW_MS) {
+        s_swallow = false;
+    }
+}
+
 static void restart_cb(void *arg)
 {
     esp_restart();
@@ -41,7 +79,7 @@ static void restart_cb(void *arg)
  */
 static void on_forget_wifi(void *arg, void *usr_data)
 {
-    if (s_forgetting) {
+    if (s_forgetting || s_swallow) {
         return;
     }
     s_forgetting = true;
@@ -80,6 +118,9 @@ static void on_forget_wifi(void *arg, void *usr_data)
  */
 static void on_toggle_ns(void *arg, void *usr_data)
 {
+    if (s_swallow) {
+        return;
+    }
     if (!audio_io_ns_available()) {
         ESP_LOGW(TAG, "EVT bootdouble -- denoiser unavailable");
         ui_flash_status("noise reduction n/a", NS_NOTICE_MS);
@@ -107,6 +148,12 @@ static void on_click(void *arg, void *usr_data)
      *
      * Unconditionally a toggle, unlike the screen tap, which interrupts while the
      * agent is speaking. See the header for why the escape hatch stays simple. */
+    /* The one exception to "unconditionally a toggle": the press that stopped
+     * an alarm. See s_swallow -- starting a session over the chime would also
+     * open the microphone into the tone. */
+    if (s_swallow) {
+        return;
+    }
     ESP_LOGI(TAG, "EVT bootclick");
     session_ctl_request_toggle();
 }
@@ -121,10 +168,33 @@ esp_err_t boot_button_start(void)
         .active_level = 0,
         /* disable_pull left false: with active_level 0 that selects the
          * internal pull-up, which is what makes the released state read high. */
+        /* No 5 ms poll while nobody is pressing: the component stops its timer
+         * and arms a GPIO wake instead, which is what lets the chip light-sleep
+         * (main.c). It resumes polling on the press. */
+        .enable_power_save = true,
     };
 
+    /*
+     * THE GPIO INTERRUPT SERVICE, INSTALLED HERE AND NOT IN IRAM. Power save
+     * makes the button component install it, with ESP_INTR_FLAG_IRAM -- and
+     * being first at boot, its flags would stick for every pin. The touch
+     * handler shares that service, and the LVGL adapter's touch ISR calls
+     * esp_lv_adapter_request_wake_from_isr(), which lives in flash: under an
+     * IRAM service a touch during an NVS write would run it with the cache off.
+     * So install it first, without the flag, as the touch driver always did;
+     * the button's own handler is IRAM_ATTR and works either way. The
+     * component's install then finds it present -- correct, but the GPIO
+     * driver logs that as an error, so that one call runs with the tag muted.
+     */
+    esp_err_t isr = gpio_install_isr_service(0);
+    if (isr != ESP_OK && isr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "GPIO interrupt service: %s", esp_err_to_name(isr));
+    }
+
     button_handle_t btn;
+    esp_log_level_set("gpio", ESP_LOG_NONE);
     esp_err_t err = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &btn);
+    esp_log_level_set("gpio", ESP_LOG_INFO);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "could not claim GPIO %d: %s",
                  BOOT_BUTTON_GPIO, esp_err_to_name(err));
@@ -153,6 +223,9 @@ esp_err_t boot_button_start(void)
                                          (void *)(intptr_t)NS_DOUBLE_WINDOW_MS));
 #endif
 
+    /* First, so a press during a ring is claimed before anything else sees it. */
+    ESP_ERROR_CHECK(iot_button_register_cb(btn, BUTTON_PRESS_DOWN, NULL,
+                                           on_press_down, NULL));
     button_event_args_t hold = { .long_press.press_time = FORGET_HOLD_MS };
     ESP_ERROR_CHECK(iot_button_register_cb(btn, BUTTON_LONG_PRESS_START, &hold,
                                            on_forget_wifi, NULL));

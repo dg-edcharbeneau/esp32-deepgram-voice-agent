@@ -55,6 +55,13 @@ flowchart TB
         bat["battery.c<br/><i>AXP2101 fuel gauge, read-only, own sampler</i>"]
     end
 
+    subgraph time["Time"]
+        clk["clock.c<br/><i>SNTP, timezone, 12/24-hour</i>"]
+        tz["tz_table.c<br/><i>IANA to POSIX rules</i>"]
+        alm["alarms.c<br/><i>timers + alarms, NVS, ringing</i>"]
+        sched["alarm_sched.c<br/><i>next occurrence, parsing;<br/>host-testable</i>"]
+    end
+
     subgraph disp["Display"]
         ui["ui.c<br/><i>panel, touch, canvas, frame timer, VAD</i>"]
         spectrum["face_spectrum.c<br/><i>FFT bars</i>"]
@@ -64,7 +71,12 @@ flowchart TB
         arc["arc_text.c<br/><i>the status word, bent along the bezel</i>"]
     end
 
-    main --> session & aio & ui & boot & sta & creds & prov & voices & bat
+    main --> session & aio & ui & boot & sta & creds & prov & voices & bat & clk & alm
+    clk --> tz
+    alm --> sched & clk & aio & ui
+    alm -. "announce / start_soon" .-> agent & session
+    agent --> clk & alm
+    prov --> clk
     session --> agent
     agent --> voices & faces & colors & ui & aio & prompt & aname & bat & hstore
     prompt --> voices & faces & colors & aname
@@ -271,12 +283,12 @@ while the setup QR is up.
 
 ```mermaid
 flowchart LR
-    tlm["main.c telemetry loop<br/><i>1 Hz</i>"] -->|"stopped > 30 s<br/>or charge < critical"| want["ui_set_sleep(true)<br/><i>a request, not an act</i>"]
+    tlm["main.c telemetry loop<br/><i>1 Hz</i>"] -->|"stopped > 30 s<br/>or charge < critical"| want["ui_set_sleep(true, dim)<br/><i>a request, not an act</i>"]
     want --> lvgl["LVGL task applies it<br/><i>refuses during the display test</i>"]
-    lvgl --> panel["frame timer 200 ms<br/>brightness 15%"]
+    lvgl --> panel["frame timer 200 ms, the orb clock<br/>100%, 40% after 2 min, off after 5,<br/>15% if critical<br/>CPU free to drop to 80 MHz"]
     touch(["touch"]) -.->|"withdraws the request<br/>and wakes at once"| lvgl
     lvgl --> truth["ui_is_asleep()"]
-    truth -->|"tracked by the loop"| radio["wifi_sta_set_power_save()<br/><i>modem sleep follows the panel</i>"]
+    truth -->|"tracked by the loop"| radio["wifi_sta_set_power_save_mode()<br/><i>max modem sleep asleep, min awake,<br/>none in a session</i>"]
     mic["capture task parks itself<br/><i>independently, 30 s earlier</i>"]
 ```
 
@@ -290,19 +302,29 @@ Three things about that shape:
 - **A critical battery is the one thing that outranks the session.** Below
   `CONFIG_BATTERY_CRITICAL_PCT` the loop holds the panel asleep whether or not a
   session is running, checked *ahead* of the branch that would otherwise wake it
-  — the panel is the largest draw on the board and dimming it is the only lever
-  this firmware has over the remaining charge. The session itself is left alone:
+  and dims it to 15 % — the panel is the largest draw on the board and dimming
+  it is the only lever this firmware has over the remaining charge. It is the
+  only sleep that dims. The session itself is left alone:
   a device that hangs up mid-sentence to save power is worse than one that goes
   dark and keeps talking.
-- **Asleep it keeps drawing, slowly and dim.** A frozen or black panel reads as a
-  crashed device, and the LVGL worker has to stay running for touch to be as
-  responsive asleep as awake — which is what rules out the adapter's own
+- **Asleep it keeps drawing, slowly, at full brightness.** It shows the orb clock
+  (see [clock.md](clock.md#the-sleep-clock)), which is there to be read across a
+  room — at the old 15 % it was not. A frozen or black panel reads as a crashed
+  device, and the LVGL worker has to stay running for touch to be as responsive
+  asleep as awake — which is what rules out the adapter's own
   `AUTO_SLEEP_MODE_PAUSE`.
-- **The radio follows the panel; the microphone does not.** `wifi_sta` re-enables
-  modem sleep only while asleep, because it costs tens of ms of jitter to a live
-  stream. The microphone is absent from this entirely — `capture_task` parks the
-  ES7210 on its own as soon as nothing downstream wants samples, 30 s before the
-  panel dims.
+- **The radio follows the session, and sleeps deeper with the panel; the
+  microphone does neither.** No modem sleep in a session, because it costs tens
+  of ms of jitter to a live stream; minimum modem sleep with no session, maximum
+  while the panel sleeps too. The microphone is absent from this entirely —
+  `capture_task` parks the ES7210 on its own as soon as nothing downstream wants
+  samples, 30 s before the panel sleeps. The CPU, the speaker amplifier and the
+  sleeping panel's brightness have their own rules; see [power.md](power.md).
+- **Once the panel is off, the LVGL task stops.** Deep idle pauses the adapter
+  so the chip can light-sleep, which means the frame timer -- where every sleep
+  request is applied -- no longer runs. So `ui_set_sleep(false)` also pokes the
+  `deep_idle_waker` task, which resumes LVGL first, and a touch reaches the same
+  task through the touch ISR. See [power.md](power.md).
 
 ## Protocol
 
@@ -346,6 +368,7 @@ one, Deepgram would call a web service instead of asking the device:
 | --- | --- | --- |
 | `adjust_volume` | One ES8311 register write, effective on the next sample | always |
 | `set_volume` | Same write, absolute rather than relative; both go through `audio_io_set_volume()` | always |
+| `set_mic_gain` | `audio_io_set_mic_gain()` saves it; the capture task applies it with the reference lane and the gate rescaled. Experimental | `CONFIG_MIC_GAIN_TOOL` |
 | `get_battery` | Reads only. Copies `battery.c`'s last sample and describes it | `CONFIG_BATTERY` |
 | `set_face` | `ui_set_face()` — the frame timer picks it up | always |
 | `set_color` | `ui_set_orb_color()` — same handoff; orb only | always |
@@ -569,7 +592,8 @@ flowchart TB
 ```
 
 The frame timer runs at `FRAME_MS` (33 ms) awake and `SLEEP_FRAME_MS` (200 ms)
-asleep, at 100% and 15% brightness respectively — see "Sleep" above.
+asleep, at 100% brightness either way except in the battery-critical sleep,
+which dims to 15% — see "Sleep" above.
 
 Setters (`ui_set_status`, `ui_set_face`, `ui_set_orb_color`,
 `ui_start_display_test`, `ui_set_behaviour`, `ui_show_qr`, `ui_set_stopped`,

@@ -2,10 +2,12 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_codec_dev.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -13,9 +15,11 @@
 #include "nvs.h"
 
 #include "bsp/esp-bsp.h"
+#include "driver/gpio.h"
 
 #include "audio_codecs.h"
 #include "audio_io.h"
+#include "audio_rec.h"
 
 #if CONFIG_AEC_ENABLE
 #include "esp_aec.h"
@@ -136,6 +140,30 @@ static volatile bool s_play_muted;
  * recovers.
  */
 static volatile bool s_play_gap;
+
+/*
+ * The alarm chime, which the drain task SYNTHESISES rather than anyone queueing.
+ *
+ * audio_io_play() and the ring have exactly one writer, the WebSocket task, and
+ * the carry and the queue stamp above are only correct because of it. A second
+ * producer pushing tone into the ring would interleave with the greeting the
+ * moment a session came up mid-ring -- the white-noise failure the carry exists
+ * to prevent. So the chime never enters the ring: when this is set and the ring
+ * is EMPTY, the drain task fills its own buffer with tone and writes that. Agent
+ * audio always wins, the codec write paces the tone in real time, and stopping
+ * is a store -- there is nothing queued to flush.
+ */
+static volatile bool s_chime_on;
+
+/*
+ * The uplink withheld outright, whatever the VAD says: set while an alarm
+ * chimes into a live session. A pure tone is what the echo canceller handles
+ * worst, and its residue can clear the uplink VAD and read to the agent as the
+ * user barging in. Withheld, not zeroed -- the VAD gate above already withholds
+ * blocks, so a gap is something the stream is built for. The canceller and the
+ * display tap still see everything.
+ */
+static volatile bool s_uplink_hold;
 
 #if CONFIG_AEC_ENABLE
 /*
@@ -362,6 +390,8 @@ static inline uint32_t now_ms(void)
 }
 static int s_volume;
 static bool s_volume_from_nvs;
+/* Set by audio_io_set_volume_live(), cleared once the level is in flash. */
+static volatile bool s_volume_dirty;
 
 /*
  * Volume limits.
@@ -378,13 +408,42 @@ static bool s_volume_from_nvs;
  * build-time knob for that, and it lifts the whole scale so this range
  * inherits it.
  */
-#define VOLUME_MIN 20
-#define VOLUME_MAX 100
+#define VOLUME_MIN AUDIO_VOLUME_MIN
+#define VOLUME_MAX AUDIO_VOLUME_MAX
+#define MIC_GAIN_MIN_DB AUDIO_MIC_GAIN_MIN_DB
+#define MIC_GAIN_MAX_DB AUDIO_MIC_GAIN_MAX_DB
 
 /* Shared with the saved voice; see voices.c. */
 #define NVS_NAMESPACE  "dgagent"
 #define NVS_KEY_VOLUME "out_volume"
 #define NVS_KEY_NS     "mic_ns"
+#define NVS_KEY_MICGAIN "mic_gain"
+
+/*
+ * MIC GAIN AT RUNTIME (CONFIG_MIC_GAIN_TOOL), for tuning on the bench by voice.
+ *
+ * The capture task owns every microphone codec operation -- park, reopen, gain
+ * -- so a request is a stored number it applies on its next block, never a
+ * codec call from the WebSocket task. Applying is two calls in a fixed order:
+ * the device-wide gain, which lands on all four ES7210 inputs, then the echo
+ * reference lane put back to CONFIG_AEC_REF_GAIN_DB, exactly as init and the
+ * wake path do it -- skip the second and the canceller's reference clips.
+ *
+ * The uplink gate follows the gain. CONFIG_AEC_UPLINK_VAD_PEAK is the threshold
+ * at CONFIG_MIC_IN_GAIN, and a sample threshold has to scale with the gain to
+ * mean the same loudness: 200 at 18 dB is 283 at 21 and 399 at 24. Without that,
+ * changing the gain would also silently change how hard it is to interrupt.
+ */
+static volatile int s_mic_gain = CONFIG_MIC_IN_GAIN;       /* in force on the codec */
+static volatile int s_mic_gain_want = CONFIG_MIC_IN_GAIN;  /* asked for */
+/* Changed by a _live() setter and not yet in flash; audio_io_settings_persist()
+ * clears them. Volume's lives with the volume below. */
+static volatile bool s_mic_gain_dirty;
+#if CONFIG_AEC_UPLINK_VAD
+static volatile int s_vad_peak = CONFIG_AEC_UPLINK_VAD_PEAK;
+#endif
+static void mic_gain_apply(int gain_db);
+static void mic_gain_save(int g);
 
 #if CONFIG_MIC_NS_ENABLE
 /* A Kconfig bool is UNDEFINED when off rather than 0, so it cannot be read in a
@@ -438,16 +497,15 @@ static bool ns_load(void)
  * that a caller on a button or timer callback cannot stall the audio path with
  * a cache-off flash erase.
  *
- * The test-then-set is not atomic. That is safe only because exactly one task
- * calls this (iot_button's); if a second caller ever appears, this needs a lock
- * or an atomic exchange.
+ * Two callers now -- iot_button's task and the touch panel on the LVGL task --
+ * so the test-and-set is one atomic exchange: two presses racing each other
+ * cannot both see the old value and both log a change.
  */
 void audio_io_ns_set(bool enabled)
 {
-    if (s_ns_run == enabled) {
+    if (__atomic_exchange_n(&s_ns_run, enabled, __ATOMIC_SEQ_CST) == enabled) {
         return;
     }
-    s_ns_run = enabled;
     ESP_LOGI(TAG, "noise suppression %s%s", enabled ? "ON" : "OFF",
              s_ns_on ? "" : " (engine unavailable -- preference only)");
 }
@@ -501,6 +559,228 @@ static bool s_in_carry_valid;
 
 /* ---------------- playback ---------------- */
 
+/*
+ * One cycle of the chime: a high note, a lower one, then a rest long enough that
+ * it reads as a call rather than a tone. Two notes a fifth-ish apart are what
+ * people already hear as "something finished"; a single beep reads as an error.
+ */
+#define CHIME_NOTE1_HZ  880.0f
+#define CHIME_NOTE2_HZ  660.0f
+#define CHIME_NOTE1_MS  160
+#define CHIME_NOTE2_MS  320
+#define CHIME_CYCLE_MS  1100
+/*
+ * Peak level, as a fraction of full scale. Well above speech, which measures
+ * about 0.31 RMS at full volume on this board, so an alarm is still heard at a
+ * volume someone turned down for conversation -- and short of 1.0, so the decay
+ * never lands on a clipped edge. Volume itself is left alone: setting it writes
+ * NVS, and an alarm has no business changing the user's level.
+ */
+#define CHIME_PEAK      0.7f
+
+/*
+ * Fill `out` with the next `n` samples of the chime, carrying the position in
+ * `*pos` across calls so chunk boundaries are seamless. Each note is a sine with
+ * a 5 ms attack and a linear decay to silence -- an envelope that ends at zero is
+ * what stops it clicking where the note ends.
+ */
+static void chime_fill(int16_t *out, size_t n, uint32_t *pos)
+{
+    const uint32_t rate = (uint32_t)s_rate;
+    const uint32_t n1 = rate * CHIME_NOTE1_MS / 1000;
+    const uint32_t n2 = rate * CHIME_NOTE2_MS / 1000;
+    const uint32_t cycle = rate * CHIME_CYCLE_MS / 1000;
+    const uint32_t attack = rate * 5 / 1000;
+
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t p = *pos;
+        float v = 0.0f;
+        uint32_t k = 0, len = 0;
+        float hz = 0.0f;
+        if (p < n1) {
+            k = p;
+            len = n1;
+            hz = CHIME_NOTE1_HZ;
+        } else if (p < n1 + n2) {
+            k = p - n1;
+            len = n2;
+            hz = CHIME_NOTE2_HZ;
+        }
+        if (len > 0) {
+            const float env = (k < attack) ? (float)k / (float)attack
+                                           : (float)(len - k) / (float)(len - attack);
+            v = CHIME_PEAK * env * sinf(2.0f * (float)M_PI * hz * (float)k / (float)rate);
+        }
+        out[i] = (int16_t)(v * 32767.0f);
+        *pos = (p + 1 >= cycle) ? 0 : p + 1;
+    }
+}
+
+/*
+ * THE SPEAKER AMPLIFIER, OFF WHEN NOTHING PLAYS. Its enable pin (GPIO46) is
+ * the codec driver's to switch on open and close, and the speaker stays open on
+ * purpose -- reopening the ES8311 per turn clicks. So only the amplifier itself
+ * is switched, here, on the pin: off once nothing has been written for
+ * CONFIG_AUDIO_PA_IDLE_OFF_MS, back on before the next write, with
+ * PA_SETTLE_MS for it to come up before the first sample reaches it. The codec
+ * keeps clocking silence throughout, so the amplifier wakes into silence.
+ * Playback task only.
+ */
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+#define PA_SETTLE_MS 20
+static bool s_pa_on = true;   /* the codec's open turned it on */
+#endif
+
+/*
+ * DEEP IDLE (ui.c): THE AUDIO LINK CLOSED. The i2s driver holds an APB_FREQ_MAX
+ * power-management lock per enabled channel, and either one keeps the chip out
+ * of light sleep. So once the panel has gone dark, the speaker codec closes --
+ * with the microphone already parked, that disables the TX channel too, and
+ * with it both locks go -- and reopens for the next sound or on the way out.
+ * The reopen is the click the speaker-stays-open rule exists to avoid, so it
+ * happens only here: after minutes of dark, never between two sentences.
+ *
+ * Playback task only, apart from the request flag and the poke.
+ */
+#define DEEP_IDLE_WAIT_MS 1000
+static volatile bool s_deep_idle_want;
+static volatile bool s_mic_is_open = true;   /* capture task's mic_open, shared */
+static bool s_spk_closed;
+static bool s_busy_logged;
+static TaskHandle_t s_play_task;
+static uint32_t s_reopen_failed_ms;   /* last failed reopen, for the retry gap */
+#define SPK_REOPEN_RETRY_MS 500
+/*
+ * Microphone and speaker share one full-duplex I2S data interface, and opening
+ * or closing either changes its channels' enable state. The capture task opens
+ * and closes the microphone; deep idle has the playback task close and reopen
+ * the speaker. This keeps those from interleaving, and makes "is the
+ * microphone open?" and the speaker close one step.
+ */
+static SemaphoreHandle_t s_codec_lock;
+
+static void codec_lock(void)
+{
+    if (s_codec_lock != NULL) {
+        xSemaphoreTake(s_codec_lock, portMAX_DELAY);
+    }
+}
+
+static void codec_unlock(void)
+{
+    if (s_codec_lock != NULL) {
+        xSemaphoreGive(s_codec_lock);
+    }
+}
+
+/*
+ * A poke, not xTaskAbortDelay(): that ends ANY blocked wait, including an
+ * esp_codec_dev_write()/read() in the middle of its I2S transfer. A
+ * notification ends only the waits that wait on notifications -- the playback
+ * ring's receive, and the parked microphone's wait below -- never the I2S
+ * queues. One lost between waits costs at most one wait's timeout.
+ */
+static void poke(TaskHandle_t t)
+{
+    if (t != NULL) {
+        xTaskNotifyGive(t);
+    }
+}
+
+static void spk_close_if_idle(void)
+{
+    if (s_spk_closed) {
+        return;
+    }
+    codec_lock();
+    if (s_mic_is_open) {
+        codec_unlock();
+        /* Closing the speaker with the microphone open would only defer the TX
+         * disable (it shares the clocks), and the locks would stay. */
+        if (!s_busy_logged) {
+            s_busy_logged = true;
+            ESP_LOGI(TAG, "EVT deepidle audio busy (microphone open)");
+        }
+        return;
+    }
+    esp_codec_dev_close(s_spk);
+    codec_unlock();
+    s_spk_closed = true;
+    s_busy_logged = false;
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    s_pa_on = false;   /* the close switched the amplifier off with the codec */
+#endif
+    ESP_LOGI(TAG, "EVT audio closed");
+}
+
+/* True once the speaker is open. A failed open leaves it closed and is
+ * retried, at most every SPK_REOPEN_RETRY_MS, by the next caller. */
+static bool spk_reopen(void)
+{
+    if (!s_spk_closed) {
+        return true;
+    }
+    if (s_reopen_failed_ms != 0 && now_ms() - s_reopen_failed_ms < SPK_REOPEN_RETRY_MS) {
+        return false;
+    }
+    esp_codec_dev_sample_info_t fs = s_fs;
+    codec_lock();
+    /* The same unconditional disable-before-reconfigure as the microphone's
+     * reopen (see capture_task), and the same scoped silence for it. */
+    esp_log_level_set("i2s_common", ESP_LOG_NONE);
+    const int err = esp_codec_dev_open(s_spk, &fs);
+    esp_log_level_set("i2s_common", ESP_LOG_INFO);
+    codec_unlock();
+    if (err != ESP_CODEC_DEV_OK) {
+        s_reopen_failed_ms = now_ms() | 1;
+        ESP_LOGE(TAG, "speaker reopen failed: %d", err);
+        return false;
+    }
+    s_reopen_failed_ms = 0;
+    esp_codec_dev_set_out_vol(s_spk, s_volume);
+    s_spk_closed = false;
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    s_pa_on = true;    /* the open switched it on */
+#endif
+    s_play_write_ms = now_ms();
+    ESP_LOGI(TAG, "EVT audio open");
+    return true;
+}
+
+void audio_io_deep_idle(bool on)
+{
+    s_deep_idle_want = on;
+    /* Out of their idle waits, so the change is acted on now: the close or
+     * reopen here, and a parked microphone's next look sooner. */
+    poke(s_play_task);
+    if (!on) {
+        poke(s_capture_task);
+    }
+}
+
+static void pa_on(void)
+{
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    if (!s_pa_on) {
+        gpio_set_level(BSP_POWER_AMP_IO, 1);
+        s_pa_on = true;
+        vTaskDelay(pdMS_TO_TICKS(PA_SETTLE_MS));
+        ESP_LOGI(TAG, "EVT pa on");
+    }
+#endif
+}
+
+static void pa_idle(void)
+{
+#if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
+    if (s_pa_on && now_ms() - s_play_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS) {
+        gpio_set_level(BSP_POWER_AMP_IO, 0);
+        s_pa_on = false;
+        ESP_LOGI(TAG, "EVT pa off");
+    }
+#endif
+}
+
 static void playback_task(void *arg)
 {
     /* Mono in, stereo out: the codec is open with two channels, so every
@@ -529,6 +809,8 @@ static void playback_task(void *arg)
     uint8_t *mono_bytes = (uint8_t *)mono;
     uint8_t carry = 0;
     bool carry_valid = false;
+    uint32_t chime_pos = 0;
+    bool chiming = false;
 
     while (1) {
         /* Lead with the half sample left over from last time, if any. */
@@ -538,9 +820,63 @@ static void playback_task(void *arg)
             off = 1;
         }
 
+        /* No wait while chiming: the tone is generated the instant the ring is
+         * found empty, and the codec write below is what paces the loop. */
+        const bool chime = s_chime_on;
+        if (s_deep_idle_want && !chime && !s_flush_pending &&
+            xStreamBufferIsEmpty(s_ring) == pdTRUE) {
+            spk_close_if_idle();
+        } else if (!s_deep_idle_want) {
+            spk_reopen();   /* on the way out: before anything wants it */
+        }
         size_t got = xStreamBufferReceive(s_ring, mono_bytes + off, CHUNK_MONO - off,
-                                         pdMS_TO_TICKS(DRAIN_WAIT_MS));
+                                         chime ? 0
+                                         : pdMS_TO_TICKS(s_spk_closed ? DEEP_IDLE_WAIT_MS
+                                                                      : DRAIN_WAIT_MS));
         size_t total = off + got;
+
+        if (chime != chiming) {
+            /* Every ring starts on the first note, not wherever the last stopped. */
+            chiming = chime;
+            chime_pos = 0;
+        }
+        /*
+         * got, not total: the ring being empty is the condition. A half sample
+         * held over from an odd-length reply makes total 1 forever, and testing
+         * that would never chime and spin on a zero-timeout receive instead. The
+         * carry byte is left exactly where it is -- `carry` still holds it, and
+         * the next reply picks it up.
+         */
+        if (chime && got == 0 && !s_flush_pending) {
+            /* Half a chunk, 32 ms at 16 kHz: short enough that a reply arriving
+             * mid-ring takes over within a frame or two. */
+            const size_t samples = CHUNK_MONO / sizeof(int16_t) / 2;
+            chime_fill(mono, samples, &chime_pos);
+            if (!spk_reopen()) {   /* a ring out of deep idle */
+                vTaskDelay(pdMS_TO_TICKS(DRAIN_WAIT_MS));
+                continue;
+            }
+            pa_on();
+            if (s_play_tap != NULL) {
+                s_play_tap(mono, samples);
+            }
+            for (size_t i = 0; i < samples; i++) {
+#if CONFIG_AEC_ENABLE
+                const codec_sample_t v = (int32_t)mono[i] << 16;
+#else
+                const codec_sample_t v = mono[i];
+#endif
+                stereo[2 * i] = v;
+                stereo[2 * i + 1] = v;
+            }
+            int err = esp_codec_dev_write(s_spk, stereo,
+                                          (int)(samples * 2 * sizeof(codec_sample_t)));
+            if (err != ESP_CODEC_DEV_OK) {
+                ESP_LOGW(TAG, "esp_codec_dev_write failed: %d", err);
+            }
+            s_play_write_ms = now_ms();
+            continue;
+        }
 
         if (s_flush_pending) {
             /* Barge-in. Throw away what we just read plus anything still
@@ -552,6 +888,10 @@ static void playback_task(void *arg)
             carry_valid = false;
             s_flush_pending = false;
             continue;
+        }
+
+        if (got == 0 && !chime) {
+            pa_idle();
         }
 
         if (total < sizeof(int16_t)) {
@@ -570,6 +910,14 @@ static void playback_task(void *arg)
         } else {
             carry_valid = false;
         }
+
+        if (!spk_reopen()) {
+            /* Nowhere to play it: drop this chunk rather than write into a
+             * closed codec, and pace the loop while the reopen is retried. */
+            vTaskDelay(pdMS_TO_TICKS(DRAIN_WAIT_MS));
+            continue;
+        }
+        pa_on();
 
         /*
          * Before the write, because the write is what blocks. Note this still
@@ -678,16 +1026,23 @@ static void capture_task(void *arg)
          */
         if (!s_capture_enabled && !s_monitor) {
             if (mic_open) {
+                codec_lock();
                 esp_codec_dev_close(s_mic);
+                s_mic_is_open = false;
+                codec_unlock();
                 mic_open = false;
                 ESP_LOGI(TAG, "microphone parked");
             }
-            vTaskDelay(pdMS_TO_TICKS(CAPTURE_PARK_POLL_MS));
+            /* A second in deep idle: nothing can want the microphone until it
+             * ends, and audio_io_deep_idle(false) cuts this wait short. A
+             * notification wait, so that poke can. */
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(s_deep_idle_want ? DEEP_IDLE_WAIT_MS
+                                                                    : CAPTURE_PARK_POLL_MS));
             continue;
         }
         if (!mic_open) {
             /* Gain before open, mirroring audio_io_init()'s order. */
-            esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
+            esp_codec_dev_set_in_gain(s_mic, (float)s_mic_gain);
             /*
              * ONE UPSTREAM LOG LINE, SILENCED FOR THE LENGTH OF ONE CALL.
              *
@@ -712,9 +1067,14 @@ static void capture_task(void *arg)
              * Delete this once esp_codec_dev checks the channel state before
              * disabling it.
              */
+            /* Under the codec lock, and the flag with the open: a deep-idle
+             * speaker close cannot interleave with it (see s_codec_lock). */
+            codec_lock();
             esp_log_level_set("i2s_common", ESP_LOG_NONE);
             int oerr = esp_codec_dev_open(s_mic, &s_fs);
             esp_log_level_set("i2s_common", ESP_LOG_INFO);
+            s_mic_is_open = (oerr == ESP_CODEC_DEV_OK);
+            codec_unlock();
             if (oerr != ESP_CODEC_DEV_OK) {
                 ESP_LOGE(TAG, "microphone reopen failed: %d", oerr);
                 vTaskDelay(pdMS_TO_TICKS(CAPTURE_PARK_POLL_MS));
@@ -740,6 +1100,12 @@ static void capture_task(void *arg)
             ESP_LOGI(TAG, "microphone resumed");
         }
 #endif
+        /* A gain asked for by voice, applied here because this task owns the
+         * microphone codec. Rare, so the log line is affordable. */
+        if (s_mic_gain_want != s_mic_gain) {
+            mic_gain_apply(s_mic_gain_want);
+            ESP_LOGI(TAG, "EVT micgain %d dB, gate %d", s_mic_gain, audio_io_get_vad_peak());
+        }
         int err = esp_codec_dev_read(s_mic, stereo, (int)stereo_bytes);
         if (err != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "esp_codec_dev_read failed: %d", err);
@@ -829,6 +1195,10 @@ static void capture_task(void *arg)
             if (adead > peak_dead) peak_dead = adead;
 #endif
         }
+
+        /* Debug recording (CONFIG_AUDIO_RECORD): the microphone as it is, before
+         * the canceller touches it. A no-op stub otherwise. */
+        audio_rec_raw(mono, audio_io_playback_active());
 
         /*
          * CANCEL BEFORE ANY GATE, TAP OR SINK. Everything downstream -- the level
@@ -1016,7 +1386,7 @@ static void capture_task(void *arg)
                     vad_peak = a;
                 }
             }
-            if (vad_peak >= CONFIG_AEC_UPLINK_VAD_PEAK) {
+            if (vad_peak >= s_vad_peak) {
                 s_vad_hold = VAD_HANGOVER_BLOCKS;
             } else if (s_vad_hold > 0) {
                 /* Inside the hangover: still speech as far as the uplink is
@@ -1211,12 +1581,13 @@ static void capture_task(void *arg)
 #if CONFIG_AEC_UPLINK_VAD
         /* The tap above already ran, so the orb keeps drawing the room whether
          * or not the network is being spared. Only the uplink is withheld. */
-        if (s_sink != NULL && uplink_ok) {
+        if (s_sink != NULL && uplink_ok && !s_uplink_hold) {
 #else
-        if (s_sink != NULL) {
+        if (s_sink != NULL && !s_uplink_hold) {
 #endif
             s_sink((const uint8_t *)mono, mono_bytes);
             s_captured += mono_bytes;
+            audio_rec_sent(mono);   /* exactly what went up; see audio_rec.h */
         }
     }
 }
@@ -1279,16 +1650,122 @@ static void volume_save(int level)
     }
 }
 
+static int vad_peak_for(int gain_db)
+{
+#if CONFIG_AEC_UPLINK_VAD
+    return (int)lroundf((float)CONFIG_AEC_UPLINK_VAD_PEAK *
+                        powf(10.0f, (float)(gain_db - CONFIG_MIC_IN_GAIN) / 20.0f));
+#else
+    (void)gain_db;
+    return 0;
+#endif
+}
+
+/* The saved gain when the tool is built in, else the Kconfig one. A saved value
+ * is ignored without the tool, so turning it off always means the default. */
+static int mic_gain_load(void)
+{
+#if CONFIG_MIC_GAIN_TOOL
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        uint8_t saved = 0;
+        const esp_err_t err = nvs_get_u8(h, NVS_KEY_MICGAIN, &saved);
+        nvs_close(h);
+        if (err == ESP_OK && saved >= MIC_GAIN_MIN_DB && saved <= MIC_GAIN_MAX_DB) {
+            return saved;
+        }
+    }
+#endif
+    return CONFIG_MIC_IN_GAIN;
+}
+
+/* Capture task only (and init, before it exists). */
+static void mic_gain_apply(int gain_db)
+{
+    esp_codec_dev_set_in_gain(s_mic, (float)gain_db);
+#if CONFIG_AEC_ENABLE
+    esp_codec_dev_set_in_channel_gain(s_mic, AEC_REF_INPUT_MASK, (float)CONFIG_AEC_REF_GAIN_DB);
+#endif
+    s_mic_gain = gain_db;
+#if CONFIG_AEC_UPLINK_VAD
+    s_vad_peak = vad_peak_for(gain_db);
+#endif
+}
+
+int audio_io_set_mic_gain_live(int requested_db)
+{
+    /* The ES7210's PGA steps in 3 dB to 30 (es7210.c get_db()), so round to a
+     * step. Below 6 a voice is lost; 30 already made the device hear itself. */
+    int g = ((requested_db + 1) / 3) * 3;
+    if (g < MIC_GAIN_MIN_DB) g = MIC_GAIN_MIN_DB;
+    if (g > MIC_GAIN_MAX_DB) g = MIC_GAIN_MAX_DB;
+    if (g != s_mic_gain_want) {
+        s_mic_gain_want = g;
+        s_mic_gain_dirty = true;
+    }
+    return g;
+}
+
+int audio_io_set_mic_gain(int requested_db)
+{
+    const int g = audio_io_set_mic_gain_live(requested_db);
+    mic_gain_save(g);
+    return g;
+}
+
+/* Blocking: a flash write. Never from the LVGL or audio tasks. */
+static void mic_gain_save(int g)
+{
+    s_mic_gain_dirty = false;
+#if CONFIG_MIC_GAIN_TOOL
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_MICGAIN, (uint8_t)g);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not persist mic gain: %s", esp_err_to_name(err));
+    }
+#else
+    (void)g;
+#endif
+}
+
+/* What the capture task has been asked for, which a control showing the level
+ * wants: the applied value lags it by up to one block. */
+int audio_io_get_mic_gain(void)
+{
+    return s_mic_gain_want;
+}
+
+int audio_io_get_vad_peak(void)
+{
+#if CONFIG_AEC_UPLINK_VAD
+    return s_vad_peak;
+#else
+    return 0;
+#endif
+}
+
 int audio_io_get_volume(void)
 {
     return s_volume;
 }
 
-int audio_io_set_volume(int requested)
+/*
+ * The register write without the flash write, for a control pressed several
+ * times in a row: each press is heard at once, and audio_io_settings_persist()
+ * saves the level where it came to rest, once, from a task that may block.
+ */
+int audio_io_set_volume_live(int requested)
 {
     int level = volume_clamp(requested);
     if (level == s_volume) {
-        return s_volume;   /* already at the stop; no register write, no flash */
+        return s_volume;   /* already at the stop; no register write */
     }
 
     int err = esp_codec_dev_set_out_vol(s_spk, level);
@@ -1299,9 +1776,35 @@ int audio_io_set_volume(int requested)
     }
 
     s_volume = level;
-    volume_save(level);
+    s_volume_dirty = true;
     ESP_LOGI(TAG, "volume %d", level);
     return level;
+}
+
+int audio_io_set_volume(int requested)
+{
+    const int before = s_volume;
+    const int level = audio_io_set_volume_live(requested);
+    if (level != before) {
+        s_volume_dirty = false;
+        volume_save(level);
+    }
+    return level;
+}
+
+void audio_io_settings_persist(void)
+{
+    const bool vol = s_volume_dirty, mic = s_mic_gain_dirty;
+    if (vol) {
+        s_volume_dirty = false;
+        volume_save(s_volume);
+    }
+    if (mic) {
+        mic_gain_save(s_mic_gain_want);
+    }
+    if (vol || mic) {
+        ESP_LOGI(TAG, "EVT settings saved%s%s", vol ? " volume" : "", mic ? " micgain" : "");
+    }
 }
 
 int audio_io_adjust_volume(int delta)
@@ -1404,7 +1907,11 @@ esp_err_t audio_io_init(int sample_rate)
      * to exist before a level can be applied at all. */
     s_volume = volume_load();
     esp_codec_dev_set_out_vol(s_spk, s_volume);
-    esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_MIC_IN_GAIN);
+    s_mic_gain = s_mic_gain_want = mic_gain_load();
+#if CONFIG_AEC_UPLINK_VAD
+    s_vad_peak = vad_peak_for(s_mic_gain);
+#endif
+    esp_codec_dev_set_in_gain(s_mic, (float)s_mic_gain);
 
     int err = esp_codec_dev_open(s_spk, &fs);
     if (err != ESP_CODEC_DEV_OK) {
@@ -1546,7 +2053,17 @@ esp_err_t audio_io_init(int sample_rate)
     }
 
     /* Core 1, to keep codec work off the core running the Wi-Fi stack. */
-    if (xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, NULL, 6, NULL, 1) != pdPASS) {
+    /* Before capture can start; a no-op unless CONFIG_AUDIO_RECORD. */
+    audio_rec_init(CAPTURE_FRAMES);
+
+    /* Before either audio task: they share it from their first open. */
+    s_codec_lock = xSemaphoreCreateMutex();
+    if (s_codec_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, NULL, 6, &s_play_task, 1) !=
+        pdPASS) {
         return ESP_FAIL;
     }
 
@@ -1558,7 +2075,7 @@ esp_err_t audio_io_init(int sample_rate)
                   "(range %d dB, gain +%d dB), mic gain %d dB",
              sample_rate, CODEC_BITS, CODEC_CHANNELS, s_volume,
              s_volume_from_nvs ? " (saved)" : " (default)", asked_db,
-             CONFIG_AUDIO_OUT_RANGE_DB, CONFIG_AUDIO_OUT_EXTRA_GAIN_DB, CONFIG_MIC_IN_GAIN);
+             CONFIG_AUDIO_OUT_RANGE_DB, CONFIG_AUDIO_OUT_EXTRA_GAIN_DB, s_mic_gain);
     return ESP_OK;
 }
 
@@ -1719,6 +2236,45 @@ void audio_io_note_stream_gap(void)
     s_play_gap = true;
 }
 
+void audio_io_chime_start(void)
+{
+    s_chime_on = true;
+    /* Out of a deep-idle wait now, not up to a second from now: the chime is
+     * the alarm, and the speaker has to reopen first. */
+    poke(s_play_task);
+}
+
+void audio_io_chime_stop(void)
+{
+    s_chime_on = false;
+}
+
+#if CONFIG_POWER_STATE_WALK
+void audio_io_bench_speaker(bool on)
+{
+    /* BENCH AID: the ES8311 and its amplifier (the PA pin, switched by the
+     * codec driver on enable and close) off and back on, so the power walk can
+     * price them. Nothing may play meanwhile -- the walk runs stopped. */
+    if (on) {
+        esp_codec_dev_sample_info_t fs = s_fs;
+        int err = esp_codec_dev_open(s_spk, &fs);
+        esp_codec_dev_set_out_vol(s_spk, s_volume);
+        ESP_LOGI(TAG, "EVT bench speaker on (%d)", err);
+    } else {
+        esp_codec_dev_close(s_spk);
+        ESP_LOGI(TAG, "EVT bench speaker off");
+    }
+}
+#endif
+
+void audio_io_uplink_hold(bool hold)
+{
+    if (hold != s_uplink_hold) {
+        s_uplink_hold = hold;
+        ESP_LOGI(TAG, "EVT uplink hold %s", hold ? "on" : "off");
+    }
+}
+
 void audio_io_mute_playback(bool muted)
 {
     /*
@@ -1735,6 +2291,7 @@ void audio_io_mute_playback(bool muted)
 void audio_io_capture_set_enabled(bool enabled)
 {
     s_capture_enabled = enabled;
+    audio_rec_capture(enabled);
 }
 
 void audio_io_capture_set_monitor(bool monitor)

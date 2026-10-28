@@ -1,8 +1,14 @@
 # Changing things by asking
 
 Everything the agent can change about itself mid-conversation -- volume, name,
-face, orb colour, voice -- and what each one costs, plus the two things it can
-read about itself: charge and Wi-Fi signal.
+face, orb colour, voice -- and what each one costs, plus what it can read about
+itself: charge, Wi-Fi signal, and the time. Timers and alarms are on their own
+page.
+
+Volume, mic gain, orb colour, the clock format and cancelling a timer or alarm
+can also be done by touch, from the panel a swipe down from the top edge opens;
+see [the touch panel](display.md#the-touch-panel). Both routes call the same
+code.
 
 ## Changing the volume by asking
 
@@ -27,6 +33,17 @@ knows nothing about the volume.** It is a single ES8311 register write, absent
 from the `Settings` message entirely — so there is no session reload, no history
 replay and no gap. The confirmation sentence is itself spoken at the new level,
 which is the feedback.
+
+### The microphone gain, for tuning (experimental)
+
+`set_mic_gain` takes a `db`: "set your microphone gain to 21". It is a bench tool
+behind `CONFIG_MIC_GAIN_TOOL`, for re-measuring `CONFIG_MIC_IN_GAIN` without a
+rebuild. `audio_io_set_mic_gain()` rounds to the ES7210's 3 dB steps within
+6..30, saves it, and leaves the codec call to the capture task, which owns the
+microphone. That task sets the device-wide gain, puts the echo-reference lane
+back to `CONFIG_AEC_REF_GAIN_DB`, and rescales the uplink gate so it keeps
+meaning the same loudness; the log line is `EVT micgain 21 dB, gate 283`. 18 dB
+is the measured value -- see [tuning.md](tuning.md).
 
 ### Scale — and why the stock curve had to go
 
@@ -140,6 +157,20 @@ alongside it rather than being rounded up to "full".
 The dots on screen use the same reading, and the same hysteresed `low` flag, so
 what the device says and what it shows cannot disagree. See
 [the display](display.md) for where they are drawn.
+
+## Asking the time, and setting timers and alarms
+
+Four tools, all described in [the clock page](clock.md): `get_time`,
+`set_clock` (timezone and 12/24-hour), `set_alarm` (timers too) and `alarms`
+(list and cancel).
+"What time is it?", "I'm in Chicago", "set a pasta timer for ten minutes",
+"wake me at 7 on weekdays", "what alarms do I have?" and "cancel all of them"
+all land on one of them.
+
+The model is told plainly that it does not know the time and must read it every
+time. It will otherwise answer from the last time it read the clock, or from
+nothing at all. Without a valid clock, `get_time` says so and `set_alarm`
+refuses, but a timer still works, on the monotonic clock.
 
 ## Asking how the Wi-Fi is
 
@@ -282,13 +313,22 @@ half of the outgoing one's output.
 "Make it purple" works, and so does "put it back to normal". `set_color` takes a
 name from a thirteen-entry catalog in
 [main/orb_colors.c](../main/orb_colors.c) — the accent colours of the Vira palette —
-and is the sibling of `set_face` in every mechanical respect: no `Settings` field,
-no session reload, applied by the frame timer, and not persisted across a reboot.
+and is the sibling of `set_face` in most mechanical respects: no `Settings` field,
+no session reload, applied by the frame timer. Unlike the face it **survives a
+reboot**: `main.c`'s loop saves it by name to NVS once a change has held for 2 s
+(so trying swatches on the touch panel costs one flash write, not one a tap), and
+the device boots in it.
 
-**The orb only.** The spectrum colours its bands by frequency and by which half of
-the conversation is live, so a single tint would destroy information rather than
+**The orb, and the screen around it.** The status word, the sleep clock, the
+hints, the ring round the button and the touch panel all take the colour, by the
+rules in [main/ui_tone.h](../main/ui_tone.h) — see the touch panel section of
+[display.md](display.md). On white every one of them is exactly as designed.
+**Not the spectrum**: it colours its bands by frequency and by which half of the
+conversation is live, so a single tint would destroy information rather than
 restyle it. The function description says so, which is what stops the model
-offering a colour change when someone complains about the bars.
+offering a colour change when someone complains about the bars. The QR code stays
+black on white too, because that is what a phone can scan, and the amber "tap:
+interrupt" ring stays amber, because its job is to look different.
 
 Colour is one multiply per channel on the ink the geometry already resolved, at
 the single point in [main/orb_raster.c](../main/orb_raster.c) where that ink became
