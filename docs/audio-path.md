@@ -200,6 +200,36 @@ The canceller above removes the device's *own speaker*. It does nothing about th
 room — fans, HVAC, traffic — which otherwise goes up the wire to Deepgram at full
 level. A denoiser is a different stage solving a different problem.
 
+### Why it is on by default
+
+Because **almost nobody changes a default**, so the default decides what nearly
+every device actually does, and the two ways of being wrong are not equally bad:
+
+| | denoiser ON | denoiser OFF |
+|---|---|---|
+| **quiet room** | costs ~14% of the frame rate and 7.4 kB; transcription unaffected — the baseline already scored 4/4 | free |
+| **loud room** | helped, by ear, in the one room it has been tried in | **the product does not do its job** |
+
+Being wrong in the quiet-room case costs a slightly choppier orb. Being wrong in
+the loud-room case costs the transcript, which is the entire point of the
+device. So the default belongs where the expensive mistake is the one it
+prevents — and the toggle exists for anyone who would rather have the frame rate
+back (BOOT double-click, remembered across reboots).
+
+Worth being explicit that this is a **product judgement, not a measurement
+result.** The measurements below do not justify it on their own: in the only
+instrumented room, the denoiser bought nothing. What justifies it is that the
+room the device gets deployed into is not the room it was measured in, and the
+cost of guessing wrong is asymmetric.
+
+**The corollary raises the stakes on `CONFIG_MIC_NS_ESPSR_MODE`, which is 2
+(aggressive) and has never been run at anything else.** If mode 2 chews quiet
+word onsets — the failure that disqualified SpeexDSP, hinted at once by esp-sr
+("A quick brown fox **jumped**") — then default-on propagates that to every
+device, including the noisy-room users it is meant to protect. That is the one
+way this default could actively harm the people it is for, and it is the reason
+the mode question is still listed as open rather than closed.
+
 Order in `capture_task`, and every position in it was argued for:
 
 ```
@@ -219,7 +249,7 @@ downmix → AEC → uplink VAD verdict → NS → level log → session gate →
 
 | | |
 |---|---|
-| frame rate | 20.0 → **14.8 fps** |
+| frame rate | **about −14%** (17.4 → 14.9; see below) |
 | internal RAM | **−7.4 kB**, held whether or not it is running |
 | uplink latency | **+64 ms**, from the frame-size FIFO |
 | RX overruns | unchanged |
@@ -327,14 +357,32 @@ three arms, plus an attempt to talk over the agent each time.
 | Speex | dropped word **onsets** — "A quick brown fox" for "The quick brown fox", "Seashells seashells" for "She sells seashells" — and lost one utterance entirely |
 | esp-sr | 3/3 correct within the capture window |
 
-**Neither denoiser improved transcription, and Speex made it worse.** At this
-room's noise level Deepgram already handles the audio unaided, so the denoiser
-spends frame rate and buys nothing. Note the scope: this is a statement about
-*this* noise level. A genuinely loud environment has not been tested, and that
-is the only condition under which NS is likely to pay.
+**Neither denoiser improved transcription in THIS room, and Speex made it
+worse.** At this noise level Deepgram already handles the audio unaided, so the
+denoiser spent frame rate and bought nothing. The scope was always the caveat:
+it is a statement about a quiet room, and the loud room is the condition NS
+exists for. That one has since been tried — see the field report below.
 
 ERLE was unaffected, as predicted — NS sits downstream of the canceller.
 `L=7438 → out=63` with the agent speaking, comparable across arms.
+
+### Field report: the loud room, 2026-09-19
+
+**Uninstrumented, and flagged as such.** Both arms — `CONFIG_MIC_NS_ENABLE` off
+and on at mode 2 — were run by hand in one genuinely loud room, in one sitting,
+by the person holding the board. **With the denoiser on the device worked well**;
+that is the first evidence in NS's favour this project has, and it is evidence
+for exactly the condition the feature was switched on for.
+
+What it is not: a capture. No serial log was taken, so there are no per-arm
+transcripts, no `fps`, no `vadsup`, no `rxovf`, no `lowdma`, and no `mic peak`
+readings to confirm the two arms met the same ambient level. It is one
+experienced pair of ears comparing two builds back to back, which is worth more
+than nothing and less than the table above it.
+
+So the quiet-room result stands as measured, this stands as reported, and the
+two should not be read off the same axis. The instrumented version of this run
+is still the open item; what has changed is the expected sign of its result.
 
 ### Why NS goes below the uplink VAD
 
@@ -377,9 +425,12 @@ moment and should not be compared within a line on that arm.
 
 The feature ships; these are the threads left, in the order I would pull them.
 
-- **A genuinely noisy room.** Everything measured here says the denoiser does not
-  pay at the noise level tested. It does not say it never pays, and that is the
-  whole reason it is on the board.
+- **A genuinely noisy room, instrumented.** Tried by hand on 2026-09-19 and the
+  denoiser helped (see the field report above), which is the first result that
+  favours it — but no capture was taken, so there are no per-arm numbers and no
+  proof the two arms saw the same ambient. Re-running it with a log is now about
+  confirming a positive rather than hunting for one, which makes it cheaper to
+  justify and no less worth doing.
 - **`CONFIG_MIC_NS_ESPSR_MODE` has only been run at its default, 2 (aggressive).**
   Start milder. Eating quiet word onsets is what disqualified SpeexDSP, it is a
   property of aggressive suppression rather than of that one library, and one
@@ -394,11 +445,22 @@ The feature ships; these are the threads left, in the order I would pull them.
 
 ### Bench notes worth keeping
 
+- **Read `lowdma=`, not `dmamax=`.** The TLM line samples at 1 Hz and cannot see
+  a collapse between samples; `heap_probe`'s 50 ms sampler can, and `lowint=` /
+  `lowdma=` are its floors since boot. Measured on two consecutive 60 s and 20 s
+  boots: `dmamax` read 19,456 and 20,480 live while the floors were **11,776**
+  and **6,656**. Quoting the live figure overstates headroom by 2-3x. `-1` means
+  `CONFIG_HEAP_PROBE` is off, not a floor of zero.
+
 - `CONFIG_AUDIO_CAPTURE_ALWAYS=y` plus `CONFIG_SESSION_IDLE_TIMEOUT_S=0` is the
   harness: the capture task never parks, so the NS stage runs on every block with
   no voice needed, and the session holds open so the heap carries real TLS
   pressure. A boot-fresh idle heap is far more generous and not comparable to
   the AEC table above.
+- **Check the flash delta before trusting a run.** The first esp-sr build
+  measured +96 B, because `1024 % 160 != 0` is a compile-time constant and the
+  compiler had deleted the whole engine as unreachable. Every number from that
+  build described a device with no denoiser. The real figure is +17,872 B.
 - **A tap on the screen toggles the session off** and silently ends a run.
 - **One reader per port.** A serial reader still holding the port makes
   `idf.py flash` fail with `The chip stopped responding`, which reads like a dead
