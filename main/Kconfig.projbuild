@@ -615,7 +615,7 @@ menu "Deepgram Agent Device"
 
     config AUDIO_PA_IDLE_OFF_MS
         int "Turn the speaker amplifier off after this long silent (ms, 0 = never)"
-        default 5000
+        default 60000
         range 0 600000
         help
             The amplifier (GPIO46) draws current even into silence, and the
@@ -625,6 +625,16 @@ menu "Deepgram Agent Device"
             before the next sound, with 20 ms for it to come up. If a click or
             a clipped first syllable is heard, raise this or set 0 to keep it
             on, as it always was.
+
+            60 S, NOT 5, BECAUSE WAKING IT DISTURBS THE ECHO CANCELLER. The
+            amplifier changes the echo path the instant it comes on, faster
+            than the canceller follows. On the bench (2026-11-04) 5 of 10
+            wake-ups were followed within 1.5 s by cancelled blocks louder
+            than the raw microphone, and both self-interruptions in those runs
+            began there. At 5 s any pause in a conversation -- someone
+            thinking, a slow function call -- switched it off, so the next
+            reply started inside that window. 60 s outlasts a conversation's
+            pauses and still switches it off between sessions.
 
     config AUDIO_CAPTURE_ALWAYS
         bool "Keep visualizing the microphone while the session is stopped"

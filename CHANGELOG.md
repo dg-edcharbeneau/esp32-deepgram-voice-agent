@@ -6,7 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The agent no longer interrupts itself when the canceller misadapts.**
+  During playback, a block whose post-AEC peak is louder than the raw
+  microphone can no longer open the uplink VAD gate. Cancellation only
+  subtracts, so such a block is the filter adding echo, never someone talking.
+  On the bench one such block (raw 671, out 876) had opened the gate, the
+  1 s hangover held it, and Flux transcribed the agent's own sentence as a
+  barge-in. A hangover already running is untouched, so real interruptions
+  still land. Each blocked block logs `EVT aec block louder than mic`.
+
 ### Changed
+
+- **`AUDIO_PA_IDLE_OFF_MS` defaults to 60 s instead of 5 s.** Waking the
+  amplifier disturbs the echo canceller: 5 of 10 wake-ups on the bench were
+  followed within 1.5 s by misadapted blocks, including both observed
+  self-interruptions. At 5 s, ordinary pauses in a conversation switched the
+  amplifier off, so the next reply started inside that window.
 
 - **The setup portal, the project site and the orb page wear Deepgram's 2026
   brand.** Off-black and Off-white with Fuchsia (#E042FF) for the one action:
