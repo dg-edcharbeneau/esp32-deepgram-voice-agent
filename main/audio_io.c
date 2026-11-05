@@ -1440,7 +1440,23 @@ static void capture_task(void *arg)
                     vad_peak = a;
                 }
             }
-            if (vad_peak >= s_vad_peak) {
+            /*
+             * A CANCELLED BLOCK LOUDER THAN THE MICROPHONE IS NOT SPEECH.
+             * Cancellation only subtracts, so out > raw means the filter has
+             * misadapted for that block and is adding echo, not removing it.
+             * Seen on the bench 2026-11-04 (raw 671, out 876, half a second
+             * into a reply): that one block opened the gate, the hangover held
+             * it for a second, and Flux transcribed the agent's own sentence as
+             * a barge-in. Such a block cannot START the uplink; a hangover
+             * already running continues, so a real interruption is not cut.
+             */
+            const int32_t raw_peak = (peak_l > peak_r) ? peak_l : peak_r;
+            const bool aec_louder = vad_peak > raw_peak;
+            if (aec_louder && vad_peak >= s_vad_peak) {
+                ESP_LOGW(TAG, "EVT aec block louder than mic (out=%d raw=%d): not opening uplink",
+                         (int)vad_peak, (int)raw_peak);
+            }
+            if (vad_peak >= s_vad_peak && !aec_louder) {
                 s_vad_hold = VAD_HANGOVER_BLOCKS;
             } else if (s_vad_hold > 0) {
                 /* Inside the hangover: still speech as far as the uplink is
