@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.0] - 2026-10-18
+## [Unreleased]
 
 ### Fixed
 
@@ -16,6 +16,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1 s hangover held it, and Flux transcribed the agent's own sentence as a
   barge-in. A hangover already running is untouched, so real interruptions
   still land. Each blocked block logs `EVT aec block louder than mic`.
+- `host/orb_web.html` still held the thirteen old orb colours, so rebuilding
+  `docs/orb.html` would have undone 0.11.0's palette. It now matches
+  `main/orb_colors.c`.
 
 ### Changed
 
@@ -46,12 +49,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the blue orb, is gone.
 - The site and README describe 0.11.0: 151 voices in eleven languages, the
   seven brand colours, Echo, and a 1.93 MB image.
-
-### Fixed
-
-- `host/orb_web.html` still held the thirteen old orb colours, so rebuilding
-  `docs/orb.html` would have undone 0.11.0's palette. It now matches
-  `main/orb_colors.c`.
+- `host/voice_demo.py` asks "Change your language to X." rather than "Can you
+  speak X?". The agent answered the question as a question -- "Yes, I can
+  speak Spanish." with no voice change -- and with the instruction every
+  language switched in on the bench board.
 
 ## [0.11.0] - 2026-11-03
 
