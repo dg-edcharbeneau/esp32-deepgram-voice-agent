@@ -56,7 +56,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.11.0] - 2026-11-03
 
-Experimental pre-release. Verified on one bench board through logs, host
+Verified on one bench board through logs, host
 harnesses and `host/voice_demo.sh`, which talks the board through language
 changes from a laptop speaker. Known issues: in Japanese, streaming Nova-3
 often loses the leading 英語 of "英語でお願いします" once the session has had a
@@ -171,7 +171,7 @@ the board.
 
 ## [0.10.0] - 2026-10-28
 
-Experimental pre-release. Verified on one bench board, plugged in, through logs
+Verified on one bench board, plugged in, through logs
 and bench self-tests. The battery saving has not been measured yet. Known
 issues: the agent has been reported hearing itself more often, which is not yet
 investigated; and a ring cycle occasionally skips its spoken announcement, which
@@ -213,7 +213,7 @@ predates this release.
 
 ## [0.9.0] - 2026-10-24
 
-Experimental pre-release. Verified on one bench board through screen captures
+Verified on one bench board through screen captures
 and bench self-tests; the stopwatch's gestures and the touch panel's swipe down
 from the clock have not yet been tried by a finger.
 
@@ -291,8 +291,6 @@ from the clock have not yet been tried by a finger.
   ring keep their own colours. `set_color`'s description now says so.
 
 ## [0.8.0] - 2026-10-23
-
-Experimental pre-release.
 
 ### Fixed
 
