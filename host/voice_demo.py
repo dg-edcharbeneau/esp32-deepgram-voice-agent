@@ -4,7 +4,7 @@ serial log.
 
     voice_demo.py [--port PORT] [--languages bg,es] [--no-reset] [--log FILE]
 
-For each language: "Can you speak <it>?" in English, a question in that
+For each language: "Change your language to <it>." in English, a question in that
 language, "English, please" in that language, and a question in English. Every
 line is synthesised with /v2/speak and played through this Mac's speaker
 (afplay) to the board's microphone, once the board has answered the last.
@@ -354,7 +354,7 @@ def main():
     print(f"{DIM}preparing speech...{OFF}", flush=True)
     for l in langs:
         model, name, q, back = LANGS[l]
-        for m, t in ((ME, f"Can you speak {name}?"), (model, q), (model, back)):
+        for m, t in ((ME, f"Change your language to {name}."), (model, q), (model, back)):
             speech(m, t)
     speech(ME, LANGS["en"][2])
 
@@ -371,7 +371,7 @@ def main():
             board.wait("ready", 0, 10)
             until_quiet(board, 0) if any(k == "done" for k, _ in board.since(0)) else time.sleep(1.0)
         # Start from English: a voice left over from an earlier run (saved in
-        # NVS) would hear "Can you speak ...?" through the wrong listen model.
+        # NVS) would hear "Change your language to ..." through the wrong listen model.
         boot = next((a for k, a in board.since(0) if k == "boot_lang"), "en")
         current = boot if boot in LANGS else "en"
         if current != "en":
@@ -384,7 +384,7 @@ def main():
         for l in langs:
             model, name, q, back = LANGS[l]
             print(f"\n{B}--- {name} ---{OFF}", flush=True)
-            current = step(board, f"to {name}", ME, f"Can you speak {name}?", "switch", l, current, results)
+            current = step(board, f"to {name}", ME, f"Change your language to {name}.", "switch", l, current, results)
             current = step(board, f"{name} question", model, q, "q", l, current, results)
             current = step(board, "back to English", model, back, "switch", "en", current, results)
             if current != "en":
