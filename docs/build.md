@@ -18,7 +18,7 @@ unlike a Wi-Fi password works from anywhere and bills to you.
 
 ```bash
 . /path/to/esp-idf/export.sh          # built and verified against v5.5.5
-idf.py set-target esp32s3
+idf.py set-target esp32s3             # or esp32p4: see boards.md
 idf.py menuconfig      # -> "Deepgram Agent Device" (all of it optional: the portal asks)
 idf.py build
 idf.py flash
@@ -26,7 +26,9 @@ idf.py -b 2000000 monitor
 ```
 
 The console runs at **2 000 000 baud**, matching `spec_analyzer_radial` so the
-same monitor command works for both projects.
+same monitor command works for both projects. The P4 board's console is a
+USB-UART bridge at **1 000 000 baud**: `idf.py -b 1000000 monitor` there (see
+[boards.md](boards.md)).
 
 **No `-p` above on purpose.** ESP-IDF finds the port itself when one board is
 attached, which is the only form that reads the same on every OS. With more than

@@ -11,7 +11,8 @@ per chip, so nothing else needs choosing.
 | Wi-Fi | on the chip | on an ESP32-C6, reached over SDIO |
 | Battery | AXP2101 fuel gauge | none |
 | BOOT button | GPIO 0 | GPIO 35 |
-| Status | the reference board | **in progress**: holds conversations and draws every screen at 800 x 800; no release image yet |
+| Status | the reference board | **new**: holds conversations and draws every screen at 800 x 800 |
+| Release files | `deepgram_agent-merged.bin`, `deepgram_agent.bin` | `deepgram_agent-esp32p4-merged.bin`, `deepgram_agent-esp32p4.bin` |
 
 ## Building for a board
 

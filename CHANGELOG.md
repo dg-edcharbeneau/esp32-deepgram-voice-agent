@@ -19,8 +19,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drawn screen (touch panel, clock, stopwatch, ring screen, Echo, spectrum)
   scales from the 466 px design to the P4's 800 px panel through
   `main/ui_scale.h`, with a font set generated at that scale; the S3 compiles
-  to the same code as before. There is no P4 release image yet. See
-  [docs/boards.md](docs/boards.md).
+  to the same code as before. CI builds both boards, and a release attaches
+  the P4's images next to the S3's, as `deepgram_agent-esp32p4-merged.bin`
+  and `deepgram_agent-esp32p4.bin`; the S3's file names are unchanged. The P4
+  image runs on chip revision v1.x only. See [docs/boards.md](docs/boards.md).
 
 ### Fixed
 
