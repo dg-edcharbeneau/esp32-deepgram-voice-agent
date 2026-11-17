@@ -12,6 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `clock_tz_saved()` returned early when NVS had never held the clock's
   namespace, leaving the caller's buffer untouched, and the portal sent that
   stack memory to the page as the saved zone. It now empties the buffer first.
+- **The setup page says why a save was refused.** It read any answer from the
+  board as success, so a refused save (an API key pasted with a trailing space,
+  say) showed "Saved. Restarting…" and nothing restarted. It now shows the
+  board's reason, as "Not saved: …". The board logs each save request and each
+  refusal, never the values.
 - **The agent no longer interrupts itself when the canceller misadapts.**
   During playback, a block whose post-AEC peak is louder than the raw
   microphone can no longer open the uplink VAD gate. Cancellation only

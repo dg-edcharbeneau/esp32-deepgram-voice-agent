@@ -146,9 +146,11 @@ body:'ssid='+encodeURIComponent(s)+'&pass='+
 encodeURIComponent(document.getElementById('pass').value)+'&key='+
 encodeURIComponent(document.getElementById('key').value.trim())+'&tz='+
 encodeURIComponent(document.getElementById('tz').value.trim())})
-.then(function(){msg.textContent='Saved. Restarting to join '+s+'. '
+.then(function(r){if(!r.ok)return r.text().then(function(t){
+throw new Error(t||('error '+r.status))});
+msg.textContent='Saved. Restarting to join '+s+'. '
 +'This page will stop responding, and the setup network will disappear.'})
-.catch(function(){msg.textContent='Save failed. Try again.';
+.catch(function(e){msg.textContent='Not saved: '+((e&&e.message)||'no answer')+'.';
 document.getElementById('go').disabled=false})};
 </script>
 
