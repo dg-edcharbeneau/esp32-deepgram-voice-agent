@@ -33,16 +33,14 @@
 #include "panel_geom.h"
 #include "ui.h"
 #include "ui_paint.h"
+#include "ui_fonts.h"
+#include "ui_scale.h"
 #include "ui_tone.h"
 #if CONFIG_UI_PANEL_SELFTEST
 #include "screenshot.h"
 #endif
 
 static const char *TAG = "panel";
-
-LV_FONT_DECLARE(font_panel_18);
-LV_FONT_DECLARE(font_panel_28);
-LV_FONT_DECLARE(font_panel_40);
 
 /* ---------------- the reference sheet's palette ---------------- */
 
@@ -84,6 +82,7 @@ static void set_palette(uint32_t tint)
 
 /* ---------------- gestures ---------------- */
 
+/* Finger distances, so in panel pixels on both boards: see ui_scale.h. */
 #define OPEN_BAND_PX    40     /* a press must start this close to the top edge */
 #define SWIPE_PX        80     /* how far a drag must travel to count */
 #define TAP_SLOP_PX     20     /* further than this and it is not a tap */
@@ -91,7 +90,7 @@ static void set_palette(uint32_t tint)
 #define SAVE_QUIET_MS   2000   /* save volume / mic gain this long after the last press */
 #define CANCEL_ARM_MS   3000
 
-#define PAGE_DOTS_Y     446    /* in the 34 px rim outside the disc, on every page */
+#define PAGE_DOTS_Y     PX(446)    /* in the 34 px rim outside the disc, on every page */
 
 #define ALARMS_MAX      ALARM_MAX
 
@@ -345,7 +344,7 @@ static void line(lv_layer_t *L, uint32_t rgb, int32_t x1, int32_t y1, int32_t x2
     lv_draw_line_dsc_t d;
     lv_draw_line_dsc_init(&d);
     d.color = lv_color_hex(rgb);
-    d.width = 3;
+    d.width = PX(3);
     d.round_start = 1;
     d.round_end = 1;
     d.p1.x = x1;
@@ -361,7 +360,7 @@ static void arc(lv_layer_t *L, uint32_t rgb, int32_t cx, int32_t cy, uint16_t r,
     lv_draw_arc_dsc_t d;
     lv_draw_arc_dsc_init(&d);
     d.color = lv_color_hex(rgb);
-    d.width = 3;
+    d.width = PX(3);
     d.rounded = 1;
     d.center.x = cx;
     d.center.y = cy;
@@ -371,7 +370,8 @@ static void arc(lv_layer_t *L, uint32_t rgb, int32_t cx, int32_t cy, uint16_t r,
     lv_draw_arc(L, &d);
 }
 
-/* Outline icons about 28 px across, in the reference sheet's stroked style. */
+/* Outline icons about 28 px across (on the 466 px panel), in the reference sheet's
+ * stroked style. */
 static void icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_t y)
 {
     switch (which) {
@@ -380,100 +380,100 @@ static void icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_
         lv_draw_rect_dsc_init(&r);
         r.bg_opa = LV_OPA_TRANSP;
         r.border_color = lv_color_hex(rgb);
-        r.border_width = 3;
+        r.border_width = PX(3);
         r.border_opa = LV_OPA_COVER;
         r.radius = LV_RADIUS_CIRCLE;
-        const lv_area_t a = {x - 6, y - 14, x + 6, y + 4};
+        const lv_area_t a = {x - PX(6), y - PX(14), x + PX(6), y + PX(4)};
         lv_draw_rect(L, &r, &a);
-        arc(L, rgb, x, y - 2, 11, 0, 180);
-        line(L, rgb, x, y + 9, x, y + 14);
+        arc(L, rgb, x, y - PX(2), PX(11), 0, 180);
+        line(L, rgb, x, y + PX(9), x, y + PX(14));
         break;
     }
     case UI_ICON_SPEAKER_HI:
     case UI_ICON_SPEAKER_LO:
-        line(L, rgb, x - 12, y - 5, x - 6, y - 5);
-        line(L, rgb, x - 6, y - 5, x + 1, y - 11);
-        line(L, rgb, x + 1, y - 11, x + 1, y + 11);
-        line(L, rgb, x + 1, y + 11, x - 6, y + 5);
-        line(L, rgb, x - 6, y + 5, x - 12, y + 5);
-        line(L, rgb, x - 12, y + 5, x - 12, y - 5);
-        arc(L, rgb, x + 2, y, 7, 315, 45);
+        line(L, rgb, x - PX(12), y - PX(5), x - PX(6), y - PX(5));
+        line(L, rgb, x - PX(6), y - PX(5), x + PX(1), y - PX(11));
+        line(L, rgb, x + PX(1), y - PX(11), x + PX(1), y + PX(11));
+        line(L, rgb, x + PX(1), y + PX(11), x - PX(6), y + PX(5));
+        line(L, rgb, x - PX(6), y + PX(5), x - PX(12), y + PX(5));
+        line(L, rgb, x - PX(12), y + PX(5), x - PX(12), y - PX(5));
+        arc(L, rgb, x + PX(2), y, PX(7), 315, 45);
         if (which == UI_ICON_SPEAKER_HI) {
-            arc(L, rgb, x + 2, y, 13, 315, 45);
+            arc(L, rgb, x + PX(2), y, PX(13), 315, 45);
         }
         break;
     case UI_ICON_PLUS:
-        line(L, rgb, x - 8, y, x + 8, y);
-        line(L, rgb, x, y - 8, x, y + 8);
+        line(L, rgb, x - PX(8), y, x + PX(8), y);
+        line(L, rgb, x, y - PX(8), x, y + PX(8));
         break;
     case UI_ICON_MINUS:
-        line(L, rgb, x - 8, y, x + 8, y);
+        line(L, rgb, x - PX(8), y, x + PX(8), y);
         break;
     case UI_ICON_X:
-        line(L, rgb, x - 8, y - 8, x + 8, y + 8);
-        line(L, rgb, x - 8, y + 8, x + 8, y - 8);
+        line(L, rgb, x - PX(8), y - PX(8), x + PX(8), y + PX(8));
+        line(L, rgb, x - PX(8), y + PX(8), x + PX(8), y - PX(8));
         break;
     case UI_ICON_LEFT:
-        line(L, rgb, x + 4, y - 8, x - 4, y);
-        line(L, rgb, x - 4, y, x + 4, y + 8);
+        line(L, rgb, x + PX(4), y - PX(8), x - PX(4), y);
+        line(L, rgb, x - PX(4), y, x + PX(4), y + PX(8));
         break;
     case UI_ICON_RIGHT:
-        line(L, rgb, x - 4, y - 8, x + 4, y);
-        line(L, rgb, x + 4, y, x - 4, y + 8);
+        line(L, rgb, x - PX(4), y - PX(8), x + PX(4), y);
+        line(L, rgb, x + PX(4), y, x - PX(4), y + PX(8));
         break;
     case UI_ICON_CHECK:
-        line(L, rgb, x - 8, y, x - 2, y + 6);
-        line(L, rgb, x - 2, y + 6, x + 9, y - 6);
+        line(L, rgb, x - PX(8), y, x - PX(2), y + PX(6));
+        line(L, rgb, x - PX(2), y + PX(6), x + PX(9), y - PX(6));
         break;
     case UI_ICON_WAVE: {
-        static const int8_t h[5] = {4, 9, 13, 7, 3};
+        static const int8_t h[5] = {PX(4), PX(9), PX(13), PX(7), PX(3)};
         for (int i = 0; i < 5; i++) {
-            const int32_t lx = x - 12 + i * 6;
+            const int32_t lx = x - PX(12) + i * PX(6);
             line(L, rgb, lx, y - h[i], lx, y + h[i]);
         }
         break;
     }
     case UI_ICON_CLOCK:
-        arc(L, rgb, x, y, 12, 0, 360);
-        line(L, rgb, x, y, x, y - 7);
-        line(L, rgb, x, y, x + 5, y + 3);
+        arc(L, rgb, x, y, PX(12), 0, 360);
+        line(L, rgb, x, y, x, y - PX(7));
+        line(L, rgb, x, y, x + PX(5), y + PX(3));
         break;
     case UI_ICON_BELL_OFF:
         /* A bell -- dome, flared sides, rim, clapper -- struck through. */
-        arc(L, rgb, x, y - 3, 8, 180, 360);
-        line(L, rgb, x - 8, y - 3, x - 10, y + 6);
-        line(L, rgb, x + 8, y - 3, x + 10, y + 6);
-        line(L, rgb, x - 12, y + 6, x + 12, y + 6);
-        arc(L, rgb, x, y + 9, 3, 0, 180);
-        line(L, rgb, x - 12, y - 12, x + 12, y + 12);
+        arc(L, rgb, x, y - PX(3), PX(8), 180, 360);
+        line(L, rgb, x - PX(8), y - PX(3), x - PX(10), y + PX(6));
+        line(L, rgb, x + PX(8), y - PX(3), x + PX(10), y + PX(6));
+        line(L, rgb, x - PX(12), y + PX(6), x + PX(12), y + PX(6));
+        arc(L, rgb, x, y + PX(9), PX(3), 0, 180);
+        line(L, rgb, x - PX(12), y - PX(12), x + PX(12), y + PX(12));
         break;
     case UI_ICON_ALARM:
         /* An alarm clock: a face with hands, two bells, two feet. */
-        arc(L, rgb, x, y + 2, 10, 0, 360);
-        line(L, rgb, x, y + 2, x, y - 4);
-        line(L, rgb, x, y + 2, x + 4, y + 5);
-        line(L, rgb, x - 13, y - 8, x - 8, y - 13);
-        line(L, rgb, x + 13, y - 8, x + 8, y - 13);
-        line(L, rgb, x - 7, y + 11, x - 9, y + 14);
-        line(L, rgb, x + 7, y + 11, x + 9, y + 14);
+        arc(L, rgb, x, y + PX(2), PX(10), 0, 360);
+        line(L, rgb, x, y + PX(2), x, y - PX(4));
+        line(L, rgb, x, y + PX(2), x + PX(4), y + PX(5));
+        line(L, rgb, x - PX(13), y - PX(8), x - PX(8), y - PX(13));
+        line(L, rgb, x + PX(13), y - PX(8), x + PX(8), y - PX(13));
+        line(L, rgb, x - PX(7), y + PX(11), x - PX(9), y + PX(14));
+        line(L, rgb, x + PX(7), y + PX(11), x + PX(9), y + PX(14));
         break;
     case UI_ICON_RESET:
         /* An arrow coming round anticlockwise to its start: most of a circle,
          * open at the top left, the head at its end. */
-        arc(L, rgb, x, y, 8, 270, 180);
-        line(L, rgb, x - 8, y, x - 11, y - 4);
-        line(L, rgb, x - 8, y, x - 4, y - 3);
+        arc(L, rgb, x, y, PX(8), 270, 180);
+        line(L, rgb, x - PX(8), y, x - PX(11), y - PX(4));
+        line(L, rgb, x - PX(8), y, x - PX(4), y - PX(3));
         break;
     case UI_ICON_REPLAY:
         /* UI_ICON_RESET at the full size, for Echo's Play again. */
-        arc(L, rgb, x, y, 13, 270, 180);
-        line(L, rgb, x - 13, y, x - 18, y - 6);
-        line(L, rgb, x - 13, y, x - 7, y - 5);
+        arc(L, rgb, x, y, PX(13), 270, 180);
+        line(L, rgb, x - PX(13), y, x - PX(18), y - PX(6));
+        line(L, rgb, x - PX(13), y, x - PX(7), y - PX(5));
         break;
     case UI_ICON_FLAG:
-        line(L, rgb, x - 6, y - 9, x - 6, y + 9);
-        line(L, rgb, x - 6, y - 8, x + 7, y - 4);
-        line(L, rgb, x + 7, y - 4, x - 6, y);
+        line(L, rgb, x - PX(6), y - PX(9), x - PX(6), y + PX(9));
+        line(L, rgb, x - PX(6), y - PX(8), x + PX(7), y - PX(4));
+        line(L, rgb, x + PX(7), y - PX(4), x - PX(6), y);
         break;
     case UI_ICON_PLAY: {
         /* Filled, as the design draws it. */
@@ -481,18 +481,18 @@ static void icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_
         lv_draw_triangle_dsc_init(&t);
         t.color = lv_color_hex(rgb);
         t.opa = LV_OPA_COVER;
-        t.p[0].x = x - 5;
-        t.p[0].y = y - 8;
-        t.p[1].x = x - 5;
-        t.p[1].y = y + 8;
-        t.p[2].x = x + 8;
+        t.p[0].x = x - PX(5);
+        t.p[0].y = y - PX(8);
+        t.p[1].x = x - PX(5);
+        t.p[1].y = y + PX(8);
+        t.p[2].x = x + PX(8);
         t.p[2].y = y;
         lv_draw_triangle(L, &t);
         break;
     }
     case UI_ICON_PAUSE:
-        line(L, rgb, x - 4, y - 7, x - 4, y + 7);
-        line(L, rgb, x + 4, y - 7, x + 4, y + 7);
+        line(L, rgb, x - PX(4), y - PX(7), x - PX(4), y + PX(7));
+        line(L, rgb, x + PX(4), y - PX(7), x + PX(4), y + PX(7));
         break;
     }
 }
@@ -597,19 +597,19 @@ static void paint_pair(lv_layer_t *L, bool right, panel_hit_t up_id, panel_hit_t
     const int32_t cy = (int32_t)PANEL_C;
     /* The signs: bold strokes, as large as the reference draws them, hugging
      * the bridge and set in towards the centre gap rather than under the value. */
-    const int32_t sx = (int32_t)(PANEL_C + (right ? 76.0f : -76.0f));
+    const int32_t sx = (int32_t)(PANEL_C + (right ? PXF(76.0f) : -PXF(76.0f)));
     const uint32_t ink_u = ink_of(su, false), ink_d = ink_of(sd, false);
-    line_w(L, ink_u, 5, sx - 12, cy - 72, sx + 12, cy - 72);
-    line_w(L, ink_u, 5, sx, cy - 84, sx, cy - 60);
-    line_w(L, ink_d, 5, sx - 12, cy + 79, sx + 12, cy + 79);
+    line_w(L, ink_u, PX(5), sx - PX(12), cy - PX(72), sx + PX(12), cy - PX(72));
+    line_w(L, ink_u, PX(5), sx, cy - PX(84), sx, cy - PX(60));
+    line_w(L, ink_d, PX(5), sx - PX(12), cy + PX(79), sx + PX(12), cy + PX(79));
 
     /* The bridge: icon and number as one centred pair, the label under them. */
-    const int32_t icon_w = 26, gap = 8;
-    const int32_t num_w = text_width(&font_panel_28, value);
+    const int32_t icon_w = PX(26), gap = PX(8);
+    const int32_t num_w = text_width(FONT_PANEL_M, value);
     const int32_t left = cx - (icon_w + gap + num_w) / 2;
-    icon(L, ico, s_col.text, left + icon_w / 2, cy - 9);
-    text(L, &font_panel_28, s_col.text, left + icon_w + gap + num_w / 2, cy - 9, value);
-    text_spaced(L, &lv_font_montserrat_14, s_col.text, cx, cy + 20, 2, label);
+    icon(L, ico, s_col.text, left + icon_w / 2, cy - PX(9));
+    text(L, FONT_PANEL_M, s_col.text, left + icon_w + gap + num_w / 2, cy - PX(9), value);
+    text_spaced(L, FONT_SMALL, s_col.text, cx, cy + PX(20), PX(2), label);
 }
 
 static void paint_sound(lv_layer_t *L)
@@ -656,9 +656,9 @@ static void paint_color(lv_layer_t *L, uint32_t tint_rgb)
         const bool pressed = s_pressed == (panel_hit_t)(PANEL_HIT_SLOT + i);
         const uint32_t rgb = orb_colors_rgb((size_t)i);
         /* Pressed shrinks it a touch: the only feedback a colour can take. */
-        fill_circle(x, y, PANEL_SWATCH_R - (pressed ? 3.0f : 0.0f), 0.0f, rgb);
+        fill_circle(x, y, PANEL_SWATCH_R - (pressed ? PXF(3.0f) : 0.0f), 0.0f, rgb);
         if (i == current) {
-            fill_circle(x, y, PANEL_SWATCH_R + 6.0f, 3.0f, rgb);
+            fill_circle(x, y, PANEL_SWATCH_R + PXF(6.0f), PXF(3.0f), rgb);
             icon(L, UI_ICON_CHECK,
                  ui_tone_luma(rgb) >= CHECK_DARK_LUMA ? s_col.primary_ink : 0xFFFFFF,
                  (int32_t)x, (int32_t)y);
@@ -679,9 +679,9 @@ static void paint_color(lv_layer_t *L, uint32_t tint_rgb)
                 *p = (char)(*p - 'a' + 'A');
             }
         }
-        text(L, &font_panel_40, tint_rgb, (int32_t)PANEL_C, (int32_t)PANEL_C - 12, name);
-        text_spaced(L, &lv_font_montserrat_14, s_col.text, (int32_t)PANEL_C,
-                    (int32_t)PANEL_C + 22, 2, plain);
+        text(L, FONT_PANEL_L, tint_rgb, (int32_t)PANEL_C, (int32_t)PANEL_C - PX(12), name);
+        text_spaced(L, FONT_SMALL, s_col.text, (int32_t)PANEL_C,
+                    (int32_t)PANEL_C + PX(22), PX(2), plain);
     }
 }
 
@@ -693,10 +693,10 @@ static void paint_toggles(lv_layer_t *L)
     const style_t st = style(PANEL_HIT_NS, ns_ok, !ns_on);
     fill_seg(PANEL_SEG_HALF_TOP, fill_of(st));
     const uint32_t ink = ink_of(st, !ns_on);
-    icon(L, UI_ICON_WAVE, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - 128);
-    text(L, &font_panel_28, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - 84, "Noise reduction");
-    text(L, &font_panel_18, st == ST_PRIMARY ? s_col.primary_label : (ns_ok ? s_col.hint : s_col.disabled_ink),
-         (int32_t)PANEL_C, (int32_t)PANEL_C - 50, ns_ok ? (ns_on ? "On" : "Off") : "Unavailable");
+    icon(L, UI_ICON_WAVE, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - PX(128));
+    text(L, FONT_PANEL_M, ink, (int32_t)PANEL_C, (int32_t)PANEL_C - PX(84), "Noise reduction");
+    text(L, FONT_PANEL_S, st == ST_PRIMARY ? s_col.primary_label : (ns_ok ? s_col.hint : s_col.disabled_ink),
+         (int32_t)PANEL_C, (int32_t)PANEL_C - PX(50), ns_ok ? (ns_on ? "On" : "Off") : "Unavailable");
 
     /* Bottom: the clock format in force; a tap switches to the other. A switch
      * like the one above it, so it reads the same way: solid for 12-hour. */
@@ -705,10 +705,10 @@ static void paint_toggles(lv_layer_t *L)
     const style_t sb = style(PANEL_HIT_CLOCK_FMT, clk_ok, !h12);
     fill_seg(PANEL_SEG_HALF_BOTTOM, fill_of(sb));
     const uint32_t inkb = ink_of(sb, !h12);
-    text(L, &font_panel_28, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + 62, h12 ? "12-hour" : "24-hour");
-    text(L, &font_panel_18, sb == ST_PRIMARY ? s_col.primary_label : (clk_ok ? s_col.hint : s_col.disabled_ink),
-         (int32_t)PANEL_C, (int32_t)PANEL_C + 96, h12 ? "tap for 24-hour" : "tap for 12-hour");
-    icon(L, UI_ICON_CLOCK, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + 136);
+    text(L, FONT_PANEL_M, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + PX(62), h12 ? "12-hour" : "24-hour");
+    text(L, FONT_PANEL_S, sb == ST_PRIMARY ? s_col.primary_label : (clk_ok ? s_col.hint : s_col.disabled_ink),
+         (int32_t)PANEL_C, (int32_t)PANEL_C + PX(96), h12 ? "tap for 24-hour" : "tap for 12-hour");
+    icon(L, UI_ICON_CLOCK, inkb, (int32_t)PANEL_C, (int32_t)PANEL_C + PX(136));
 }
 
 static void fmt_countdown(int64_t s, char *out, size_t n)
@@ -731,8 +731,8 @@ static int64_t timer_left(const alarm_view_t *v, uint32_t now)
 static void paint_alarms(lv_layer_t *L, uint32_t now)
 {
     if (s_alarm_n == 0) {
-        text(L, &font_panel_28, s_col.hint, (int32_t)PANEL_C, (int32_t)PANEL_C - 16, "No timers");
-        text(L, &font_panel_28, s_col.hint, (int32_t)PANEL_C, (int32_t)PANEL_C + 20, "or alarms");
+        text(L, FONT_PANEL_M, s_col.hint, (int32_t)PANEL_C, (int32_t)PANEL_C - PX(16), "No timers");
+        text(L, FONT_PANEL_M, s_col.hint, (int32_t)PANEL_C, (int32_t)PANEL_C + PX(20), "or alarms");
         return;
     }
     if (s_alarm_idx >= s_alarm_n) {
@@ -749,11 +749,11 @@ static void paint_alarms(lv_layer_t *L, uint32_t now)
         snprintf(big, sizeof(big), "%s", v->time);
         snprintf(when, sizeof(when), "%s", v->when);
     }
-    text(L, &font_panel_18, s_col.hint, (int32_t)PANEL_C, 80, count);
-    text(L, &font_panel_40, s_col.text, (int32_t)PANEL_C, 128, big);
-    text(L, &font_panel_18, s_col.hint, (int32_t)PANEL_C, 170, when);
+    text(L, FONT_PANEL_S, s_col.hint, (int32_t)PANEL_C, PX(80), count);
+    text(L, FONT_PANEL_L, s_col.text, (int32_t)PANEL_C, PX(128), big);
+    text(L, FONT_PANEL_S, s_col.hint, (int32_t)PANEL_C, PX(170), when);
     if (v->label[0]) {
-        text(L, &font_panel_18, s_col.text, (int32_t)PANEL_C, 196, v->label);
+        text(L, FONT_PANEL_S, s_col.text, (int32_t)PANEL_C, PX(196), v->label);
     }
 
     for (int side = 0; side < 2; side++) {
@@ -770,10 +770,10 @@ static void paint_alarms(lv_layer_t *L, uint32_t now)
                        : (armed ? ST_PRIMARY : ST_SECONDARY);
     fill_seg(PANEL_SEG_HALF_BOTTOM, fill_of(sc));
     const uint32_t ink = ink_of(sc, !armed);
-    text(L, &font_panel_28, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + 62, armed ? "Cancel?" : "Cancel");
-    icon(L, UI_ICON_X, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + 104);
+    text(L, FONT_PANEL_M, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + PX(62), armed ? "Cancel?" : "Cancel");
+    icon(L, UI_ICON_X, ink, (int32_t)PANEL_C, (int32_t)PANEL_C + PX(104));
     if (armed) {
-        text(L, &font_panel_18, s_col.primary_label, (int32_t)PANEL_C, (int32_t)PANEL_C + 140, "tap again");
+        text(L, FONT_PANEL_S, s_col.primary_label, (int32_t)PANEL_C, (int32_t)PANEL_C + PX(140), "tap again");
     }
 }
 
@@ -802,8 +802,8 @@ static void paint(uint32_t now, uint32_t tint_rgb)
 
     /* Which page of the panel, in the rim below the disc on every page. */
     for (int i = 0; i < PANEL_PAGE_COUNT; i++) {
-        fill_circle(PANEL_C + 14.0f * ((float)i - (PANEL_PAGE_COUNT - 1) / 2.0f), PAGE_DOTS_Y,
-                    3.0f, 0.0f, i == (int)s_page ? s_col.primary : s_col.dot_off);
+        fill_circle(PANEL_C + PXF(14.0f) * ((float)i - (PANEL_PAGE_COUNT - 1) / 2.0f), PAGE_DOTS_Y,
+                    PXF(3.0f), 0.0f, i == (int)s_page ? s_col.primary : s_col.dot_off);
     }
 
     lv_obj_invalidate(s_canvas);
@@ -1096,10 +1096,10 @@ static void selftest(uint32_t now, bool session_live, uint32_t tint_rgb)
     }
     switch (k > 2 ? k - 2 : k) {
     case 0: open_panel(); break;
-    case 1: tap(c + 90, c - 90); break;      /* volume + */
-    case 2: tap(c + 90, c + 90); break;      /* volume - */
-    case 3: tap(c - 90, c - 90); break;      /* mic + */
-    case 4: tap(c - 90, c + 90); break;      /* mic - */
+    case 1: tap(c + PXF(90), c - PXF(90)); break;      /* volume + */
+    case 2: tap(c + PXF(90), c + PXF(90)); break;      /* volume - */
+    case 3: tap(c - PXF(90), c - PXF(90)); break;      /* mic + */
+    case 4: tap(c - PXF(90), c + PXF(90)); break;      /* mic - */
     case 5: {
         set_page(PANEL_PAGE_COLOR);
         const int cur = color_index_of(tint_rgb);
@@ -1112,14 +1112,14 @@ static void selftest(uint32_t now, bool session_live, uint32_t tint_rgb)
     case 9: break;                           /* a beat on clay before the way back */
     case 10: tap_slot(color_back); break;    /* put it back */
     case 11: set_page(PANEL_PAGE_TOGGLES); break;
-    case 12: tap(c, c - 100); break;         /* noise reduction */
-    case 13: tap(c, c - 100); break;         /* ... and back */
-    case 14: tap(c, c + 100); break;         /* clock format */
-    case 15: tap(c, c + 100); break;         /* ... and back */
+    case 12: tap(c, c - PXF(100)); break;         /* noise reduction */
+    case 13: tap(c, c - PXF(100)); break;         /* ... and back */
+    case 14: tap(c, c + PXF(100)); break;         /* clock format */
+    case 15: tap(c, c + PXF(100)); break;         /* ... and back */
     case 16: set_page(PANEL_PAGE_ALARMS); break;
     case 17: tap(c + PANEL_NAV_X, PANEL_NAV_Y); break;
     case 18: tap(c - PANEL_NAV_X, PANEL_NAV_Y); break;
-    case 19: tap(c, c + 100); break;         /* arm cancel; it lapses unconfirmed */
+    case 19: tap(c, c + PXF(100)); break;         /* arm cancel; it lapses unconfirmed */
     case 20: ui_panel_close("selftest"); break;
     default:
         ESP_LOGI(TAG, "EVT panel selftest done");

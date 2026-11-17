@@ -31,6 +31,10 @@ CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 # --- display -----------------------------------------------------------------
 CONFIG_BSP_LCD_TYPE_800_800_3_4_INCH=y
 CONFIG_BSP_LCD_COLOR_FORMAT_RGB565=y
+# The S3's status word is Montserrat 24; at this panel's scale that is 40
+# (main/ui_fonts.h). Its small text, 14, becomes 24, which the shared config
+# already builds.
+CONFIG_LV_FONT_MONTSERRAT_40=y
 
 # --- Wi-Fi -------------------------------------------------------------------
 # The P4 has no radio, so the S3's ESP_WIFI_*_BUFFER_NUM settings do not apply:

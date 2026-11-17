@@ -68,6 +68,8 @@
 #endif
 #include "controls.h"
 #include "ui_panel.h"
+#include "ui_fonts.h"
+#include "ui_scale.h"
 #include "ui_tone.h"
 #if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
     CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST || CONFIG_UI_ECHO_SELFTEST
@@ -84,11 +86,12 @@ static const char *TAG = "ui";
  * The inner circle is the button. Touching anywhere else does nothing.
  *
  * A literal rather than a radius borrowed from whatever the spectrum face draws:
- * the hit area must not move when the face changes. 70 px is where it has always
- * been. The whole 466x466 screen used to be live, which made brushing the bezel
- * enough to end a conversation.
+ * the hit area must not move when the face changes. 70 px on the 466 px panel is
+ * where it has always been, and PX() keeps it the same share of a larger one.
+ * The whole screen used to be live, which made brushing the bezel enough to end
+ * a conversation.
  */
-#define BUTTON_RADIUS 70
+#define BUTTON_RADIUS PX(70)
 
 #if CONFIG_UI_SHOW_INDICATORS
 /*
@@ -103,7 +106,7 @@ static const char *TAG = "ui";
  * test actually uses. If the two ever disagree the drawing is wrong, which is
  * the only way an affordance like this stays worth trusting.
  */
-#define INDICATOR_WIDTH 2
+#define INDICATOR_WIDTH PX(2)
 
 /* Dim, because the resting state is "here is the button" and it sits under a
  * face that is already using the screen. */
@@ -203,20 +206,20 @@ static inline lv_color_t arc_tint(uint32_t rgb, int num, int den)
  * runtime check that they still lie on a circle.
  */
 #define BATTERY_DOTS  4
-#define BATTERY_DOT_R 5
+#define BATTERY_DOT_R PX(5)
 
 static const lv_point_t BATTERY_DOT_XY[BATTERY_DOTS] = {
-    {426, 181},  /* 75 deg */
-    {432, 216},  /* 85 deg */
-    {432, 250},  /* 95 deg -- 3 o'clock sits between these two */
-    {426, 285},  /* 105 deg */
+    {PX(426), PX(181)},  /* 75 deg */
+    {PX(432), PX(216)},  /* 85 deg */
+    {PX(432), PX(250)},  /* 95 deg -- 3 o'clock sits between these two */
+    {PX(426), PX(285)},  /* 105 deg */
 };
 
 /* The bolt continues the arc past the last dot. Half-width/half-height. */
-#define BATTERY_BOLT_X  414
-#define BATTERY_BOLT_Y  318
-#define BATTERY_BOLT_HW 4
-#define BATTERY_BOLT_HH 8
+#define BATTERY_BOLT_X  PX(414)
+#define BATTERY_BOLT_Y  PX(318)
+#define BATTERY_BOLT_HW PX(4)
+#define BATTERY_BOLT_HH PX(8)
 
 /*
  * THE ROW AS FIVE SMALL BOXES rather than one large one.
@@ -283,11 +286,11 @@ static inline lv_area_t battery_bolt_box(void)
  * The apex sits below that so the glyph's mass, not its lowest point, lands on
  * the mark.
  */
-#define SIGNAL_APEX_X   33
-#define SIGNAL_APEX_Y   244
+#define SIGNAL_APEX_X   PX(33)
+#define SIGNAL_APEX_Y   PX(244)
 
 /* The dot. Filled circle centred on the apex. */
-#define SIGNAL_DOT_R    3
+#define SIGNAL_DOT_R    PX(3)
 
 /*
  * The three arcs, OUTER radius each -- lv_draw_arc() puts the outer edge at
@@ -295,8 +298,8 @@ static inline lv_area_t battery_bolt_box(void)
  * the touch ring. Six px of pitch at three px of stroke leaves three px of gap,
  * which is what keeps the arcs from reading as one thick band at arm's length.
  */
-#define SIGNAL_ARC_W    3
-static const uint16_t SIGNAL_ARC_R[] = { 10, 16, 22 };
+#define SIGNAL_ARC_W    PX(3)
+static const uint16_t SIGNAL_ARC_R[] = { PX(10), PX(16), PX(22) };
 
 #define SIGNAL_ARCS (sizeof(SIGNAL_ARC_R) / sizeof(SIGNAL_ARC_R[0]))
 
@@ -499,8 +502,8 @@ static inline lv_area_t signal_box(void)
  * circular mask with its quiet zone intact, and lifting it 30 px above centre
  * makes room for the network name underneath.
  */
-#define QR_SIZE   200
-#define QR_Y_LIFT 30
+#define QR_SIZE   PX(200)
+#define QR_Y_LIFT PX(30)
 
 /* ---------------- faces ---------------- */
 
@@ -565,6 +568,7 @@ static volatile bool s_bench_display_off;
  * press puts the face back, and that press is nobody else's, so dismissing the
  * clock can never also end a conversation. LVGL task only.
  */
+/* Finger distances, so in panel pixels on both boards: see ui_scale.h. */
 #define CLOCK_SWIPE_BAND_PX 40   /* a press must start this close to the bottom edge */
 #define CLOCK_SWIPE_PX      80   /* and travel this far up */
 static bool s_clock_forced;
@@ -1672,7 +1676,7 @@ static void draw_arc_status(uint32_t now)
         if (s_arc_drawn) {
             s_arc_drawn = false;
             lv_canvas_init_layer(canvas_obj, &layer);
-            arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
+            arc_text_wipe(&layer, s_arc_shown, FONT_STATUS);
             lv_canvas_finish_layer(canvas_obj, &layer);
             lv_obj_invalidate_area(canvas_obj, &s_arc_box);
             /* The centre label comes back in update_status_shown(), which
@@ -1697,13 +1701,13 @@ static void draw_arc_status(uint32_t now)
      */
     if (s_arc_drawn && s_arc_shown != s_arc_text) {
         lv_canvas_init_layer(canvas_obj, &layer);
-        arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
+        arc_text_wipe(&layer, s_arc_shown, FONT_STATUS);
         lv_canvas_finish_layer(canvas_obj, &layer);
         lv_obj_invalidate_area(canvas_obj, &s_arc_box);
     }
     s_arc_shown = s_arc_text;
 
-    if (!arc_text_box(s_arc_shown, &lv_font_montserrat_24, &s_arc_box)) {
+    if (!arc_text_box(s_arc_shown, FONT_STATUS, &s_arc_box)) {
         return;
     }
 
@@ -1714,8 +1718,8 @@ static void draw_arc_status(uint32_t now)
      * under the text continuously, and a glyph drawn over a moving picture
      * keeps that picture wherever the glyph has thinned. Same reasoning the
      * battery overlay records. */
-    arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
-    arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24,
+    arc_text_wipe(&layer, s_arc_shown, FONT_STATUS);
+    arc_text_draw(&layer, s_arc_shown, FONT_STATUS,
                   lv_color_hex(ui_tone_ink(s_tint_rgb)), opa);
     lv_canvas_finish_layer(canvas_obj, &layer);
     lv_obj_invalidate_area(canvas_obj, &s_arc_box);
@@ -1852,8 +1856,8 @@ static void stopwatch_selftest(uint32_t now)
     switch (STEPS[k].what) {
     case 'o': s_sw_shown = true; ESP_LOGI(TAG, "EVT stopwatch selftest open"); break;
     case 'c': s_sw_shown = false; ESP_LOGI(TAG, "EVT stopwatch selftest done"); break;
-    case 'R': stopwatch_press(c + 35, c + 143); break;   /* the right button */
-    case 'L': stopwatch_press(c - 35, c + 143); break;   /* the left */
+    case 'R': stopwatch_press(c + PX(35), c + PX(143)); break;   /* the right button */
+    case 'L': stopwatch_press(c - PX(35), c + PX(143)); break;   /* the left */
     case 's': {
         static unsigned n;
         char tag[24];
@@ -2219,13 +2223,13 @@ static void draw_battery(void)
         const int32_t y = BATTERY_BOLT_Y;
 
         tri.p[0].x = x + BATTERY_BOLT_HW; tri.p[0].y = y - BATTERY_BOLT_HH;
-        tri.p[1].x = x - BATTERY_BOLT_HW; tri.p[1].y = y + 1;
-        tri.p[2].x = x + BATTERY_BOLT_HW; tri.p[2].y = y + 1;
+        tri.p[1].x = x - BATTERY_BOLT_HW; tri.p[1].y = y + PX(1);
+        tri.p[2].x = x + BATTERY_BOLT_HW; tri.p[2].y = y + PX(1);
         lv_draw_triangle(&layer, &tri);
 
         tri.p[0].x = x - BATTERY_BOLT_HW; tri.p[0].y = y + BATTERY_BOLT_HH;
-        tri.p[1].x = x + BATTERY_BOLT_HW; tri.p[1].y = y - 1;
-        tri.p[2].x = x - BATTERY_BOLT_HW; tri.p[2].y = y - 1;
+        tri.p[1].x = x + BATTERY_BOLT_HW; tri.p[1].y = y - PX(1);
+        tri.p[2].x = x - BATTERY_BOLT_HW; tri.p[2].y = y - PX(1);
         lv_draw_triangle(&layer, &tri);
     }
 
@@ -2397,7 +2401,7 @@ static void update_qr(void)
     }
 
     /* Below the code, still inside the circular mask. */
-    lv_obj_align(status_label, LV_ALIGN_CENTER, 0, QR_SIZE / 2 - QR_Y_LIFT + 30);
+    lv_obj_align(status_label, LV_ALIGN_CENTER, 0, QR_SIZE / 2 - QR_Y_LIFT + PX(30));
 }
 
 /*
@@ -3907,7 +3911,8 @@ static esp_err_t build_ui(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Canvas pixels must live in PSRAM; 466*466*2 is far past internal RAM. */
+    /* Canvas pixels must live in PSRAM; a full panel of RGB565 is far past
+     * internal RAM (424 kB on the S3, 1.25 MB on the P4). */
     uint32_t stride = lv_draw_buf_width_to_stride(BSP_LCD_H_RES, LV_COLOR_FORMAT_RGB565);
     uint32_t buf_size = stride * BSP_LCD_V_RES;
     void *pixels = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -3929,7 +3934,7 @@ static esp_err_t build_ui(void)
     status_label = lv_label_create(scr);
     lv_label_set_text(status_label, s_status);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(status_label, FONT_STATUS, LV_PART_MAIN);
     lv_obj_center(status_label);
 
 #if CONFIG_UI_SHOW_INDICATORS
@@ -3942,8 +3947,8 @@ static esp_err_t build_ui(void)
     hint_label = lv_label_create(scr);
     lv_label_set_text(hint_label, "");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 34);
+    lv_obj_set_style_text_font(hint_label, FONT_SMALL, LV_PART_MAIN);
+    lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, PX(34));
 #endif
 
     /*

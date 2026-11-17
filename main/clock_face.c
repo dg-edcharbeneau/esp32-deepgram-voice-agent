@@ -15,21 +15,21 @@
 /* The meridian: a band of the near side lit as sin(0.9 t) sweeps across. */
 #define SWEEP_RATE   0.9f
 #define SWEEP_HALF   0.07f   /* half its width, in sphere radii */
-#define SWEEP_GROW   1.4f    /* diameter added to a lit dot */
+#define SWEEP_GROW   PXF(1.4f)    /* diameter added to a lit dot */
 
 /* Rings: base diameters, the current dot's growth, the twinkle and the pulse. */
-#define MIN_BASE     4.0f
-#define HOUR_BASE    6.0f
-#define CURRENT_GROW 7.0f
-#define UNLIT_SHRINK 1.0f
+#define MIN_BASE     PXF(4.0f)
+#define HOUR_BASE    PXF(6.0f)
+#define CURRENT_GROW PXF(7.0f)
+#define UNLIT_SHRINK PXF(1.0f)
 #define UNLIT_A      0.18f
 #define TWINKLE_A    0.62f
 #define TWINKLE_AMP  0.3f
 #define TWINKLE_RATE 2.2f
 #define TWINKLE_STEP 1.7f    /* phase between neighbouring dots */
 #define PULSE_RATE   3.0f
-#define HALO_MIN     3.0f    /* spread, px */
-#define HALO_GROW    6.0f
+#define HALO_MIN     PXF(3.0f)    /* spread, px */
+#define HALO_GROW    PXF(6.0f)
 #define HALO_A_MIN   0.06f
 #define HALO_A_GROW  0.28f
 
@@ -85,7 +85,7 @@ void clock_face_sphere(clock_dot_t *out, float t, float cx, float cy, float radi
         const float y2 = y * cb - z1 * sb, z2 = y * sb + z1 * cb;
         const float depth = (z2 + 1.0f) * 0.5f;
         float op = 0.1f + 0.85f * powf(depth, 1.6f);
-        float size = 1.6f + 2.4f * depth;
+        float size = PXF(1.6f + 2.4f * depth);
         if (z2 > 0.0f && fabsf(x1 - sweep) < SWEEP_HALF) {
             op = 1.0f;
             size += SWEEP_GROW;

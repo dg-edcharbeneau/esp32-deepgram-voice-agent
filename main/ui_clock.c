@@ -29,13 +29,11 @@
 #include "panel_geom.h"
 #include "ui_paint.h"
 #include "ui_panel.h"
+#include "ui_fonts.h"
+#include "ui_scale.h"
 #include "ui_tone.h"
 
 static const char *TAG = "clock";
-
-LV_FONT_DECLARE(font_clock_52);
-LV_FONT_DECLARE(font_clock_15);
-LV_FONT_DECLARE(font_panel_28);
 
 /* ---------------- the mockup's palette, on a white orb ---------------- */
 
@@ -45,33 +43,34 @@ LV_FONT_DECLARE(font_panel_28);
 #define COL_STATUS  0xC9CED6   /* AM/PM, the Wi-Fi and battery row */
 #define COL_LOW     0xF85044   /* battery fill at or under BATTERY_LOW_PCT; stays red */
 
-/* ---------------- the mockup's layout ---------------- */
+/* ---------------- the mockup's layout ----------------
+ * In the mockup's pixels, on the 466 px panel; PX() scales them (ui_scale.h). */
 
-#define STATUS_TOP     104     /* the row's top edge */
-#define STATUS_H       20      /* the Wi-Fi glyph is the tallest thing in it */
-#define STATUS_GAP     10
-#define WIFI_W         20
-#define BAT_W          24      /* body, outline included */
-#define BAT_H          12
-#define BAT_BORDER     2
-#define BAT_RADIUS     3
-#define BAT_FILL_MAX   18      /* fill width at 100 % */
-#define BAT_FILL_H     6
-#define BAT_NUB_GAP    2
-#define BAT_NUB_W      2
-#define BAT_NUB_H      5
-#define BOLT_GAP       4       /* not in the mockup: today's charging bolt, kept */
-#define BOLT_HW        4
-#define BOLT_HH        7
+#define STATUS_TOP     PX(104)     /* the row's top edge */
+#define STATUS_H       PX(20)      /* the Wi-Fi glyph is the tallest thing in it */
+#define STATUS_GAP     PX(10)
+#define WIFI_W         PX(20)
+#define BAT_W          PX(24)      /* body, outline included */
+#define BAT_H          PX(12)
+#define BAT_BORDER     PX(2)
+#define BAT_RADIUS     PX(3)
+#define BAT_FILL_MAX   PX(18)      /* fill width at 100 % */
+#define BAT_FILL_H     PX(6)
+#define BAT_NUB_GAP    PX(2)
+#define BAT_NUB_W      PX(2)
+#define BAT_NUB_H      PX(5)
+#define BOLT_GAP       PX(4)       /* not in the mockup: today's charging bolt, kept */
+#define BOLT_HW        PX(4)
+#define BOLT_HH        PX(7)
 
-#define TIME_H         52      /* the digits' line box: line-height 1 */
-#define TIME_GAP       2
-#define AMPM_H         18      /* 15 px at the normal line height */
-#define AMPM_SPACE     2       /* 0.14 em of 15 px */
-#define NEXT_BELOW     22      /* the next-alarm line's centre under AM/PM's */
-#define TEXT_SOFT      14.0f   /* the mockup's 14 px text-shadow, as a fade */
+#define TIME_H         PX(52)      /* the digits' line box: line-height 1 */
+#define TIME_GAP       PX(2)
+#define AMPM_H         PX(18)      /* 15 px at the normal line height */
+#define AMPM_SPACE     PX(2)       /* 0.14 em of 15 px */
+#define NEXT_BELOW     PX(22)      /* the next-alarm line's centre under AM/PM's */
+#define TEXT_SOFT      PXF(14.0f)   /* the mockup's 14 px text-shadow, as a fade */
 
-#define DRIFT_PX       3.0f    /* burn-in drift: how far from centre, at most */
+#define DRIFT_PX       PXF(3.0f)    /* burn-in drift: how far from centre, at most */
 #define DRIFT_X_MS     (17u * 60u * 1000u)   /* and how slowly, per axis: two */
 #define DRIFT_Y_MS     (23u * 60u * 1000u)   /* periods that never line up */
 
@@ -193,7 +192,7 @@ static void status_row(lv_layer_t *L, const ui_clock_state_t *st, float ox, floa
     int32_t pct_w = 0;
     if (st->bat_valid) {
         snprintf(pct, sizeof(pct), "%d%%", st->bat_percent);
-        pct_w = ui_paint_text_width(&lv_font_montserrat_14, 0, pct);
+        pct_w = ui_paint_text_width(FONT_SMALL, 0, pct);
     }
     const int32_t bat_w = BAT_W + BAT_NUB_GAP + BAT_NUB_W;
     const int32_t bolt_w = (st->bat_valid && st->bat_charging) ? BOLT_GAP + 2 * BOLT_HW : 0;
@@ -222,14 +221,14 @@ static void status_row(lv_layer_t *L, const ui_clock_state_t *st, float ox, floa
     const int pc = st->bat_percent < 0 ? 0 : (st->bat_percent > 100 ? 100 : st->bat_percent);
     const float fw = (float)BAT_FILL_MAX * (float)pc / 100.0f;
     if (fw > 0.0f) {
-        const float fx = x + BAT_BORDER + 1, fy = by + BAT_BORDER + 1;
-        box(fx, fy, fx + fw, fy + BAT_FILL_H, 1.0f, 0.0f, fill);
+        const float fx = x + BAT_BORDER + PX(1), fy = by + BAT_BORDER + PX(1);
+        box(fx, fy, fx + fw, fy + BAT_FILL_H, PXF(1.0f), 0.0f, fill);
     }
     const float nx = x + BAT_W + BAT_NUB_GAP;
-    box(nx, mid - BAT_NUB_H * 0.5f, nx + BAT_NUB_W, mid + BAT_NUB_H * 0.5f, 1.0f, 0.0f, ink);
+    box(nx, mid - BAT_NUB_H * 0.5f, nx + BAT_NUB_W, mid + BAT_NUB_H * 0.5f, PXF(1.0f), 0.0f, ink);
     x += bat_w + STATUS_GAP;
 
-    ui_paint_text(L, &lv_font_montserrat_14, ink, (int32_t)(x + pct_w * 0.5f), (int32_t)mid, 0,
+    ui_paint_text(L, FONT_SMALL, ink, (int32_t)(x + pct_w * 0.5f), (int32_t)mid, 0,
                   true, pct);
     x += pct_w;
 
@@ -238,8 +237,8 @@ static void status_row(lv_layer_t *L, const ui_clock_state_t *st, float ox, floa
          * they join in a zig-zag. (Full-width wedges, as the 3 o'clock
          * indicator draws them, make a parallelogram at this size.) */
         const float bx = x + BOLT_GAP + BOLT_HW;
-        tri(bx + BOLT_HW, mid - BOLT_HH, bx - BOLT_HW, mid + 1, bx + 1, mid + 1, ink);
-        tri(bx - BOLT_HW, mid + BOLT_HH, bx + BOLT_HW, mid - 1, bx - 1, mid - 1, ink);
+        tri(bx + BOLT_HW, mid - BOLT_HH, bx - BOLT_HW, mid + PX(1), bx + PX(1), mid + PX(1), ink);
+        tri(bx - BOLT_HW, mid + BOLT_HH, bx + BOLT_HW, mid - PX(1), bx - PX(1), mid - PX(1), ink);
     }
 }
 
@@ -251,7 +250,7 @@ static void status_row(lv_layer_t *L, const ui_clock_state_t *st, float ox, floa
  * outside CLOCK_FACE_C +- 210 -- and the corners outside it are black for good.
  * About a sixth less of the frame goes over the panel's bus, five times a second.
  */
-#define CLOCK_HALF 210
+#define CLOCK_HALF PX(210)
 
 static void invalidate_clock(void)
 {
@@ -341,18 +340,18 @@ void ui_clock_frame(const ui_clock_state_t *st)
 
     /* The box the dots stay out of: the digits' ink, down to whatever line is
      * last under them. */
-    const int32_t tw = ui_paint_text_width(&font_clock_52, 0, hm);
+    const int32_t tw = ui_paint_text_width(FONT_CLOCK_DIGITS, 0, hm);
     int32_t dt, db;
-    ui_paint_ink_rows(&font_clock_52, '0', &dt, &db);
+    ui_paint_ink_rows(FONT_CLOCK_DIGITS, '0', &dt, &db);
     const int32_t time_bottom = time_cy + (db - dt) / 2;
     /* Under AM/PM, or under the digits in 24-hour, by the same step. */
-    const int32_t next_cy = st->h12 ? ampm_cy + NEXT_BELOW : time_bottom + NEXT_BELOW - 6;
+    const int32_t next_cy = st->h12 ? ampm_cy + NEXT_BELOW : time_bottom + NEXT_BELOW - PX(6);
     int32_t half_w = tw / 2;
-    float fy1 = (float)(st->h12 ? ampm_cy + 6 : time_bottom);
+    float fy1 = (float)(st->h12 ? ampm_cy + PX(6) : time_bottom);
     if (has_next) {
-        const int32_t nw = ui_paint_text_width(&lv_font_montserrat_14, 0, st->next);
+        const int32_t nw = ui_paint_text_width(FONT_SMALL, 0, st->next);
         half_w = nw / 2 > half_w ? nw / 2 : half_w;
-        fy1 = (float)(next_cy + 6);
+        fy1 = (float)(next_cy + PX(6));
     }
     const float fx0 = (float)(cx - half_w), fx1 = (float)(cx + half_w);
     const float fy0 = (float)(time_cy - (db - dt) / 2);
@@ -376,13 +375,13 @@ void ui_clock_frame(const ui_clock_state_t *st)
     lv_layer_t layer;
     lv_canvas_init_layer(s_canvas, &layer);
     status_row(&layer, st, ox, oy, c_status, c_status_off, c_fill);
-    ui_paint_text(&layer, &font_clock_52, c_digits, cx, time_cy, 0, true, hm);
+    ui_paint_text(&layer, FONT_CLOCK_DIGITS, c_digits, cx, time_cy, 0, true, hm);
     if (st->h12) {
-        ui_paint_text(&layer, &font_clock_15, c_status, cx, ampm_cy, AMPM_SPACE, true,
+        ui_paint_text(&layer, FONT_CLOCK_AMPM, c_status, cx, ampm_cy, AMPM_SPACE, true,
                       st->hh < 12 ? "AM" : "PM");
     }
     if (has_next) {
-        ui_paint_text(&layer, &lv_font_montserrat_14, c_next, cx, next_cy, 0, true, st->next);
+        ui_paint_text(&layer, FONT_SMALL, c_next, cx, next_cy, 0, true, st->next);
     }
     lv_canvas_finish_layer(s_canvas, &layer);
     invalidate_clock();
@@ -407,11 +406,11 @@ void ui_clock_frame(const ui_clock_state_t *st)
  * buttons under the time. Everything else -- the status row, the drift, the
  * text fade -- is the clock's.
  */
-#define SW_TIME_DY      (-10)   /* the digits' centre, from the panel's */
-#define SW_LINE_DY      29
-#define SW_BTN_DX       35
-#define SW_BTN_DY       143
-#define SW_BTN_R        25.0f
+#define SW_TIME_DY      PX(-10)   /* the digits' centre, from the panel's */
+#define SW_LINE_DY      PX(29)
+#define SW_BTN_DX       PX(35)
+#define SW_BTN_DY       PX(143)
+#define SW_BTN_R        PXF(25.0f)
 #define SW_PAUSED_A     0.5f    /* "the orb stops and dims" */
 
 void ui_clock_stopwatch_frame(const ui_clock_state_t *st, const sw_t *sw, int pressed)
@@ -460,12 +459,12 @@ void ui_clock_stopwatch_frame(const ui_clock_state_t *st, const sw_t *sw, int pr
      * sitting on the same ink bottom. */
     const int32_t cx = (int32_t)lroundf(CLOCK_FACE_C + ox);
     const int32_t cy = (int32_t)lroundf(CLOCK_FACE_C + oy);
-    const int32_t wb = ui_paint_text_width(&font_clock_52, 0, big);
-    const int32_t ws = small[0] ? ui_paint_text_width(&font_panel_28, 0, small) : 0;
+    const int32_t wb = ui_paint_text_width(FONT_CLOCK_DIGITS, 0, big);
+    const int32_t ws = small[0] ? ui_paint_text_width(FONT_PANEL_M, 0, small) : 0;
     const int32_t x0 = cx - (wb + ws) / 2;
     int32_t bt, bb, stp, sbt;
-    ui_paint_ink_rows(&font_clock_52, '0', &bt, &bb);
-    ui_paint_ink_rows(&font_panel_28, '0', &stp, &sbt);
+    ui_paint_ink_rows(FONT_CLOCK_DIGITS, '0', &bt, &bb);
+    ui_paint_ink_rows(FONT_PANEL_M, '0', &stp, &sbt);
     const int32_t time_cy = cy + SW_TIME_DY;
     const int32_t ink_bottom = time_cy + (bb - bt) / 2;
     const int32_t small_cy = ink_bottom - (sbt - stp) / 2;
@@ -484,8 +483,8 @@ void ui_clock_stopwatch_frame(const ui_clock_state_t *st, const sw_t *sw, int pr
     const int32_t line_cy = cy + SW_LINE_DY;
 
     /* The dots stay off the digits and the line under them. */
-    const float fx0 = (float)(x0 - 4), fx1 = (float)(x0 + wb + ws + 4);
-    const float fy0 = (float)(time_cy - (bb - bt) / 2), fy1 = (float)(line_cy + 8);
+    const float fx0 = (float)(x0 - PX(4)), fx1 = (float)(x0 + wb + ws + PX(4));
+    const float fy0 = (float)(time_cy - (bb - bt) / 2), fy1 = (float)(line_cy + PX(8));
 
     /* The seconds ring is the clock's minute ring, counting seconds; the hour
      * ring (dots 60..71 and its halo) is not drawn. */
@@ -521,24 +520,24 @@ void ui_clock_stopwatch_frame(const ui_clock_state_t *st, const sw_t *sw, int pr
     lv_layer_t layer;
     lv_canvas_init_layer(s_canvas, &layer);
     status_row(&layer, st, ox, oy, c_status, c_status_off, c_fill);
-    ui_paint_text(&layer, &font_clock_52, c_digits, x0 + wb / 2, time_cy, 0, true, big);
+    ui_paint_text(&layer, FONT_CLOCK_DIGITS, c_digits, x0 + wb / 2, time_cy, 0, true, big);
     if (small[0]) {
-        ui_paint_text(&layer, &font_panel_28, c_status, x0 + wb + ws / 2, small_cy, 0, true, small);
+        ui_paint_text(&layer, FONT_PANEL_M, c_status, x0 + wb + ws / 2, small_cy, 0, true, small);
     }
     if (sw->laps > 0) {
         /* "LAP 1 · 11:53.36", the dot drawn: the 14 px face has no U+00B7. */
         char lap_t[24];
         snprintf(lap_t, sizeof(lap_t), "%s%s", lap_big, lap_small);
-        const lv_font_t *f = &lv_font_montserrat_14;
+        const lv_font_t *f = FONT_SMALL;
         const int32_t wl = ui_paint_text_width(f, AMPM_SPACE, line);
         const int32_t wr = ui_paint_text_width(f, AMPM_SPACE, lap_t);
-        const int32_t lx0 = cx - (wl + 18 + wr) / 2;
+        const int32_t lx0 = cx - (wl + PX(18) + wr) / 2;
         ui_paint_text(&layer, f, c_status, lx0 + wl / 2, line_cy, AMPM_SPACE, true, line);
-        disc((float)(lx0 + wl + 9), (float)line_cy + 0.5f, 0.0f, 1.5f, c_status, 1.0f);
-        ui_paint_text(&layer, f, c_status, lx0 + wl + 18 + wr / 2, line_cy, AMPM_SPACE, true,
+        disc((float)(lx0 + wl + PX(9)), (float)line_cy + 0.5f, 0.0f, PXF(1.5f), c_status, 1.0f);
+        ui_paint_text(&layer, f, c_status, lx0 + wl + PX(18) + wr / 2, line_cy, AMPM_SPACE, true,
                       lap_t);
     } else {
-        ui_paint_text(&layer, &lv_font_montserrat_14, c_status, cx, line_cy, AMPM_SPACE, true,
+        ui_paint_text(&layer, FONT_SMALL, c_status, cx, line_cy, AMPM_SPACE, true,
                       line);
     }
     ui_panel_kit_icon(&layer, sw->state == SW_RUNNING ? UI_ICON_FLAG : UI_ICON_RESET, pal.text,

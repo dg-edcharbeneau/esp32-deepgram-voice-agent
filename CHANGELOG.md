@@ -15,9 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the few facts the code branches on. The S3 build resolves to the same config
   and component versions as before. On the P4 board: setup portal, BOOT
   button, and conversations work, with Wi-Fi through the onboard ESP32-C6 over
-  SDIO (esp_hosted pinned to 1.4, bus at 20 MHz; 40 MHz stalled). The panel,
-  clock and fonts are still drawn at 466 x 466, and there is no P4 release
-  image yet. See [docs/boards.md](docs/boards.md).
+  SDIO (esp_hosted pinned to 1.4, bus at 20 MHz; 40 MHz stalled). Every
+  drawn screen (touch panel, clock, stopwatch, ring screen, Echo, spectrum)
+  scales from the 466 px design to the P4's 800 px panel through
+  `main/ui_scale.h`, with a font set generated at that scale; the S3 compiles
+  to the same code as before. There is no P4 release image yet. See
+  [docs/boards.md](docs/boards.md).
 
 ### Fixed
 

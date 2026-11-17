@@ -53,3 +53,8 @@
 
 /* Square panels, both of them: the panel's side in pixels. */
 #define BOARD_PANEL_SIZE BSP_LCD_H_RES
+
+/* The drawn screens are laid out for PANEL_SIZE, which main/CMakeLists.txt sets
+ * per target (see ui_scale.h). The BSP knows the real panel; they must agree. */
+_Static_assert(BSP_LCD_H_RES == PANEL_SIZE && BSP_LCD_V_RES == PANEL_SIZE,
+               "PANEL_SIZE in main/CMakeLists.txt does not match this board's panel");
