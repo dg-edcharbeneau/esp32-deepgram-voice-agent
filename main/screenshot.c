@@ -10,6 +10,7 @@
  * 434 kB or less, and the serial link is the slow part.
  */
 #include "screenshot.h"
+#include "board.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,8 +24,9 @@
 
 static const char *TAG = "shot";
 
-#define MAX_W 466
-#define MAX_H 466
+/* The whole panel, whichever board: 466 on the S3, 800 on the P4. */
+#define MAX_W BOARD_PANEL_SIZE
+#define MAX_H BOARD_PANEL_SIZE
 #define RAW_PER_LINE 96   /* bytes of payload per printed line: 24 runs */
 
 static uint16_t *s_buf;          /* PSRAM: the copied frame */

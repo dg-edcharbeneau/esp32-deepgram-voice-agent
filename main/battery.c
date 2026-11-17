@@ -6,7 +6,7 @@
 
 #if CONFIG_BATTERY
 
-#include "bsp/esp32_s3_touch_amoled_1_75c.h"
+#include "board.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"

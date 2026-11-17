@@ -1,0 +1,124 @@
+# Boards
+
+One firmware, two boards. The IDF target picks the board: there is one board
+per chip, so nothing else needs choosing.
+
+| | ESP32-S3 | ESP32-P4 |
+|---|---|---|
+| Board | Waveshare ESP32-S3-Touch-AMOLED-1.75C | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C |
+| Panel | 466 x 466 round AMOLED, CO5300 over QSPI | 800 x 800 round IPS, JD9365 over MIPI-DSI |
+| Audio | ES8311 out, ES7210 in | the same two chips |
+| Wi-Fi | on the chip | on an ESP32-C6, reached over SDIO |
+| Battery | AXP2101 fuel gauge | none |
+| BOOT button | GPIO 0 | GPIO 35 |
+| Status | the reference board | **in progress**: holds conversations, but the panel, clock and fonts are still drawn at 466 x 466 in the top-left corner |
+
+## Building for a board
+
+```bash
+idf.py set-target esp32s3     # or esp32p4
+idf.py build
+```
+
+Changing the target throws away `sdkconfig` and the build folder. Everything a
+board needs is selected from that one choice:
+
+| What | Where |
+|---|---|
+| Config | `sdkconfig.defaults` for both boards, then `sdkconfig.defaults.esp32s3` or `sdkconfig.defaults.esp32p4` on top; IDF loads the second one by target |
+| Components | `main/idf_component.yml`: the BSP, and on the P4 the Wi-Fi components, each behind a `target ==` rule |
+| Lock file | `dependencies.lock` for the S3, `dependencies.lock.esp32p4` for the P4 (top-level `CMakeLists.txt`). Separate, so resolving one board never moves the other's versions |
+| Code | `main/board.h`: the BSP header, plus the few facts the code branches on (`BOARD_PANEL_CO5300`, `BOARD_PANEL_SIZE`, `BOARD_PM_MIN_FREQ_MHZ`, `BOARD_BOOT_GPIO`) |
+
+Code outside `board.h` should test those facts, not the chip name. The facts
+say what differs; the chip name doesn't.
+
+## The ESP32-P4 board
+
+### Chip revision
+
+The board tested so far has **P4 revision v1.3**. IDF 5.5.5 builds for revision
+3.1 and later by default, and that image does not boot on v1.x. The two are
+incompatible in both directions, so `sdkconfig.defaults.esp32p4` selects
+`CONFIG_ESP32P4_SELECTS_REV_LESS_V3` and the build runs on v1.x boards only.
+`esptool.py chip_id` prints the revision. A board with v3.x silicon would need
+its own build.
+
+### Wi-Fi through the C6
+
+The P4 has no radio. Wi-Fi runs on the ESP32-C6 next to it, and the P4 drives
+it over SDIO through `esp_hosted` and `esp_wifi_remote`. The `esp_wifi_*` calls
+in this repo are unchanged, and the setup portal works over the link too.
+
+**The host components are pinned to `esp_hosted 1.4.*` and
+`esp_wifi_remote 0.14.*`**, the versions Waveshare's own examples use. The C6
+ships with esp_hosted firmware that reports version `0.0.0`. Against it, host
+3.1.0 connects, scans and raises the setup network, then stalls every TLS
+handshake: the C6 sends frames of 2-3 kB, and that host drops anything over
+1536 B. No host setting fixes it. The pin stays until the C6 firmware is
+updated.
+
+**The SDIO bus runs at 20 MHz, not the 40 MHz default.** At 40 MHz the link
+stalled under steady agent traffic: `send queue full`, then
+`Could not lock ws-client`, then no DNS or TLS at all, while the C6 still
+reported that it was connected. Back-to-back sessions of about 40 s each on one
+access point:
+
+| SDIO clock | Display | Result |
+|---|---|---|
+| 40 MHz | off | 9 sessions, then the stall |
+| 40 MHz | full-screen redraws | 2 sessions, then the stall; it never recovered |
+| 20 MHz | full-screen redraws | 19 of 19 over 15 minutes |
+
+An S3 on the same access point was clean throughout. The stall matches
+esp-hosted-mcu issue #221. 20 MHz on 4 lines carries about 10 MB/s, against the
+agent's ~64 kB/s.
+
+**The repo's lwIP settings matter here too.** Without the larger TCP send buffer
+and window in `sdkconfig.defaults`, every 20 ms audio send blocked ~160 ms and
+the uplink ran at about half real time. That looks like a link fault, and it
+isn't one.
+
+### Updating the C6 firmware
+
+Not done, and not needed while 20 MHz holds. If the stall comes back, the next
+step is esp_hosted 2.x on both ends: the C6 firmware and the host components
+together, then removing the pin. What's known so far:
+
+- **The safe route is the C6's own UART** (header J4: U0TXD, U0RXD, GND, IO9).
+  It allows a backup of the factory image first, and recovery if the new one
+  doesn't boot.
+- **An update from the P4 over SDIO works on the factory `0.0.0` firmware**
+  (esp-hosted-mcu #143), but it has no rollback. A C6 image that doesn't boot
+  leaves the board without Wi-Fi until J4 is reached.
+- **Build the C6 image for DIO flash, not QIO.** #143 records a bricked C6 from
+  that mistake.
+
+### Memory and flash
+
+**`CONFIG_SPIRAM_XIP_FROM_PSRAM` is required.** The panel's frame buffer is in
+PSRAM. Without XIP, every flash erase switches the cache off for tens of
+milliseconds. The conversation history erases one sector per agent sentence,
+and the panel flashed near-white each time. No DSI underrun is logged, and the
+frames LVGL draws are correct, so neither looks wrong in the log; count flashes
+against `history_store: saved` lines instead. The S3 has always had this
+setting, for its own reasons.
+
+### Power
+
+- **No battery.** The board has no fuel gauge in its BSP, so `CONFIG_BATTERY` is
+  off: no charge dots, and the agent's battery tool is compiled out.
+- **No light sleep.** Tickless idle is off, and deep idle goes with it. Light
+  sleep with the SDIO link up has never been measured.
+- **The CPU stays at 360 MHz.** The power manager's floor equals its ceiling
+  (`BOARD_PM_MIN_FREQ_MHZ`), because the S3's 80 MHz floor is not a valid
+  frequency on the P4.
+
+### Console and setup
+
+- **Console:** UART0 through a USB-UART bridge at 1 000 000 baud (GPIO 37/38).
+  Opening the port resets the board, even with DTR and RTS held low.
+- **Setup network name:** built from the base MAC, because the P4 has no Wi-Fi
+  MAC of its own. It reads `dg-agent-XXXX` like the S3's.
+- **Backlight:** the BSP starts it at 0 %, so `ui.c` sets the brightness
+  explicitly.

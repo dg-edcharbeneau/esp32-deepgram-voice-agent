@@ -47,6 +47,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/touch.h"
+#include "board.h"
 #include "esp_lv_adapter.h"
 #include "esp_lv_adapter_input.h"
 #include "esp_lcd_panel_io.h"
@@ -2787,6 +2788,11 @@ static void sleep_deepens(uint32_t now)
  * to be nothing (an INT pulse with no point) simply re-enters after it.
  */
 #if CONFIG_UI_DEEP_IDLE
+#if !BOARD_PANEL_CO5300
+/* Deep idle sleeps the panel with raw CO5300 commands over QSPI. Sent to any
+ * other panel they are garbage, so port this before turning it on there. */
+#error "CONFIG_UI_DEEP_IDLE drives a CO5300 panel; this board has none. See main/board.h."
+#endif
 #define DEEP_IDLE_REENTER_MS 10000
 #define PANEL_SLPIN  0x10
 #define PANEL_SLPOUT 0x11
@@ -3600,6 +3606,7 @@ static void gesture_event_cb(lv_event_t *e)
 
 /* ---------------- setup ---------------- */
 
+#if BOARD_PANEL_CO5300
 /* The CO5300 only accepts even start / odd end coordinates. bsp_display_start()
  * installs this; since we register the display ourselves, we must too. */
 static void rounder_event_cb(lv_event_t *e)
@@ -3610,6 +3617,7 @@ static void rounder_event_cb(lv_event_t *e)
     area->x2 = ((area->x2 >> 1) << 1) + 1;
     area->y2 = ((area->y2 >> 1) << 1) + 1;
 }
+#endif
 
 static lv_display_t *display_start(void)
 {
@@ -3627,6 +3635,7 @@ static lv_display_t *display_start(void)
 
     static esp_lcd_panel_handle_t panel;
     static esp_lcd_panel_io_handle_t panel_io;
+#if BOARD_PANEL_CO5300
     const bsp_display_config_t panel_cfg = {
         .max_transfer_sz = BSP_LCD_H_RES * DRAW_ROWS * BSP_LCD_BITS_PER_PIXEL / 8,
     };
@@ -3636,13 +3645,24 @@ static lv_display_t *display_start(void)
     if (bsp_display_new(&panel_cfg, &panel, &panel_io) != ESP_OK) {
         return NULL;
     }
+#else
+    /* MIPI-DSI: brings up the DSI bus and the JD9365. The P4 BSP's config struct
+     * has nothing to set, and its own bsp_display_start() passes NULL too. */
+    if (bsp_display_new(NULL, &panel, &panel_io) != ESP_OK) {
+        return NULL;
+    }
+#endif
     s_panel = panel;
 
     esp_lv_adapter_display_config_t disp_cfg = {
         .panel = panel,
         .panel_io = panel_io,
         .profile = {
+#if BOARD_PANEL_CO5300
             .interface = ESP_LV_ADAPTER_PANEL_IF_OTHER,
+#else
+            .interface = ESP_LV_ADAPTER_PANEL_IF_MIPI_DSI,
+#endif
             .rotation = ESP_LV_ADAPTER_ROTATE_0,
             .hor_res = BSP_LCD_H_RES,
             .ver_res = BSP_LCD_V_RES,
@@ -3652,14 +3672,23 @@ static lv_display_t *display_start(void)
             .require_double_buffer = false,
             .mono_layout = ESP_LV_ADAPTER_MONO_LAYOUT_NONE,
         },
+#if BOARD_PANEL_CO5300
         .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE,
+#else
+        /* What the P4 BSP's own bsp_display_start() uses for this panel. The
+         * DPI frame buffers live in PSRAM. How they sit alongside the faces'
+         * own canvases, which are sized for 466 px today, is not settled yet. */
+        .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL,
+#endif
         .te_sync = ESP_LV_ADAPTER_TE_SYNC_DISABLED(),
     };
     lv_display_t *disp = esp_lv_adapter_register_display(&disp_cfg);
     if (disp == NULL) {
         return NULL;
     }
+#if BOARD_PANEL_CO5300
     lv_display_add_event_cb(disp, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#endif
 
     /*
      * Touch, in the same slot bsp_display_start() uses. Only touch_flags is read
@@ -3673,7 +3702,13 @@ static lv_display_t *display_start(void)
      */
     static esp_lcd_touch_handle_t tp;
     bsp_display_cfg_t touch_cfg = {
+#if BOARD_PANEL_CO5300
         .touch_flags = { .swap_xy = 0, .mirror_x = 1, .mirror_y = 1 },
+#else
+        /* The P4 BSP's own pairing for ROTATE_0. Unverified on the panel until
+         * a tap is checked against where it lands (host/panel.sh cannot). */
+        .touch_flags = { .swap_xy = 0, .mirror_x = 0, .mirror_y = 0 },
+#endif
     };
     if (bsp_touch_new(&touch_cfg, &tp) != ESP_OK) {
         return NULL;
@@ -3696,11 +3731,28 @@ static lv_display_t *display_start(void)
      * is destructive enough to want a deliberate hold. */
     lv_indev_set_long_press_time(s_touch, 1000);
 
+#if BOARD_PANEL_CO5300
     /* Must follow bsp_display_new() -- brightness is a panel command over the
      * same io -- and precede the first flush. It sets full brightness itself. */
     if (bsp_display_brightness_init() != ESP_OK || esp_lv_adapter_start() != ESP_OK) {
         return NULL;
     }
+#else
+    /* A PWM backlight. bsp_display_new() already initialised it -- a second
+     * init reconfigures the same pin and LEDC warns "GPIO 26 is not usable" --
+     * and left it at 0 %, dark. Nothing else turns it up: the sleep code only
+     * sets brightness on a change, trusting init for the first one, which is
+     * true of the CO5300 above and not here. */
+    if (bsp_display_brightness_set(AWAKE_BRIGHTNESS_PCT) != ESP_OK ||
+        esp_lv_adapter_start() != ESP_OK) {
+        return NULL;
+    }
+    /* IDF's DPI driver reports a DSI underrun -- PSRAM too slow to feed the
+     * panel, which flashes it blue -- only from its ISR, via ESP_DRAM_LOGE. This
+     * line goes out the same way, so a log that shows it and no "underrun
+     * happens" lines really had none, rather than having nowhere to print them. */
+    ESP_DRAM_LOGI(TAG, "dsi: ISR log channel live (underruns would print here)");
+#endif
     return disp;
 }
 

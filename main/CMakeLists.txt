@@ -1,3 +1,13 @@
+# One board per IDF target; main/board.h includes the matching BSP header.
+idf_build_get_property(target IDF_TARGET)
+if(target STREQUAL "esp32s3")
+    set(board_bsp waveshare__esp32_s3_touch_amoled_1_75c)
+elseif(target STREQUAL "esp32p4")
+    set(board_bsp waveshare__esp32_p4_wifi6_touch_lcd_xc)
+else()
+    message(FATAL_ERROR "No board for IDF target ${target}. See main/board.h.")
+endif()
+
 idf_component_register(
     SRCS
         main.c
@@ -83,7 +93,7 @@ idf_component_register(
         mbedtls
         json
         esp_codec_dev
-        waveshare__esp32_s3_touch_amoled_1_75c
+        ${board_bsp}
         lvgl__lvgl
         espressif__esp_lvgl_adapter
         espressif__esp-dsp

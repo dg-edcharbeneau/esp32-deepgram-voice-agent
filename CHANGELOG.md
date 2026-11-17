@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A second board: the Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C**, built with
+  `idf.py set-target esp32p4`. The IDF target picks the board: per-target
+  `sdkconfig.defaults.<target>` files, `target ==` rules in
+  `main/idf_component.yml`, one lock file per target, and `main/board.h` for
+  the few facts the code branches on. The S3 build resolves to the same config
+  and component versions as before. On the P4 board: setup portal, BOOT
+  button, and conversations work, with Wi-Fi through the onboard ESP32-C6 over
+  SDIO (esp_hosted pinned to 1.4, bus at 20 MHz; 40 MHz stalled). The panel,
+  clock and fonts are still drawn at 466 x 466, and there is no P4 release
+  image yet. See [docs/boards.md](docs/boards.md).
+
 ### Fixed
 
 - **The setup page no longer shows a garbage timezone on a fresh board.**

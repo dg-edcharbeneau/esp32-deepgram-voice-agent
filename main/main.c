@@ -38,6 +38,7 @@
 #include "esp_pm.h"
 #include "driver/gpio.h"
 #include "bsp/esp-bsp.h"
+#include "board.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -895,7 +896,9 @@ static void hold_pins_in_sleep(void)
         BSP_POWER_AMP_IO,   /* amplifier enable: low when silent */
         BSP_LCD_RST,        /* panel reset */
         BSP_LCD_TOUCH_RST,  /* touch reset (shared with the panel's) */
+#if BOARD_PANEL_CO5300
         BSP_LCD_CS,         /* QSPI chip select: high when idle */
+#endif
     };
     for (size_t i = 0; i < sizeof(HELD) / sizeof(HELD[0]); i++) {
         gpio_sleep_sel_dis(HELD[i]);
@@ -930,12 +933,12 @@ void app_main(void)
      *
      * 80 MHz is the floor on purpose: below it the APB clock falls from 80 MHz,
      * and with it the console UART and the peripheral timings everything else
-     * was built against.
+     * was built against. The floor is per board (BOARD_PM_MIN_FREQ_MHZ).
      */
     {
         const esp_pm_config_t pm = {
             .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
-            .min_freq_mhz = 80,
+            .min_freq_mhz = BOARD_PM_MIN_FREQ_MHZ,
 #if CONFIG_FREERTOS_USE_TICKLESS_IDLE
             .light_sleep_enable = true,
 #else

@@ -7,6 +7,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "soc/soc_caps.h"
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -532,7 +533,14 @@ const char *wifi_prov_ap_name(void)
 {
     if (s_ap_name[0] == '\0') {
         uint8_t mac[6] = {0};
+#if SOC_WIFI_SUPPORTED
         esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+#else
+        /* No radio on this chip (the P4's Wi-Fi is a coprocessor), so no
+         * SoftAP MAC to derive. The chip's own base MAC is just as unique, and
+         * the name only has to tell two devices apart. */
+        esp_read_mac(mac, ESP_MAC_BASE);
+#endif
         snprintf(s_ap_name, sizeof(s_ap_name), "dg-agent-%02X%02X", mac[4], mac[5]);
     }
     return s_ap_name;

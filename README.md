@@ -121,6 +121,7 @@ Swipe to it from the stopwatch or say "let's play Echo" —
 | [docs/clock.md](docs/clock.md) | the clock, timezones, timers and alarms, and what happens when one rings |
 | [docs/architecture.md](docs/architecture.md) | the module map: what runs on which task, and the one rule the layout defends |
 | [docs/build.md](docs/build.md) | prerequisites, menuconfig, ports, and where every file lives |
+| [docs/boards.md](docs/boards.md) | the two supported boards, how the build picks one, and what is different on the ESP32-P4 |
 | [docs/wifi-setup.md](docs/wifi-setup.md) | every way to get credentials onto the device, and why it will not connect |
 | [docs/verifying-a-boot.md](docs/verifying-a-boot.md) | reading the serial log and the counters |
 | [docs/display.md](docs/display.md) | the two faces, their RAM budget, and the display test |
