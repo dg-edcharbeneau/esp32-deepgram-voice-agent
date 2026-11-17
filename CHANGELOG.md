@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The setup page no longer shows a garbage timezone on a fresh board.**
+  `clock_tz_saved()` returned early when NVS had never held the clock's
+  namespace, leaving the caller's buffer untouched, and the portal sent that
+  stack memory to the page as the saved zone. It now empties the buffer first.
 - **The agent no longer interrupts itself when the canceller misadapts.**
   During playback, a block whose post-AEC peak is louder than the raw
   microphone can no longer open the uplink VAD gate. Cancellation only
