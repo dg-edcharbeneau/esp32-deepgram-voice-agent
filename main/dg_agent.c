@@ -28,6 +28,8 @@
 #include "faces.h"
 #include "history_store.h"
 #include "orb_colors.h"
+#include "net_probe.h"
+#include "wifi_wedge.h"
 #include "session_ctl.h"
 #include "ui.h"
 #include "voices.h"
@@ -3340,6 +3342,7 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "socket open");
+        wifi_wedge_note_link_ok();       /* P4: this association carries traffic */
         set_state(DG_AGENT_CONNECTED);
         /* Settings first, before anything else, or the server ignores us. */
         send_settings();
@@ -3365,6 +3368,8 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
          */
         ESP_LOGE(TAG, "transport error: %.*s",
                  ev->data_len, ev->data_ptr ? ev->data_ptr : "(no detail)");
+        net_probe_request("wserr");      /* bench only; see net_probe.h */
+        wifi_wedge_check_now("wserr");  /* P4: is the C6 still passing traffic */
         /*
          * ONE FIELD OF error_handle IS WORTH READING, and it is the one that
          * tells a rejected API key apart from a bad network. That distinction
@@ -3394,6 +3399,8 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
         ESP_LOGW(TAG, "socket closed (status %d)", ev->close_status_code);
+        net_probe_request("wsclosed");   /* bench only; see net_probe.h */
+        wifi_wedge_check_now("wsclosed");  /* P4: is the C6 still passing traffic */
         s_json_len = 0;
         s_json_dropping = false;
         /*

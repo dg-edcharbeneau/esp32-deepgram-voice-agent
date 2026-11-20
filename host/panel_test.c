@@ -3,6 +3,9 @@
  * the 36 px gaps and the rounded corners hit nothing, and that the colour
  * picker's dial holds exactly orb_colors.c's catalog, which is linked in.
  *
+ * Built once per panel size (host/panel.sh): probe points that are the design's
+ * own offsets go through PXF(); the one- and two-pixel edge probes do not.
+ *
  * With an argument it also writes the four page shapes as PGM images into that
  * directory -- white where a control paints, grey on its anti-aliased edge --
  * for looking at the geometry without a board.
@@ -42,34 +45,34 @@ static int hit(panel_page_t page, float x, float y)
 static void sound(void)
 {
     const float c = PANEL_C;
-    check("sound: upper-left quarter is mic +", hit(PANEL_PAGE_SOUND, c - 90, c - 90) == PANEL_HIT_MIC_UP);
-    check("sound: lower-left quarter is mic -", hit(PANEL_PAGE_SOUND, c - 90, c + 90) == PANEL_HIT_MIC_DOWN);
-    check("sound: upper-right quarter is volume +", hit(PANEL_PAGE_SOUND, c + 90, c - 90) == PANEL_HIT_VOL_UP);
-    check("sound: lower-right quarter is volume -", hit(PANEL_PAGE_SOUND, c + 90, c + 90) == PANEL_HIT_VOL_DOWN);
+    check("sound: upper-left quarter is mic +", hit(PANEL_PAGE_SOUND, c - PXF(90), c - PXF(90)) == PANEL_HIT_MIC_UP);
+    check("sound: lower-left quarter is mic -", hit(PANEL_PAGE_SOUND, c - PXF(90), c + PXF(90)) == PANEL_HIT_MIC_DOWN);
+    check("sound: upper-right quarter is volume +", hit(PANEL_PAGE_SOUND, c + PXF(90), c - PXF(90)) == PANEL_HIT_VOL_UP);
+    check("sound: lower-right quarter is volume -", hit(PANEL_PAGE_SOUND, c + PXF(90), c + PXF(90)) == PANEL_HIT_VOL_DOWN);
     check("sound: the centre of the cross hits nothing", hit(PANEL_PAGE_SOUND, c, c) == PANEL_HIT_NONE);
-    check("sound: inside the vertical gap hits nothing", hit(PANEL_PAGE_SOUND, c + 10, c - 120) == PANEL_HIT_NONE);
-    check("sound: the bridge (the value) is not a button", hit(PANEL_PAGE_SOUND, c + 120, c - 10) == PANEL_HIT_NONE);
-    check("sound: the bridge's top edge is not a button", hit(PANEL_PAGE_SOUND, c - 100, c - PANEL_BRIDGE + 1) == PANEL_HIT_NONE);
-    check("sound: just above the bridge is +", hit(PANEL_PAGE_SOUND, c - 100, c - PANEL_BRIDGE - 1) == PANEL_HIT_MIC_UP);
-    check("sound: just below the bridge is -", hit(PANEL_PAGE_SOUND, c + 100, c + PANEL_BRIDGE + 1) == PANEL_HIT_VOL_DOWN);
-    check("sound: just past the gap is inside", hit(PANEL_PAGE_SOUND, c + 19, c - 120) == PANEL_HIT_VOL_UP);
-    check("sound: outside the disc hits nothing", hit(PANEL_PAGE_SOUND, c + 150, c - 150) == PANEL_HIT_NONE);
+    check("sound: inside the vertical gap hits nothing", hit(PANEL_PAGE_SOUND, c + PXF(10), c - PXF(120)) == PANEL_HIT_NONE);
+    check("sound: the bridge (the value) is not a button", hit(PANEL_PAGE_SOUND, c + PXF(120), c - PXF(10)) == PANEL_HIT_NONE);
+    check("sound: the bridge's top edge is not a button", hit(PANEL_PAGE_SOUND, c - PXF(100), c - PANEL_BRIDGE + 1) == PANEL_HIT_NONE);
+    check("sound: just above the bridge is +", hit(PANEL_PAGE_SOUND, c - PXF(100), c - PANEL_BRIDGE - 1) == PANEL_HIT_MIC_UP);
+    check("sound: just below the bridge is -", hit(PANEL_PAGE_SOUND, c + PXF(100), c + PANEL_BRIDGE + 1) == PANEL_HIT_VOL_DOWN);
+    check("sound: just past the gap is inside", hit(PANEL_PAGE_SOUND, c + PXF(19), c - PXF(120)) == PANEL_HIT_VOL_UP);
+    check("sound: outside the disc hits nothing", hit(PANEL_PAGE_SOUND, c + PXF(150), c - PXF(150)) == PANEL_HIT_NONE);
     check("sound: the panel corner hits nothing", hit(PANEL_PAGE_SOUND, 5, 5) == PANEL_HIT_NONE);
     /* Where the vertical chord meets the arc, the 8 px rounding takes the tip. */
     const float chord_y = c - sqrtf(PANEL_R * PANEL_R - PANEL_GAP * PANEL_GAP);
     check("sound: the chord/arc corner tip is rounded off",
           hit(PANEL_PAGE_SOUND, c + PANEL_GAP + 1, chord_y + 1) == PANEL_HIT_NONE);
     check("sound: a few px in from that corner is inside",
-          hit(PANEL_PAGE_SOUND, c + PANEL_GAP + 6, chord_y + 10) == PANEL_HIT_VOL_UP);
+          hit(PANEL_PAGE_SOUND, c + PANEL_GAP + PXF(6), chord_y + PXF(10)) == PANEL_HIT_VOL_UP);
 }
 
 static void halves(void)
 {
     const float c = PANEL_C;
-    check("toggles: top half is noise reduction", hit(PANEL_PAGE_TOGGLES, c, c - 100) == PANEL_HIT_NS);
-    check("toggles: bottom half is clock format", hit(PANEL_PAGE_TOGGLES, c, c + 100) == PANEL_HIT_CLOCK_FMT);
+    check("toggles: top half is noise reduction", hit(PANEL_PAGE_TOGGLES, c, c - PXF(100)) == PANEL_HIT_NS);
+    check("toggles: bottom half is clock format", hit(PANEL_PAGE_TOGGLES, c, c + PXF(100)) == PANEL_HIT_CLOCK_FMT);
     check("toggles: the gap hits nothing", hit(PANEL_PAGE_TOGGLES, c, c) == PANEL_HIT_NONE);
-    check("toggles: the far left of the gap hits nothing", hit(PANEL_PAGE_TOGGLES, c - 190, c + 5) == PANEL_HIT_NONE);
+    check("toggles: the far left of the gap hits nothing", hit(PANEL_PAGE_TOGGLES, c - PXF(190), c + PXF(5)) == PANEL_HIT_NONE);
     /* Where the chord meets the arc, the 8 px rounding takes the sharp tip. */
     const float edge_x = c - sqrtf(PANEL_R * PANEL_R - PANEL_GAP * PANEL_GAP);
     check("toggles: the chord/arc corner tip is rounded off",
@@ -77,12 +80,12 @@ static void halves(void)
     check("toggles: the top of the disc is inside", hit(PANEL_PAGE_TOGGLES, c, c - PANEL_R + 2) == PANEL_HIT_NS);
     check("toggles: past the disc rim is outside", hit(PANEL_PAGE_TOGGLES, c, c - PANEL_R - 2) == PANEL_HIT_NONE);
 
-    check("alarms: bottom half is cancel", hit(PANEL_PAGE_ALARMS, c, c + 100) == PANEL_HIT_ALARM_CANCEL);
+    check("alarms: bottom half is cancel", hit(PANEL_PAGE_ALARMS, c, c + PXF(100)) == PANEL_HIT_ALARM_CANCEL);
     check("alarms: the left circle is previous",
           hit(PANEL_PAGE_ALARMS, c - PANEL_NAV_X, PANEL_NAV_Y) == PANEL_HIT_ALARM_PREV);
     check("alarms: the right circle is next",
           hit(PANEL_PAGE_ALARMS, c + PANEL_NAV_X, PANEL_NAV_Y) == PANEL_HIT_ALARM_NEXT);
-    check("alarms: the text in the top half hits nothing", hit(PANEL_PAGE_ALARMS, c, c - 60) == PANEL_HIT_NONE);
+    check("alarms: the text in the top half hits nothing", hit(PANEL_PAGE_ALARMS, c, c - PXF(60)) == PANEL_HIT_NONE);
     /* The circles must not reach into the cancel button or the disc's rim. */
     check("alarms: nav circles clear the cancel button",
           PANEL_NAV_Y + PANEL_NAV_R + PANEL_HIT_SLOP < PANEL_C + PANEL_GAP);

@@ -1,0 +1,65 @@
+# Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C (800x800 round MIPI-DSI, ES8311 +
+# ES7210, Wi-Fi through an ESP32-C6 over SDIO). Read after sdkconfig.defaults;
+# only what is specific to this board is here.
+
+# --- chip revision -----------------------------------------------------------
+# IDF 5.5.5 builds for P4 rev >= 3.1 by default, and that image does not boot on
+# the rev v1.3 silicon this board shipped with (esptool, 2026-11-16). The two
+# families are incompatible both ways, so a release built here runs on v1.x
+# boards only; a board with v3.x silicon needs its own build.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+
+# --- PSRAM / clocks ----------------------------------------------------------
+# 200 MHz is the PSRAM speed Waveshare's own rev1_3 examples use for this chip.
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+
+# Code and read-only data run from PSRAM, as on the S3. Without this, every
+# flash erase (one per agent sentence, from history_store) switches the cache
+# off for tens of milliseconds, and the DSI frame buffer lives in PSRAM: the
+# panel flashed near-white once per sentence (2026-11-17, 3 sentences gave
+# 3 flashes, 2 gave 2, and the orb canvas itself never went bright).
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
+# Light sleep is OFF here, unlike the S3. Deep idle on the S3 depends on it, but
+# on this board Wi-Fi lives on the C6 at the far end of an SDIO link, and light
+# sleep with that link up has never been measured. UI_DEEP_IDLE depends on
+# tickless idle, so it drops out with it. Revisit with a measurement.
+# CONFIG_FREERTOS_USE_TICKLESS_IDLE is not set
+
+# --- display -----------------------------------------------------------------
+CONFIG_BSP_LCD_TYPE_800_800_3_4_INCH=y
+CONFIG_BSP_LCD_COLOR_FORMAT_RGB565=y
+# The S3's status word is Montserrat 24; at this panel's scale that is 40
+# (main/ui_fonts.h). Its small text, 14, becomes 24, which the shared config
+# already builds.
+CONFIG_LV_FONT_MONTSERRAT_40=y
+
+# --- Wi-Fi -------------------------------------------------------------------
+# The P4 has no radio, so the S3's ESP_WIFI_*_BUFFER_NUM settings do not apply:
+# those buffers live on the C6 and come with its firmware. The lwIP settings in
+# sdkconfig.defaults DO apply, and they matter. Without them every 20 ms audio
+# send blocked ~160 ms and the uplink ran at about half real time; with them,
+# worst send 5 ms over three sessions (2026-11-16).
+#
+# The SDIO bus to the C6 at 20 MHz, not esp_hosted's 40 MHz default. At 40 MHz
+# the link stalled under sustained agent traffic -- "send queue full", then
+# "Could not lock ws-client", then no DNS or TLS ever again, with the C6 still
+# reporting association and nothing logged by esp_hosted. A soak of back-to-back
+# ~40 s sessions on one AP (2026-11-16):
+#
+#   40 MHz, no display             9 sessions, then the stall
+#   40 MHz, full-screen redraws    2 sessions, then the stall, never recovered
+#   20 MHz, full-screen redraws    19/19 over 15 min, worst send 452 ms
+#
+# An ESP32-S3 on the same AP was clean, so this is the P4/C6 link, not the
+# network. It matches esp-hosted-mcu issue #221 (SDIO overload wedges on 1.4.7).
+# 20 MHz on 4 bits is ~10 MB/s against the agent's ~64 kB/s. If the stall comes
+# back, the next step is updating the C6 firmware: see docs/boards.md.
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
+
+# --- power -------------------------------------------------------------------
+# No PMU on this board's BSP and no fuel gauge, so no battery. The get_battery
+# tool and the charge dots are compiled out with it.
+# CONFIG_BATTERY is not set

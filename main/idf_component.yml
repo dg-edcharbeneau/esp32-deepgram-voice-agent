@@ -3,8 +3,32 @@ dependencies:
   idf:
     version: '>=5.5'
   espressif/esp_websocket_client: '^1.5.0'
+  # One board per IDF target. Each BSP is resolved only for its own target, and
+  # main/board.h includes the matching header.
   waveshare/esp32_s3_touch_amoled_1_75c:
     version: "^3.0.0"
+    rules:
+      - if: "target == esp32s3"
+  waveshare/esp32_p4_wifi6_touch_lcd_xc:
+    version: "^3.0.1"
+    rules:
+      - if: "target == esp32p4"
+  # The P4 has no radio. Wi-Fi goes through the board's ESP32-C6 over SDIO, and
+  # these two must match the esp_hosted firmware Waveshare flashed onto the C6.
+  # PINNED to Waveshare's own ranges for IDF 5.x (their 04_wifistation example),
+  # and not by preference: esp_hosted 3.1.0 against the factory C6 brings up
+  # APSTA, scans and SoftAP fine, then drops every SDIO frame over 1536 B
+  # ("exceeds staging target"), which stalls TLS handshakes. No host Kconfig
+  # works around it. Measured on the board, 2026-11-16. Widen these only after
+  # updating the C6 firmware to match.
+  espressif/esp_hosted:
+    version: "1.4.*"
+    rules:
+      - if: "target == esp32p4"
+  espressif/esp_wifi_remote:
+    version: "0.14.*"
+    rules:
+      - if: "target == esp32p4"
   # LVGL is only a *private* dependency of the BSP and of esp_lvgl_adapter, so
   # its include path is not inherited -- main has to ask for it itself.
   lvgl/lvgl:

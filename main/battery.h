@@ -57,6 +57,10 @@ typedef struct {
      * the cell full, USB current is the system's own draw. */
     bool vbus;
     int dir;
+    /* The PMU has answered at least once, cell or no cell. With it, vbus is a
+     * real reading even while valid is false (no cell: the gauge reads 0xFF),
+     * which is how main.c tells "on USB" from "cannot tell". */
+    bool pmu_ok;
 } battery_status_t;
 
 /*
@@ -69,7 +73,8 @@ typedef struct {
 void battery_start(void);
 
 /*
- * Copies the last sample. Safe from any task; returns false and leaves *out
- * zeroed when the feature is compiled out or nothing has been read yet.
+ * Copies the last sample. Safe from any task; returns false (valid) when the
+ * feature is compiled out, nothing has been read yet, or there is no cell --
+ * vbus and pmu_ok are filled in regardless, and zero when compiled out.
  */
 bool battery_get(battery_status_t *out);

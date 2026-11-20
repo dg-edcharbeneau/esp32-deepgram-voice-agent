@@ -12,7 +12,7 @@
 
 #if CONFIG_CLOCK
 
-#include "bsp/esp32_s3_touch_amoled_1_75c.h"
+#include "board.h"
 #include "driver/i2c_master.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -330,8 +330,17 @@ static void fmt_save(uint8_t mode)
 
 bool clock_tz_saved(char *out, size_t cap)
 {
+    if (cap == 0) {
+        return false;
+    }
+    /* Empty before anything can fail. On a device whose NVS has never held
+     * this namespace -- a fresh board, or any board after the release image's
+     * merged flash -- nvs_open() fails, and the caller's buffer used to go back
+     * untouched: the portal then sent stack garbage as the saved timezone, and
+     * the page showed it instead of the phone's own. Seen on the P4 2026-11-16. */
+    out[0] = '\0';
     nvs_handle_t h;
-    if (cap == 0 || nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
         return false;
     }
     size_t len = cap;

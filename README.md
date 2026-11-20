@@ -37,6 +37,11 @@ A **Waveshare ESP32-S3-Touch-AMOLED-1.75C**, unmodified and out of the box:
 | Both codecs | one duplex I2S peripheral |
 | Extra input | BOOT button on GPIO 0 |
 
+It also runs on a **Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C**: an 800×800
+round IPS panel, the same two audio codecs, and Wi-Fi through an onboard
+ESP32-C6. Same conversation, same screens at the larger size; no battery.
+What differs, and why: **[docs/boards.md](docs/boards.md)**.
+
 ## Quick start — flash a release
 
 You do not need a toolchain to try it. Download
@@ -48,6 +53,10 @@ put the board in download mode, and:
 ```bash
 esptool.py -c esp32s3 -p /dev/YOUR-PORT write_flash 0x0 deepgram_agent-merged.bin
 ```
+
+On the P4 board, use `deepgram_agent-esp32p4-merged.bin` and `-c esp32p4`. That
+image needs P4 chip revision v1.x, which the boards have shipped with so far;
+`esptool.py -c esp32p4 -p /dev/YOUR-PORT chip_id` prints it.
 
 Released images carry **no API key and no Wi-Fi network** — see the next section.
 
@@ -66,10 +75,10 @@ There are four ways credentials can get in, and one precedence rule between them
 
 ```bash
 . /path/to/esp-idf/export.sh          # built and verified against v5.5.5
-idf.py set-target esp32s3
+idf.py set-target esp32s3             # or esp32p4 for the P4 board
 idf.py build
 idf.py flash
-idf.py -b 2000000 monitor
+idf.py -b 2000000 monitor             # 1000000 on the P4 board
 ```
 
 Everything in `menuconfig` → *Deepgram Agent Device* is optional; the portal asks
@@ -121,6 +130,7 @@ Swipe to it from the stopwatch or say "let's play Echo" —
 | [docs/clock.md](docs/clock.md) | the clock, timezones, timers and alarms, and what happens when one rings |
 | [docs/architecture.md](docs/architecture.md) | the module map: what runs on which task, and the one rule the layout defends |
 | [docs/build.md](docs/build.md) | prerequisites, menuconfig, ports, and where every file lives |
+| [docs/boards.md](docs/boards.md) | the two supported boards, how the build picks one, and what is different on the ESP32-P4 |
 | [docs/wifi-setup.md](docs/wifi-setup.md) | every way to get credentials onto the device, and why it will not connect |
 | [docs/verifying-a-boot.md](docs/verifying-a-boot.md) | reading the serial log and the counters |
 | [docs/display.md](docs/display.md) | the two faces, their RAM budget, and the display test |

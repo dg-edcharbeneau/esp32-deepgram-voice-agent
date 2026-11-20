@@ -6,8 +6,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A second board: the Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C**, built with
+  `idf.py set-target esp32p4`. The IDF target picks the board: per-target
+  `sdkconfig.defaults.<target>` files, `target ==` rules in
+  `main/idf_component.yml`, one lock file per target, and `main/board.h` for
+  the few facts the code branches on. The S3 build resolves to the same config
+  and component versions as before. On the P4 board: setup portal, BOOT
+  button, and conversations work, with Wi-Fi through the onboard ESP32-C6 over
+  SDIO (esp_hosted pinned to 1.4, bus at 20 MHz; 40 MHz stalled). Every
+  drawn screen (touch panel, clock, stopwatch, ring screen, Echo, spectrum)
+  scales from the 466 px design to the P4's 800 px panel through
+  `main/ui_scale.h`, with a font set generated at that scale; the S3 compiles
+  to the same code as before. CI builds both boards, and a release attaches
+  the P4's images next to the S3's, as `deepgram_agent-esp32p4-merged.bin`
+  and `deepgram_agent-esp32p4.bin`; the S3's file names are unchanged. The P4
+  image runs on chip revision v1.x only. See [docs/boards.md](docs/boards.md).
+
 ### Fixed
 
+- **Conversations on the P4 no longer lose their connection seconds in.** On
+  Wi-Fi 6 (802.11ax), the board's ESP32-C6 stopped sending a few seconds into
+  a conversation, on any access point. The P4 now joins with 802.11b/g/n, as
+  the S3 always has (`CONFIG_WIFI_STA_NO_11AX`, on by default). The 802.11ax
+  failures come and go for hours at a time. A 12-hour test switched between
+  the two settings every 5 minutes, on a freshly reset C6 each time: 34 of 72
+  cycles failed on 802.11ax, and none of 72 on b/g/n.
+- **The P4 recovers when its Wi-Fi co-processor wedges.** A few hours in, the
+  board's ESP32-C6 could stop passing traffic and stay stuck: associated with
+  nothing getting through, or refusing every rejoin for hours. Every tap failed
+  until the device was power-cycled. Rejoining doesn't clear it, but resetting
+  both chips does, so `CONFIG_WIFI_WEDGE_RESET` (default on, P4 only) now resets
+  the board when either form shows:
+  - rejoins refused for 3 minutes
+  - the gateway not answering pings twice in a row
+
+  A router that is simply off doesn't trigger a reset, and repeat resets back
+  off. It logs `EVT wifi wedge` lines and the count as `wd=` in TLM. See
+  [docs/boards.md](docs/boards.md#when-the-c6-wedges).
+- **A lost network is retried until it comes back.** The station's eight
+  back-to-back attempts were meant for the boot-time join, where running out
+  opens the setup portal. They applied to every later drop too, so a router
+  rebooting or an access point switched off for half a minute used them up in
+  about twenty seconds, and the device never tried again until it was power
+  cycled. Once it has joined, it now keeps trying after those eight: every
+  5, 10, 20, then 30 s, logged as `EVT wifi lost` and `EVT wifi back`. The
+  boot-time portal path is unchanged. On the P4, the once-a-second signal read
+  is skipped while unassociated, so esp_hosted no longer logs a refused RPC
+  warning every second for as long as the network is gone.
+
+- **The setup page no longer shows a garbage timezone on a fresh board.**
+  `clock_tz_saved()` returned early when NVS had never held the clock's
+  namespace, leaving the caller's buffer untouched, and the portal sent that
+  stack memory to the page as the saved zone. It now empties the buffer first.
+- **The setup page says why a save was refused.** It read any answer from the
+  board as success, so a refused save (an API key pasted with a trailing space,
+  say) showed "Saved. Restarting…" and nothing restarted. It now shows the
+  board's reason, as "Not saved: …". The board logs each save request and each
+  refusal, never the values.
 - **The agent no longer interrupts itself when the canceller misadapts.**
   During playback, a block whose post-AEC peak is louder than the raw
   microphone can no longer open the uplink VAD gate. Cancellation only
@@ -21,6 +78,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `main/orb_colors.c`.
 
 ### Changed
+
+- **Power saving runs on battery only.** On USB power a stopped device still
+  shows the orb clock, but at full brightness for good, at 10 fps instead of
+  5, with the CPU at full speed and the radio out of power
+  save. It no longer dims, turns the panel off, enters deep idle, or switches
+  the speaker amplifier off. Plugging in wakes the panel, and unplugging
+  starts the battery's dim and off timers from that moment. The P4 has no
+  battery, so it is always on external power and never dims or blanks. Fixed
+  along the way: a cell the charger has stopped on no longer gets the
+  battery-critical dim while plugged in, and an S3 on USB with no cell
+  attached is no longer treated as running on battery after 30 s. The TLM
+  line gains `ext=` (1 on external power).
 
 - **`AUDIO_PA_IDLE_OFF_MS` defaults to 60 s instead of 5 s.** Waking the
   amplifier disturbs the echo canceller: 5 of 10 wake-ups on the bench were

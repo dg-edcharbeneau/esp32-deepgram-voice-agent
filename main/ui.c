@@ -47,6 +47,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/touch.h"
+#include "board.h"
 #include "esp_lv_adapter.h"
 #include "esp_lv_adapter_input.h"
 #include "esp_lcd_panel_io.h"
@@ -67,6 +68,8 @@
 #endif
 #include "controls.h"
 #include "ui_panel.h"
+#include "ui_fonts.h"
+#include "ui_scale.h"
 #include "ui_tone.h"
 #if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
     CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST || CONFIG_UI_ECHO_SELFTEST
@@ -83,11 +86,12 @@ static const char *TAG = "ui";
  * The inner circle is the button. Touching anywhere else does nothing.
  *
  * A literal rather than a radius borrowed from whatever the spectrum face draws:
- * the hit area must not move when the face changes. 70 px is where it has always
- * been. The whole 466x466 screen used to be live, which made brushing the bezel
- * enough to end a conversation.
+ * the hit area must not move when the face changes. 70 px on the 466 px panel is
+ * where it has always been, and PX() keeps it the same share of a larger one.
+ * The whole screen used to be live, which made brushing the bezel enough to end
+ * a conversation.
  */
-#define BUTTON_RADIUS 70
+#define BUTTON_RADIUS PX(70)
 
 #if CONFIG_UI_SHOW_INDICATORS
 /*
@@ -102,7 +106,7 @@ static const char *TAG = "ui";
  * test actually uses. If the two ever disagree the drawing is wrong, which is
  * the only way an affordance like this stays worth trusting.
  */
-#define INDICATOR_WIDTH 2
+#define INDICATOR_WIDTH PX(2)
 
 /* Dim, because the resting state is "here is the button" and it sits under a
  * face that is already using the screen. */
@@ -202,20 +206,20 @@ static inline lv_color_t arc_tint(uint32_t rgb, int num, int den)
  * runtime check that they still lie on a circle.
  */
 #define BATTERY_DOTS  4
-#define BATTERY_DOT_R 5
+#define BATTERY_DOT_R PX(5)
 
 static const lv_point_t BATTERY_DOT_XY[BATTERY_DOTS] = {
-    {426, 181},  /* 75 deg */
-    {432, 216},  /* 85 deg */
-    {432, 250},  /* 95 deg -- 3 o'clock sits between these two */
-    {426, 285},  /* 105 deg */
+    {PX(426), PX(181)},  /* 75 deg */
+    {PX(432), PX(216)},  /* 85 deg */
+    {PX(432), PX(250)},  /* 95 deg -- 3 o'clock sits between these two */
+    {PX(426), PX(285)},  /* 105 deg */
 };
 
 /* The bolt continues the arc past the last dot. Half-width/half-height. */
-#define BATTERY_BOLT_X  414
-#define BATTERY_BOLT_Y  318
-#define BATTERY_BOLT_HW 4
-#define BATTERY_BOLT_HH 8
+#define BATTERY_BOLT_X  PX(414)
+#define BATTERY_BOLT_Y  PX(318)
+#define BATTERY_BOLT_HW PX(4)
+#define BATTERY_BOLT_HH PX(8)
 
 /*
  * THE ROW AS FIVE SMALL BOXES rather than one large one.
@@ -282,11 +286,11 @@ static inline lv_area_t battery_bolt_box(void)
  * The apex sits below that so the glyph's mass, not its lowest point, lands on
  * the mark.
  */
-#define SIGNAL_APEX_X   33
-#define SIGNAL_APEX_Y   244
+#define SIGNAL_APEX_X   PX(33)
+#define SIGNAL_APEX_Y   PX(244)
 
 /* The dot. Filled circle centred on the apex. */
-#define SIGNAL_DOT_R    3
+#define SIGNAL_DOT_R    PX(3)
 
 /*
  * The three arcs, OUTER radius each -- lv_draw_arc() puts the outer edge at
@@ -294,8 +298,8 @@ static inline lv_area_t battery_bolt_box(void)
  * the touch ring. Six px of pitch at three px of stroke leaves three px of gap,
  * which is what keeps the arcs from reading as one thick band at arm's length.
  */
-#define SIGNAL_ARC_W    3
-static const uint16_t SIGNAL_ARC_R[] = { 10, 16, 22 };
+#define SIGNAL_ARC_W    PX(3)
+static const uint16_t SIGNAL_ARC_R[] = { PX(10), PX(16), PX(22) };
 
 #define SIGNAL_ARCS (sizeof(SIGNAL_ARC_R) / sizeof(SIGNAL_ARC_R[0]))
 
@@ -391,6 +395,9 @@ static inline lv_area_t signal_box(void)
  * across a room, and at 15 % it was not (Ed's call). What saves power asleep is
  * the 5 fps and the radio's power save. The one sleep that still dims is the
  * battery-critical one, which exists to stretch the last few percent.
+ *
+ * ON BATTERY ONLY. On external power (s_ext_power) sleep is just the clock:
+ * no 5 fps, no slower CPU, no dimming, no panel off, no deep idle.
  *
  * 200 ms is 5 fps. The frame timer is the ONLY thing slowed: LVGL itself keeps
  * running, so the touch panel is polled at its usual rate and a tap is as
@@ -498,8 +505,8 @@ static inline lv_area_t signal_box(void)
  * circular mask with its quiet zone intact, and lifting it 30 px above centre
  * makes room for the network name underneath.
  */
-#define QR_SIZE   200
-#define QR_Y_LIFT 30
+#define QR_SIZE   PX(200)
+#define QR_Y_LIFT PX(30)
 
 /* ---------------- faces ---------------- */
 
@@ -529,6 +536,16 @@ static bool s_dimmed;            /* LVGL task only */
 static volatile int s_bri_pct = 100;   /* the brightness last set, for the TLM line */
 static uint32_t s_asleep_ms;           /* when the panel last fell asleep */
 static bool s_display_off;             /* blanked after CONFIG_UI_SLEEP_OFF_AFTER_MIN */
+/*
+ * External power, from main.c's read of the PMU (always true on a board with no
+ * battery). Every power saving here is for the battery only: on external power
+ * sleep still shows the orb clock, but at full brightness, at the board's
+ * clock rate, with the CPU held at full speed, and it never dims or goes off --
+ * so deep idle, which starts from a panel gone off, never begins either. True
+ * until told otherwise: the safe way round, as main.c's light-sleep lock is.
+ * Written by main's task, applied by the frame timer.
+ */
+static volatile bool s_ext_power = true;
 #if CONFIG_UI_DEEP_IDLE
 /* Deep idle (see deep_idle_enter): the panel's IO for its sleep commands, the
  * state, why it last ended, the task that ends it, and when. */
@@ -564,6 +581,7 @@ static volatile bool s_bench_display_off;
  * press puts the face back, and that press is nobody else's, so dismissing the
  * clock can never also end a conversation. LVGL task only.
  */
+/* Finger distances, so in panel pixels on both boards: see ui_scale.h. */
 #define CLOCK_SWIPE_BAND_PX 40   /* a press must start this close to the bottom edge */
 #define CLOCK_SWIPE_PX      80   /* and travel this far up */
 static bool s_clock_forced;
@@ -651,6 +669,9 @@ static void pm_awake(bool hold)
 #endif
 }
 
+/* Defined with the other state the main task hands over, further down. */
+static volatile bool s_stopped;
+
 static void set_frame_period(void)
 {
     static uint32_t set;
@@ -658,9 +679,18 @@ static void set_frame_period(void)
         return;
     }
     /* The stopwatch runs at the ring rate while it counts -- its centiseconds
-     * want frames -- and at the sleep rate while it stands still. */
+     * want frames -- and at the sleep rate while it stands still.
+     *
+     * On external power asleep is not a rate of its own: the clock runs at the
+     * board's rate (board.h) while the session is stopped, and at the sleep
+     * rate only when swiped up over a live session, whose echo canceller shares
+     * the core; anything else asleep -- the orb before the first time sync --
+     * runs at the awake rate. */
+    const bool rest = s_asleep || s_clock_forced;
     const uint32_t want = s_display_off                ? 1000
-                          : (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
+                          : (rest && !s_ext_power)     ? SLEEP_FRAME_MS
+                          : (rest && s_clock_shown)    ? (s_stopped ? BOARD_CLOCK_EXT_FRAME_MS
+                                                                    : SLEEP_FRAME_MS)
                           : s_ring_shown               ? RING_FRAME_MS
                           : s_sw_shown                 ? (sw_running() ? RING_FRAME_MS : SLEEP_FRAME_MS)
                                                        : FRAME_MS;
@@ -1266,6 +1296,11 @@ bool ui_is_asleep(void)
     return s_asleep;
 }
 
+void ui_set_external_power(bool external)
+{
+    s_ext_power = external;
+}
+
 void ui_set_stopped(bool stopped)
 {
     if (!stopped && s_stopped) {
@@ -1671,7 +1706,7 @@ static void draw_arc_status(uint32_t now)
         if (s_arc_drawn) {
             s_arc_drawn = false;
             lv_canvas_init_layer(canvas_obj, &layer);
-            arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
+            arc_text_wipe(&layer, s_arc_shown, FONT_STATUS);
             lv_canvas_finish_layer(canvas_obj, &layer);
             lv_obj_invalidate_area(canvas_obj, &s_arc_box);
             /* The centre label comes back in update_status_shown(), which
@@ -1696,13 +1731,13 @@ static void draw_arc_status(uint32_t now)
      */
     if (s_arc_drawn && s_arc_shown != s_arc_text) {
         lv_canvas_init_layer(canvas_obj, &layer);
-        arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
+        arc_text_wipe(&layer, s_arc_shown, FONT_STATUS);
         lv_canvas_finish_layer(canvas_obj, &layer);
         lv_obj_invalidate_area(canvas_obj, &s_arc_box);
     }
     s_arc_shown = s_arc_text;
 
-    if (!arc_text_box(s_arc_shown, &lv_font_montserrat_24, &s_arc_box)) {
+    if (!arc_text_box(s_arc_shown, FONT_STATUS, &s_arc_box)) {
         return;
     }
 
@@ -1713,8 +1748,8 @@ static void draw_arc_status(uint32_t now)
      * under the text continuously, and a glyph drawn over a moving picture
      * keeps that picture wherever the glyph has thinned. Same reasoning the
      * battery overlay records. */
-    arc_text_wipe(&layer, s_arc_shown, &lv_font_montserrat_24);
-    arc_text_draw(&layer, s_arc_shown, &lv_font_montserrat_24,
+    arc_text_wipe(&layer, s_arc_shown, FONT_STATUS);
+    arc_text_draw(&layer, s_arc_shown, FONT_STATUS,
                   lv_color_hex(ui_tone_ink(s_tint_rgb)), opa);
     lv_canvas_finish_layer(canvas_obj, &layer);
     lv_obj_invalidate_area(canvas_obj, &s_arc_box);
@@ -1851,8 +1886,8 @@ static void stopwatch_selftest(uint32_t now)
     switch (STEPS[k].what) {
     case 'o': s_sw_shown = true; ESP_LOGI(TAG, "EVT stopwatch selftest open"); break;
     case 'c': s_sw_shown = false; ESP_LOGI(TAG, "EVT stopwatch selftest done"); break;
-    case 'R': stopwatch_press(c + 35, c + 143); break;   /* the right button */
-    case 'L': stopwatch_press(c - 35, c + 143); break;   /* the left */
+    case 'R': stopwatch_press(c + PX(35), c + PX(143)); break;   /* the right button */
+    case 'L': stopwatch_press(c - PX(35), c + PX(143)); break;   /* the left */
     case 's': {
         static unsigned n;
         char tag[24];
@@ -2218,13 +2253,13 @@ static void draw_battery(void)
         const int32_t y = BATTERY_BOLT_Y;
 
         tri.p[0].x = x + BATTERY_BOLT_HW; tri.p[0].y = y - BATTERY_BOLT_HH;
-        tri.p[1].x = x - BATTERY_BOLT_HW; tri.p[1].y = y + 1;
-        tri.p[2].x = x + BATTERY_BOLT_HW; tri.p[2].y = y + 1;
+        tri.p[1].x = x - BATTERY_BOLT_HW; tri.p[1].y = y + PX(1);
+        tri.p[2].x = x + BATTERY_BOLT_HW; tri.p[2].y = y + PX(1);
         lv_draw_triangle(&layer, &tri);
 
         tri.p[0].x = x - BATTERY_BOLT_HW; tri.p[0].y = y + BATTERY_BOLT_HH;
-        tri.p[1].x = x + BATTERY_BOLT_HW; tri.p[1].y = y - 1;
-        tri.p[2].x = x - BATTERY_BOLT_HW; tri.p[2].y = y - 1;
+        tri.p[1].x = x + BATTERY_BOLT_HW; tri.p[1].y = y - PX(1);
+        tri.p[2].x = x - BATTERY_BOLT_HW; tri.p[2].y = y - PX(1);
         lv_draw_triangle(&layer, &tri);
     }
 
@@ -2396,7 +2431,7 @@ static void update_qr(void)
     }
 
     /* Below the code, still inside the circular mask. */
-    lv_obj_align(status_label, LV_ALIGN_CENTER, 0, QR_SIZE / 2 - QR_Y_LIFT + 30);
+    lv_obj_align(status_label, LV_ALIGN_CENTER, 0, QR_SIZE / 2 - QR_Y_LIFT + PX(30));
 }
 
 /*
@@ -2713,7 +2748,7 @@ static void apply_sleep(bool want)
             s_display_off = false;
         }
         set_frame_period();
-        pm_awake(!want);
+        pm_awake(!want || s_ext_power);
     }
     /* Also when only the dimming changed: a cell that turns critical while the
      * panel already sleeps dims it, and the charger un-dims it. */
@@ -2734,8 +2769,8 @@ static void apply_sleep(bool want)
  */
 static void sleep_deepens(uint32_t now)
 {
-    if (!s_asleep || s_dimmed) {
-        return;
+    if (!s_asleep || s_dimmed || s_ext_power) {
+        return;   /* on external power the clock stays up, bright, for good */
     }
 #if CONFIG_POWER_STATE_WALK
     if (s_bench_bri >= 0 || s_bench_display_off) {
@@ -2787,6 +2822,11 @@ static void sleep_deepens(uint32_t now)
  * to be nothing (an INT pulse with no point) simply re-enters after it.
  */
 #if CONFIG_UI_DEEP_IDLE
+#if !BOARD_PANEL_CO5300
+/* Deep idle sleeps the panel with raw CO5300 commands over QSPI. Sent to any
+ * other panel they are garbage, so port this before turning it on there. */
+#error "CONFIG_UI_DEEP_IDLE drives a CO5300 panel; this board has none. See main/board.h."
+#endif
 #define DEEP_IDLE_REENTER_MS 10000
 #define PANEL_SLPIN  0x10
 #define PANEL_SLPOUT 0x11
@@ -2938,6 +2978,24 @@ static void frame_timer_cb(lv_timer_t *timer)
 
     /* Before anything draws, like the face and colour switches below. */
     apply_sleep(s_sleep_want);
+    {
+        /* The power source's edge. Unplugged, the dim and off minutes count
+         * from now, not from when the panel fell asleep -- hours ago, perhaps,
+         * on the cable -- so pulling it does not blank the panel at once. */
+        static bool ext_applied = true;
+        const bool ext = s_ext_power;
+        if (ext != ext_applied) {
+            ext_applied = ext;
+            if (!ext) {
+                s_asleep_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            }
+            pm_awake(!s_asleep || ext);
+            ESP_LOGI(TAG, "EVT display power %s", ext ? "external" : "battery");
+        }
+    }
+    /* Every frame: the clock's rate follows inputs (the clock taking the
+     * screen, the session stopping) that change without calling it. */
+    set_frame_period();
 #if CONFIG_UI_DEEP_IDLE
     if (s_wake_pending && !s_asleep) {
         s_wake_pending = false;   /* applied: the main loop sees the wake edge */
@@ -3600,6 +3658,7 @@ static void gesture_event_cb(lv_event_t *e)
 
 /* ---------------- setup ---------------- */
 
+#if BOARD_PANEL_CO5300
 /* The CO5300 only accepts even start / odd end coordinates. bsp_display_start()
  * installs this; since we register the display ourselves, we must too. */
 static void rounder_event_cb(lv_event_t *e)
@@ -3610,6 +3669,7 @@ static void rounder_event_cb(lv_event_t *e)
     area->x2 = ((area->x2 >> 1) << 1) + 1;
     area->y2 = ((area->y2 >> 1) << 1) + 1;
 }
+#endif
 
 static lv_display_t *display_start(void)
 {
@@ -3627,6 +3687,7 @@ static lv_display_t *display_start(void)
 
     static esp_lcd_panel_handle_t panel;
     static esp_lcd_panel_io_handle_t panel_io;
+#if BOARD_PANEL_CO5300
     const bsp_display_config_t panel_cfg = {
         .max_transfer_sz = BSP_LCD_H_RES * DRAW_ROWS * BSP_LCD_BITS_PER_PIXEL / 8,
     };
@@ -3636,13 +3697,24 @@ static lv_display_t *display_start(void)
     if (bsp_display_new(&panel_cfg, &panel, &panel_io) != ESP_OK) {
         return NULL;
     }
+#else
+    /* MIPI-DSI: brings up the DSI bus and the JD9365. The P4 BSP's config struct
+     * has nothing to set, and its own bsp_display_start() passes NULL too. */
+    if (bsp_display_new(NULL, &panel, &panel_io) != ESP_OK) {
+        return NULL;
+    }
+#endif
     s_panel = panel;
 
     esp_lv_adapter_display_config_t disp_cfg = {
         .panel = panel,
         .panel_io = panel_io,
         .profile = {
+#if BOARD_PANEL_CO5300
             .interface = ESP_LV_ADAPTER_PANEL_IF_OTHER,
+#else
+            .interface = ESP_LV_ADAPTER_PANEL_IF_MIPI_DSI,
+#endif
             .rotation = ESP_LV_ADAPTER_ROTATE_0,
             .hor_res = BSP_LCD_H_RES,
             .ver_res = BSP_LCD_V_RES,
@@ -3652,14 +3724,23 @@ static lv_display_t *display_start(void)
             .require_double_buffer = false,
             .mono_layout = ESP_LV_ADAPTER_MONO_LAYOUT_NONE,
         },
+#if BOARD_PANEL_CO5300
         .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE,
+#else
+        /* What the P4 BSP's own bsp_display_start() uses for this panel. The
+         * DPI frame buffers live in PSRAM. How they sit alongside the faces'
+         * own canvases, which are sized for 466 px today, is not settled yet. */
+        .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL,
+#endif
         .te_sync = ESP_LV_ADAPTER_TE_SYNC_DISABLED(),
     };
     lv_display_t *disp = esp_lv_adapter_register_display(&disp_cfg);
     if (disp == NULL) {
         return NULL;
     }
+#if BOARD_PANEL_CO5300
     lv_display_add_event_cb(disp, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#endif
 
     /*
      * Touch, in the same slot bsp_display_start() uses. Only touch_flags is read
@@ -3673,7 +3754,13 @@ static lv_display_t *display_start(void)
      */
     static esp_lcd_touch_handle_t tp;
     bsp_display_cfg_t touch_cfg = {
+#if BOARD_PANEL_CO5300
         .touch_flags = { .swap_xy = 0, .mirror_x = 1, .mirror_y = 1 },
+#else
+        /* The P4 BSP's own pairing for ROTATE_0. Unverified on the panel until
+         * a tap is checked against where it lands (host/panel.sh cannot). */
+        .touch_flags = { .swap_xy = 0, .mirror_x = 0, .mirror_y = 0 },
+#endif
     };
     if (bsp_touch_new(&touch_cfg, &tp) != ESP_OK) {
         return NULL;
@@ -3696,11 +3783,28 @@ static lv_display_t *display_start(void)
      * is destructive enough to want a deliberate hold. */
     lv_indev_set_long_press_time(s_touch, 1000);
 
+#if BOARD_PANEL_CO5300
     /* Must follow bsp_display_new() -- brightness is a panel command over the
      * same io -- and precede the first flush. It sets full brightness itself. */
     if (bsp_display_brightness_init() != ESP_OK || esp_lv_adapter_start() != ESP_OK) {
         return NULL;
     }
+#else
+    /* A PWM backlight. bsp_display_new() already initialised it -- a second
+     * init reconfigures the same pin and LEDC warns "GPIO 26 is not usable" --
+     * and left it at 0 %, dark. Nothing else turns it up: the sleep code only
+     * sets brightness on a change, trusting init for the first one, which is
+     * true of the CO5300 above and not here. */
+    if (bsp_display_brightness_set(AWAKE_BRIGHTNESS_PCT) != ESP_OK ||
+        esp_lv_adapter_start() != ESP_OK) {
+        return NULL;
+    }
+    /* IDF's DPI driver reports a DSI underrun -- PSRAM too slow to feed the
+     * panel, which flashes it blue -- only from its ISR, via ESP_DRAM_LOGE. This
+     * line goes out the same way, so a log that shows it and no "underrun
+     * happens" lines really had none, rather than having nowhere to print them. */
+    ESP_DRAM_LOGI(TAG, "dsi: ISR log channel live (underruns would print here)");
+#endif
     return disp;
 }
 
@@ -3855,7 +3959,8 @@ static esp_err_t build_ui(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Canvas pixels must live in PSRAM; 466*466*2 is far past internal RAM. */
+    /* Canvas pixels must live in PSRAM; a full panel of RGB565 is far past
+     * internal RAM (424 kB on the S3, 1.25 MB on the P4). */
     uint32_t stride = lv_draw_buf_width_to_stride(BSP_LCD_H_RES, LV_COLOR_FORMAT_RGB565);
     uint32_t buf_size = stride * BSP_LCD_V_RES;
     void *pixels = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -3877,7 +3982,7 @@ static esp_err_t build_ui(void)
     status_label = lv_label_create(scr);
     lv_label_set_text(status_label, s_status);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(status_label, FONT_STATUS, LV_PART_MAIN);
     lv_obj_center(status_label);
 
 #if CONFIG_UI_SHOW_INDICATORS
@@ -3890,8 +3995,8 @@ static esp_err_t build_ui(void)
     hint_label = lv_label_create(scr);
     lv_label_set_text(hint_label, "");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 34);
+    lv_obj_set_style_text_font(hint_label, FONT_SMALL, LV_PART_MAIN);
+    lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, PX(34));
 #endif
 
     /*

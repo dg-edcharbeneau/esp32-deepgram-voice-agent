@@ -6,7 +6,7 @@
 
 #if CONFIG_BATTERY
 
-#include "bsp/esp32_s3_touch_amoled_1_75c.h"
+#include "board.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -112,6 +112,10 @@ static volatile int  s_chg_state = -1;
 static volatile bool s_low;
 static volatile bool s_vbus;
 static volatile int  s_dir;
+/* The PMU has answered at least once. Separate from s_valid, which also needs a
+ * cell: a board on USB with no cell attached reads VBUS fine and has no gauge,
+ * and main.c must still see that as external power. */
+static volatile bool s_pmu_ok;
 
 static esp_err_t reg_read(uint8_t reg, uint8_t *out, size_t len)
 {
@@ -254,6 +258,7 @@ static void sampler_task(void *arg)
         bool full = vbus && (chg == STATUS2_CHG_DONE);
         s_vbus = vbus;
         s_dir = (int)dir;
+        s_pmu_ok = true;
 
         if (gauge > 100) {
             /* 0xFF means the gauge has no answer -- typically no cell attached,
@@ -382,6 +387,7 @@ bool battery_get(battery_status_t *out)
     out->low = s_low;
     out->vbus = s_vbus;
     out->dir = s_dir;
+    out->pmu_ok = s_pmu_ok;
     return out->valid;
 }
 

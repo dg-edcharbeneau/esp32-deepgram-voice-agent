@@ -11,39 +11,42 @@
  * edge, split by 36 px gaps, every corner rounded to 8 px.
  *
  * Coordinates are screen pixels, (0,0) top left. Pass a pixel's CENTRE
- * (x + 0.5, y + 0.5) when painting.
+ * (x + 0.5, y + 0.5) when painting. The numbers below are the sheet's, on the
+ * 466 px panel; PXF() scales them to this board's (see ui_scale.h).
  */
 
 #include <stdbool.h>
 
-#define PANEL_SIZE      466
-#define PANEL_C         233.0f   /* centre, both axes */
-#define PANEL_R         199.0f   /* 233 - the 34 px edge inset */
-#define PANEL_GAP       18.0f    /* half of the 36 px gap */
-#define PANEL_CORNER    8.0f
+#include "ui_scale.h"
+
+#define PANEL_C         (PANEL_SIZE * 0.5f)   /* centre, both axes */
+#define PANEL_R         PXF(199.0f)   /* 233 - the 34 px edge inset */
+#define PANEL_GAP       PXF(18.0f)    /* half of the 36 px gap */
+#define PANEL_CORNER    PXF(8.0f)
 
 /*
  * The sound page's "linked" buttons: each side is one half of the disc, + above
  * and - below, joined by a band across the middle (the bridge) that shows the
  * value they share. The bridge is a readout, not a button.
  */
-#define PANEL_BRIDGE    38.0f    /* half its height: 76 px */
+#define PANEL_BRIDGE    PXF(38.0f)    /* half its height: 76 px */
 
 /*
  * The colour picker: one dial, a 60 px swatch per colour set evenly round it,
  * clockwise from twelve o'clock. Slot n is orb_colors.c's index n, so this is
  * that catalog's size -- host/panel.sh checks the two agree.
  */
-#define PANEL_RING_R    165.0f
-#define PANEL_SWATCH_R  30.0f
+#define PANEL_RING_R    PXF(165.0f)
+#define PANEL_SWATCH_R  PXF(30.0f)
 #define PANEL_SLOTS     7
 
 /* The alarm page's previous / next circles, either side of the time. */
-#define PANEL_NAV_X     150.0f   /* offset from centre */
-#define PANEL_NAV_Y     165.0f   /* absolute */
-#define PANEL_NAV_R     26.0f
+#define PANEL_NAV_X     PXF(150.0f)   /* offset from centre */
+#define PANEL_NAV_Y     PXF(165.0f)   /* absolute */
+#define PANEL_NAV_R     PXF(26.0f)
 
-/* A finger is wider than a swatch's edge is precise. Circles hit this far out. */
+/* A finger is wider than a swatch's edge is precise. Circles hit this far out.
+ * A finger's width, so not scaled: see ui_scale.h. */
 #define PANEL_HIT_SLOP  8.0f
 
 typedef enum {
