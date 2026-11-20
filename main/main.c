@@ -53,6 +53,8 @@
 #include "heap_probe.h"
 #include "orb_colors.h"
 #include "dg_agent.h"
+#include "net_probe.h"
+#include "wifi_wedge.h"
 #include "session_ctl.h"
 #include "ui.h"
 #if CONFIG_ECHO
@@ -145,6 +147,11 @@ static volatile bool s_bad_key_notice;
  * Thirty seconds AFTER the session stops, and the session itself stops after
  * CONFIG_SESSION_IDLE_TIMEOUT_S of quiet, so this lands about 45 s after anyone
  * last spoke. Long enough that a pause in a conversation never reaches it.
+ *
+ * ON EXTERNAL POWER THIS ONLY PUTS THE CLOCK UP. Every saving sleep brings --
+ * the slow frame rate and CPU, the dim, the panel off, deep idle, the radio's
+ * power save -- runs on battery only (see `ext` in the loop below); plugged
+ * in, the clock stays up at full brightness for good.
  *
  * PROVISIONING NEEDS NO GUARD, though it looks like it should: enter_provisioning()
  * is noreturn and runs before the loop below, so the timer can never engage while
@@ -1086,6 +1093,8 @@ void app_main(void)
      * the portal is about to overwrite.
      */
     ESP_ERROR_CHECK(session_ctl_start(&s_callbacks));
+    net_probe_init();                    /* bench only; see net_probe.h */
+    wifi_wedge_init();                   /* P4 only; see wifi_wedge.h */
     session_ctl_request_start();
 
     /*
@@ -1178,6 +1187,50 @@ void app_main(void)
         battery_status_t bat;
         const bool bat_ok = battery_get(&bat);
         ui_set_battery(bat.percent, bat.charging, bat.low, bat_ok);
+
+        /*
+         * EXTERNAL POWER OR BATTERY: the one switch every power saving hangs
+         * off. On external power nothing saves anything -- no dim, no panel
+         * off, no deep idle, no slower CPU, no radio power save, no amplifier
+         * switch-off -- because there is nothing to save; sleep only puts the
+         * clock up. All of it is for the battery.
+         *
+         *   no battery in the build (the P4) ..... external, always
+         *   PMU answered ......................... its VBUS bit: charging, full,
+         *                                          stopped and no cell at all
+         *                                          are all external
+         *   PMU silent ........................... external for 30 s from boot,
+         *                                          the safe way round, then
+         *                                          battery: a dead PMU on a cell
+         *                                          should not flatten it
+         */
+#if CONFIG_BATTERY
+        const bool ext = bat.pmu_ok ? bat.vbus : (now_ms() < 30000);
+#else
+        const bool ext = true;
+#endif
+        static bool prev_ext = true;   /* boot is taken as external, as above */
+        const bool plugged_in = ext && !prev_ext;
+        const bool unplugged = !ext && prev_ext;
+        if (ext != prev_ext) {
+            prev_ext = ext;
+            ESP_LOGI(TAG, "EVT power %s", ext ? "external" : "battery");
+        }
+        bool ext_saving_off = ext;
+#if CONFIG_POWER_STATE_WALK
+        {
+            /* The walk prices the battery's states, and runs on USB by design:
+             * the panel and the amplifier behave as on battery while it walks.
+             * The light-sleep lock below still follows the real reading, so
+             * the console it is read through stays up. */
+            const int w = walk_step(now_ms());
+            if (w >= 0 && w < WALK_N) {
+                ext_saving_off = false;
+            }
+        }
+#endif
+        ui_set_external_power(ext_saving_off);
+        audio_io_set_external_power(ext_saving_off);
 #if CONFIG_FREERTOS_USE_TICKLESS_IDLE
         {
             /*
@@ -1188,10 +1241,11 @@ void app_main(void)
              * that allowance only on a reconnect -- so late ticks spend it for
              * good, and the next miss reads as a disconnect. In deep idle that
              * took about 28 s, and the console died with the cable still in.
-             * The PMU knows whether USB power is present; that decides it. Held
-             * from boot until a reading says battery, so the first seconds are
-             * the safe way round -- or for 30 s, after which a board whose PMU
-             * does not answer is let go, and sleeps as the USB monitor allows.
+             * The PMU knows whether USB power is present; that decides it, as
+             * `ext` above. Held from boot until a reading says battery, so the
+             * first seconds are the safe way round -- or for 30 s, after which
+             * a board whose PMU does not answer is let go, and sleeps as the
+             * USB monitor allows.
              */
             static esp_pm_lock_handle_t ext_power;
             static bool held;
@@ -1200,15 +1254,13 @@ void app_main(void)
                 esp_pm_lock_acquire(ext_power);
                 held = true;
             }
-            const bool want = bat_ok ? bat.vbus : (now_ms() < 30000);
-            if (ext_power != NULL && want != held) {
-                held = want;
-                if (want) {
+            if (ext_power != NULL && ext != held) {
+                held = ext;
+                if (ext) {
                     esp_pm_lock_acquire(ext_power);
                 } else {
                     esp_pm_lock_release(ext_power);
                 }
-                ESP_LOGI(TAG, "EVT power %s", want ? "external: no light sleep" : "battery");
             }
         }
 #endif
@@ -1309,8 +1361,9 @@ void app_main(void)
          * power is worse than one that goes dark and keeps talking.
          */
 #if CONFIG_BATTERY
-        const bool bat_critical = (CONFIG_BATTERY_CRITICAL_PCT > 0) && bat_ok &&
-                                  !bat.charging &&
+        /* On battery, not merely "not charging": a cell the charger has
+         * stopped on (chgst 5) is on the cable all the same. */
+        const bool bat_critical = (CONFIG_BATTERY_CRITICAL_PCT > 0) && bat_ok && !ext &&
                                   bat.percent <= CONFIG_BATTERY_CRITICAL_PCT;
 #else
         const bool bat_critical = false;
@@ -1380,9 +1433,10 @@ void app_main(void)
             }
         }
 #endif
-        if (prev_asleep && !panel_asleep) {
+        if ((prev_asleep && !panel_asleep) || unplugged) {
             /* Something woke the panel -- a finger, almost always. Start counting
-             * again from now rather than sleeping straight back down. */
+             * again from now rather than sleeping straight back down. Taken off
+             * the cable counts too: someone just picked it up. */
             stopped_since_ms = now_ms();
         }
         prev_asleep = panel_asleep;
@@ -1443,6 +1497,16 @@ void app_main(void)
                    (now_ms() - stopped_since_ms) > SLEEP_AFTER_STOPPED_MS) {
             ui_set_sleep(true, false);
         }
+        if (plugged_in) {
+            /*
+             * The cable going in wakes the panel as a touch does -- out of a
+             * dim, a dark panel or deep idle -- and the clock comes back 30 s
+             * later, bright for good. After the ladder, so it outranks the
+             * critical-cleared request above on the same pass.
+             */
+            stopped_since_ms = now_ms();
+            ui_set_sleep(false, false);
+        }
 
         /*
          * THE RADIO FOLLOWS THE SESSION, AND SLEEPS DEEPER WITH THE PANEL. A live
@@ -1452,10 +1516,12 @@ void app_main(void)
          * but beacons and the hourly SNTP, so it naps between DTIMs (MIN_MODEM)
          * while the panel is awake, and sleeps through the listen interval
          * (MAX_MODEM) while it sleeps too. session_ctl puts it back to NONE
-         * itself before a session's first packet; this keeps it there.
+         * itself before a session's first packet; this keeps it there. On
+         * external power it never naps at all: there is nothing to save, and
+         * the next session's first packets find it listening.
          */
         {
-            const int want_ps = (session_ctl_is_running() || session_ctl_is_busy())
+            const int want_ps = (ext || session_ctl_is_running() || session_ctl_is_busy())
                                     ? WIFI_STA_PS_NONE
                                 : panel_asleep ? WIFI_STA_PS_MAX
                                                : WIFI_STA_PS_MIN;
@@ -1702,7 +1768,7 @@ walk_skip:
                  " ifree=%u iblocks=%u"
                  " ialloc=%u bat=%d mv=%d chg=%d chgst=%d"
                  " rssi=%d bars=%d ch=%d clk=%d alm=%d panel=%d"
-                 " slp=%d bri=%d ps=%d vbus=%d dir=%d di=%d drift=%d alate=%d",
+                 " slp=%d bri=%d ps=%d vbus=%d ext=%d dir=%d di=%d drift=%d alate=%d wd=%d",
                  (double)esp_timer_get_time() / 1000000.0,
                  t.face, t.face_changed ? "*" : "", t.behaviour, t.source,
                  !session_ctl_is_running() ? "stopped"
@@ -1765,9 +1831,12 @@ walk_skip:
                   * the radio's power save (0 none, 1 min, 2 max modem), USB
                   * power, and the charger's direction (0 standby, 1 charging,
                   * 2 discharging) -- with vbus=1 dir=0 the USB current is the
-                  * system's own draw. */
+                  * system's own draw. ext is the power source every power
+                  * saving follows (1 external: none of it runs). */
                  (int)ui_is_asleep(), ui_brightness_pct(), wifi_sta_power_save_mode(),
-                 bat_ok ? (int)bat.vbus : -1, bat_ok ? bat.dir : -1,
-                 (int)ui_deep_idle(), clock_drift_ms_per_hour(), alarms_worst_late_ms());
+                 bat_ok ? (int)bat.vbus : -1, (int)ext, bat_ok ? bat.dir : -1,
+                 (int)ui_deep_idle(), clock_drift_ms_per_hour(), alarms_worst_late_ms(),
+                 /* P4 wedge resets since power-on or a healthy half hour; see wifi_wedge.h */
+                 wifi_wedge_resets());
     }
 }

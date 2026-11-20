@@ -26,6 +26,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Conversations on the P4 no longer lose their connection seconds in.** On
+  Wi-Fi 6 (802.11ax), the board's ESP32-C6 stopped sending a few seconds into
+  a conversation, on any access point. The P4 now joins with 802.11b/g/n, as
+  the S3 always has (`CONFIG_WIFI_STA_NO_11AX`, on by default). The 802.11ax
+  failures come and go for hours at a time. A 12-hour test switched between
+  the two settings every 5 minutes, on a freshly reset C6 each time: 34 of 72
+  cycles failed on 802.11ax, and none of 72 on b/g/n.
+- **The P4 recovers when its Wi-Fi co-processor wedges.** A few hours in, the
+  board's ESP32-C6 could stop passing traffic and stay stuck: associated with
+  nothing getting through, or refusing every rejoin for hours. Every tap failed
+  until the device was power-cycled. Rejoining doesn't clear it, but resetting
+  both chips does, so `CONFIG_WIFI_WEDGE_RESET` (default on, P4 only) now resets
+  the board when either form shows:
+  - rejoins refused for 3 minutes
+  - the gateway not answering pings twice in a row
+
+  A router that is simply off doesn't trigger a reset, and repeat resets back
+  off. It logs `EVT wifi wedge` lines and the count as `wd=` in TLM. See
+  [docs/boards.md](docs/boards.md#when-the-c6-wedges).
+- **A lost network is retried until it comes back.** The station's eight
+  back-to-back attempts were meant for the boot-time join, where running out
+  opens the setup portal. They applied to every later drop too, so a router
+  rebooting or an access point switched off for half a minute used them up in
+  about twenty seconds, and the device never tried again until it was power
+  cycled. Once it has joined, it now keeps trying after those eight: every
+  5, 10, 20, then 30 s, logged as `EVT wifi lost` and `EVT wifi back`. The
+  boot-time portal path is unchanged. On the P4, the once-a-second signal read
+  is skipped while unassociated, so esp_hosted no longer logs a refused RPC
+  warning every second for as long as the network is gone.
+
 - **The setup page no longer shows a garbage timezone on a fresh board.**
   `clock_tz_saved()` returned early when NVS had never held the clock's
   namespace, leaving the caller's buffer untouched, and the portal sent that
@@ -48,6 +78,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `main/orb_colors.c`.
 
 ### Changed
+
+- **Power saving runs on battery only.** On USB power a stopped device still
+  shows the orb clock, but at full brightness for good, at 10 fps instead of
+  5, with the CPU at full speed and the radio out of power
+  save. It no longer dims, turns the panel off, enters deep idle, or switches
+  the speaker amplifier off. Plugging in wakes the panel, and unplugging
+  starts the battery's dim and off timers from that moment. The P4 has no
+  battery, so it is always on external power and never dims or blanks. Fixed
+  along the way: a cell the charger has stopped on no longer gets the
+  battery-critical dim while plugged in, and an S3 on USB with no cell
+  attached is no longer treated as running on battery after 30 s. The TLM
+  line gains `ext=` (1 on external power).
 
 - **`AUDIO_PA_IDLE_OFF_MS` defaults to 60 s instead of 5 s.** Waking the
   amplifier disturbs the echo canceller: 5 of 10 wake-ups on the bench were

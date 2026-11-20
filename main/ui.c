@@ -396,6 +396,9 @@ static inline lv_area_t signal_box(void)
  * the 5 fps and the radio's power save. The one sleep that still dims is the
  * battery-critical one, which exists to stretch the last few percent.
  *
+ * ON BATTERY ONLY. On external power (s_ext_power) sleep is just the clock:
+ * no 5 fps, no slower CPU, no dimming, no panel off, no deep idle.
+ *
  * 200 ms is 5 fps. The frame timer is the ONLY thing slowed: LVGL itself keeps
  * running, so the touch panel is polled at its usual rate and a tap is as
  * responsive asleep as awake. That is the property that rules out the adapter's
@@ -533,6 +536,16 @@ static bool s_dimmed;            /* LVGL task only */
 static volatile int s_bri_pct = 100;   /* the brightness last set, for the TLM line */
 static uint32_t s_asleep_ms;           /* when the panel last fell asleep */
 static bool s_display_off;             /* blanked after CONFIG_UI_SLEEP_OFF_AFTER_MIN */
+/*
+ * External power, from main.c's read of the PMU (always true on a board with no
+ * battery). Every power saving here is for the battery only: on external power
+ * sleep still shows the orb clock, but at full brightness, at the board's
+ * clock rate, with the CPU held at full speed, and it never dims or goes off --
+ * so deep idle, which starts from a panel gone off, never begins either. True
+ * until told otherwise: the safe way round, as main.c's light-sleep lock is.
+ * Written by main's task, applied by the frame timer.
+ */
+static volatile bool s_ext_power = true;
 #if CONFIG_UI_DEEP_IDLE
 /* Deep idle (see deep_idle_enter): the panel's IO for its sleep commands, the
  * state, why it last ended, the task that ends it, and when. */
@@ -656,6 +669,9 @@ static void pm_awake(bool hold)
 #endif
 }
 
+/* Defined with the other state the main task hands over, further down. */
+static volatile bool s_stopped;
+
 static void set_frame_period(void)
 {
     static uint32_t set;
@@ -663,9 +679,18 @@ static void set_frame_period(void)
         return;
     }
     /* The stopwatch runs at the ring rate while it counts -- its centiseconds
-     * want frames -- and at the sleep rate while it stands still. */
+     * want frames -- and at the sleep rate while it stands still.
+     *
+     * On external power asleep is not a rate of its own: the clock runs at the
+     * board's rate (board.h) while the session is stopped, and at the sleep
+     * rate only when swiped up over a live session, whose echo canceller shares
+     * the core; anything else asleep -- the orb before the first time sync --
+     * runs at the awake rate. */
+    const bool rest = s_asleep || s_clock_forced;
     const uint32_t want = s_display_off                ? 1000
-                          : (s_asleep || s_clock_forced) ? SLEEP_FRAME_MS
+                          : (rest && !s_ext_power)     ? SLEEP_FRAME_MS
+                          : (rest && s_clock_shown)    ? (s_stopped ? BOARD_CLOCK_EXT_FRAME_MS
+                                                                    : SLEEP_FRAME_MS)
                           : s_ring_shown               ? RING_FRAME_MS
                           : s_sw_shown                 ? (sw_running() ? RING_FRAME_MS : SLEEP_FRAME_MS)
                                                        : FRAME_MS;
@@ -1269,6 +1294,11 @@ void ui_set_sleep(bool sleep, bool dim)
 bool ui_is_asleep(void)
 {
     return s_asleep;
+}
+
+void ui_set_external_power(bool external)
+{
+    s_ext_power = external;
 }
 
 void ui_set_stopped(bool stopped)
@@ -2718,7 +2748,7 @@ static void apply_sleep(bool want)
             s_display_off = false;
         }
         set_frame_period();
-        pm_awake(!want);
+        pm_awake(!want || s_ext_power);
     }
     /* Also when only the dimming changed: a cell that turns critical while the
      * panel already sleeps dims it, and the charger un-dims it. */
@@ -2739,8 +2769,8 @@ static void apply_sleep(bool want)
  */
 static void sleep_deepens(uint32_t now)
 {
-    if (!s_asleep || s_dimmed) {
-        return;
+    if (!s_asleep || s_dimmed || s_ext_power) {
+        return;   /* on external power the clock stays up, bright, for good */
     }
 #if CONFIG_POWER_STATE_WALK
     if (s_bench_bri >= 0 || s_bench_display_off) {
@@ -2948,6 +2978,24 @@ static void frame_timer_cb(lv_timer_t *timer)
 
     /* Before anything draws, like the face and colour switches below. */
     apply_sleep(s_sleep_want);
+    {
+        /* The power source's edge. Unplugged, the dim and off minutes count
+         * from now, not from when the panel fell asleep -- hours ago, perhaps,
+         * on the cable -- so pulling it does not blank the panel at once. */
+        static bool ext_applied = true;
+        const bool ext = s_ext_power;
+        if (ext != ext_applied) {
+            ext_applied = ext;
+            if (!ext) {
+                s_asleep_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            }
+            pm_awake(!s_asleep || ext);
+            ESP_LOGI(TAG, "EVT display power %s", ext ? "external" : "battery");
+        }
+    }
+    /* Every frame: the clock's rate follows inputs (the clock taking the
+     * screen, the session stopping) that change without calling it. */
+    set_frame_period();
 #if CONFIG_UI_DEEP_IDLE
     if (s_wake_pending && !s_asleep) {
         s_wake_pending = false;   /* applied: the main loop sees the wake edge */

@@ -32,6 +32,11 @@
  * this chip has it on the same GPIO. */
 #define BOARD_BOOT_GPIO 0
 
+/* The orb clock's frame period on external power (on battery it is ui.c's
+ * 5 fps). A clock frame costs 25-60 ms here, so 10 fps leaves the LVGL core
+ * free for a session starting under it; 30 would keep it busy. */
+#define BOARD_CLOCK_EXT_FRAME_MS 100
+
 #elif CONFIG_IDF_TARGET_ESP32P4
 #include "bsp/esp32_p4_wifi6_touch_lcd_xc.h"
 
@@ -46,6 +51,12 @@
 /* BOOT is the P4's strapping pin, GPIO 35 -- not 0, which is a plain GPIO on
  * this chip. The P4 BSP declares no buttons (BSP_CAPS_BUTTONS 0). */
 #define BOARD_BOOT_GPIO 35
+
+/* The orb clock on external power, which on this board, having no battery, is
+ * always. 30 fps was tried (2026-11-17): a clock frame at 800x800 draws in
+ * 36-37 ms, and with the flush the panel managed 12.7 fps with the LVGL task
+ * saturated. 10 fps, as on the S3, leaves it headroom. */
+#define BOARD_CLOCK_EXT_FRAME_MS 100
 
 #else
 #error "No board for this IDF target. See main/board.h."

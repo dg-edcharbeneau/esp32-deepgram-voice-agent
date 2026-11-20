@@ -104,9 +104,84 @@ and window in `sdkconfig.defaults`, every 20 ms audio send blocked ~160 ms and
 the uplink ran at about half real time. That looks like a link fault, and it
 isn't one.
 
+### When the C6 wedges
+
+**A few hours into uptime, the C6 can stop passing traffic.** This happens
+with the device idle, with no log line, and it doesn't recover. A bench left
+running caught it twice in one day, in two forms:
+
+- **It stays associated at full signal.** Nothing reaches even the gateway.
+- **Traffic fades out, then the association drops.** Every rejoin after that
+  fails, with reasons 2 and 205: 637 tries over 6 hours, while the access point
+  served everyone else.
+
+Both times the C6 still answered control calls.
+
+**Rejoining doesn't clear it, but a reset of both chips does**, in about 5 s,
+on the same access point with the same MAC. A tap during a wedge fails with
+`CANNOT_RESOLVE_HOSTNAME`.
+
+**`CONFIG_WIFI_WEDGE_RESET` (default on, P4 only) is the recovery.**
+`main/wifi_wedge.c` resets the board when either form shows:
+
+- **Refused rejoins:** they go on for 3 minutes.
+- **A dead gateway:** it answers none of three pings, twice in a row. The
+  check runs every minute, and at once when a session's socket fails.
+
+It doesn't reset in these cases:
+
+- **The router is switched off.** That gives reason 201, no AP found, which the
+  reconnect loop waits out as before.
+- **The gateway never answers pings.** Failures only count once that
+  connection has proven itself, with the gateway answering a ping or a
+  session reaching Deepgram (`EVT wifi wedge check armed`).
+
+**Repeat resets back off**, from 5 minutes, doubling to an hour. Each step
+logs an `EVT wifi wedge` line, and TLM carries the count as `wd=`.
+
+**The trigger is Wi-Fi 6 (802.11ax).** On 802.11ax the factory C6 firmware
+fails for hours at a time, then works again. During those periods it fails in
+two ways:
+
+- **A few seconds into a session's audio uplink, it stops sending.** You see
+  `send queue full`, then the socket fails, while frames still arrive from the
+  access point.
+- **The link dies while idle**, often within two minutes of boot. Rejoins are
+  then refused with reasons 2 and 205, as in the wedges above.
+
+Before the A/B test, these were ruled out on the bench: the P4 firmware (the
+release build failed too), the SDIO clock, the access point (two of them, and a
+phone hotspot), USB power against a wall charger, and the speaker. An S3, which
+has no 802.11ax, held its sessions in the same spot.
+
+**A 12-hour A/B settled it** (2026-11-19 to 11-20). The bench switched
+between the two settings every 5 minutes, and reset both chips at the start
+of each cycle, so each setting ran on a fresh C6 in the same conditions:
+
+| Setting | Cycles | Cycles with a failure |
+|---|---|---|
+| b/g/n/ax | 72 | 34 |
+| b/g/n | 72 | 0 |
+
+The failures came in three periods: 21:00–02:00, 03:30–04:50 and once at 05:20.
+The b/g/n cycles interleaved with them were all clean, including the 42 right
+beside a failing 802.11ax cycle. The bench command `proto ax|bgn`
+(`CONFIG_BENCH_NET_PROBE`) does the switching. It's kept across a software
+reset, so `proto bgn` then `reboot` boots on b/g/n.
+
+**`CONFIG_WIFI_STA_NO_11AX` (default on, P4 only) joins with b/g/n.** The
+protocol is set explicitly either way and read back, and the boot log shows it
+as `EVT wifi protocol set 0x07 ... read back 0x07`. 802.11ax adds little on
+2.4 GHz for a ~32 kB/s audio stream.
+
+**The watchdog stays.** The wedges caught on 11-18 were on 802.11ax too, and
+they match the idle failures above. But nothing has yet run long enough on
+b/g/n to show those can't happen there, so the watchdog stays as the backstop.
+
 ### Updating the C6 firmware
 
-Not done, and not needed while 20 MHz holds. If the stall comes back, the next
+Not done, and not needed while b/g/n holds. A newer C6 firmware might fix
+802.11ax, but nothing here needs it. If the stall comes back on b/g/n, the next
 step is esp_hosted 2.x on both ends: the C6 firmware and the host components
 together, then removing the pin. What's known so far:
 
@@ -133,6 +208,11 @@ setting, for its own reasons.
 
 - **No battery.** The board has no fuel gauge in its BSP, so `CONFIG_BATTERY` is
   off: no charge dots, and the agent's battery tool is compiled out.
+- **Always on external power.** With no battery, none of the battery's power
+  saving runs: the sleeping clock stays at full brightness, at 10 fps
+  (`BOARD_CLOCK_EXT_FRAME_MS`), and never dims or goes off. 30 fps was tried:
+  a clock frame at 800x800 draws in about 36 ms, and the panel managed 12.7 fps
+  with the display task saturated.
 - **No light sleep.** Tickless idle is off, and deep idle goes with it. Light
   sleep with the SDIO link up has never been measured.
 - **The CPU stays at 360 MHz.** The power manager's floor equals its ceiling

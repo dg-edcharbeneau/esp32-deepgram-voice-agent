@@ -181,6 +181,10 @@ void audio_io_uplink_hold(audio_io_hold_t who, bool hold);
  */
 void audio_io_deep_idle(bool on);
 
+/* External power (USB) or battery, from main.c. The speaker amplifier's idle
+ * switch-off (CONFIG_AUDIO_PA_IDLE_OFF_MS) runs on battery only. */
+void audio_io_set_external_power(bool external);
+
 /* BENCH AID (CONFIG_POWER_STATE_WALK): the speaker codec and its amplifier off
  * and back on, for the power walk. Only with nothing playing. */
 void audio_io_bench_speaker(bool on);

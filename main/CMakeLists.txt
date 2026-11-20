@@ -62,6 +62,8 @@ idf_component_register(
         panel_geom.c
         ui_panel.c
         screenshot.c
+        net_probe.c
+        wifi_wedge.c
         ${panel_fonts}
     INCLUDE_DIRS .
     # Flash rodata, no RAM until something reads it. Editing any of these
@@ -107,6 +109,7 @@ idf_component_register(
         espressif__esp-dsp
         espressif__esp-sr
         espressif__button
+        esp_driver_uart
 )
 
 # Minify the portal page into the build directory before it is embedded, so the
