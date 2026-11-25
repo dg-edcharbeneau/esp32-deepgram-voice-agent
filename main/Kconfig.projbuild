@@ -28,6 +28,11 @@ menu "Deepgram Agent Device"
         int "Wi-Fi connect attempts before giving up"
         default 8
         range 1 100
+        help
+            Back-to-back attempts at the saved network. At boot, running out
+            opens the setup portal. Once the device has joined, a lost network
+            is never given up on: after these, it keeps trying every 5, 10,
+            20, then 30 s until the network comes back.
 
     config DEEPGRAM_API_KEY
         string "Deepgram API key"
@@ -644,6 +649,8 @@ menu "Deepgram Agent Device"
             reply started inside that window. 60 s outlasts a conversation's
             pauses and still switches it off between sessions.
 
+            On battery only: on external power the amplifier stays on.
+
     config AUDIO_CAPTURE_ALWAYS
         bool "Keep visualizing the microphone while the session is stopped"
         default n
@@ -758,6 +765,27 @@ menu "Deepgram Agent Device"
             with the cell full (TLM chgst=4), so the USB current is the
             system's draw and not charging. Every override is undone at the end.
 
+    config BENCH_NET_PROBE
+        bool "Network probe and serial commands (bench only)"
+        default n
+        help
+            BENCH AID, NOT A FEATURE. When a session's socket errors or
+            closes, pings the gateway, the DNS server and 8.8.8.8 and resolves
+            the agent's host, and logs one "EVT netprobe" line saying which of
+            them answered: the way to tell a stalled radio link from a dead
+            access point or a dead DNS. Also reads commands from the console
+            UART, one per line: "tap" (the BOOT button's click), "stop",
+            "probe", "txpower [dBm]" (read or cap the radio's transmit power,
+            a weak uplink without moving the board), "rejoin" (drop and
+            re-make the association), "proto ax|bgn" (P4: switch the C6
+            between 802.11b/g/n/ax and b/g/n and rejoin; kept across a
+            software reset, so "proto bgn" then "reboot" boots on b/g/n;
+            "proto" shows it)
+            and "reboot" (reset both chips), so a
+            session can be driven and a stall taken apart with nobody at the
+            bench. With WIFI_WEDGE_RESET, also "wdtest dead|refuse|noap|off":
+            fault injection for the wedge watchdog.
+
     config UI_PANEL_SELFTEST
         bool "Touch panel self-test (bench only)"
         default n
@@ -831,7 +859,8 @@ menu "Deepgram Agent Device"
             for a while, and it dims to UI_SLEEP_DIM_PCT. An AMOLED's draw is
             its lit pixels times its brightness, and sleep is where this
             device spends its life. A touch, a session or an alarm brings it
-            back to full.
+            back to full. On battery only: on external power the clock stays
+            at full brightness.
 
     config UI_SLEEP_DIM_PCT
         int "Brightness of the dimmed sleeping clock (%)"
@@ -849,8 +878,8 @@ menu "Deepgram Agent Device"
             between the once-a-second main loop, Wi-Fi beacons and a touch. A
             touch, the BOOT button, a session, an alarm or the stopwatch
             brings everything back. Needs UI_SLEEP_OFF_AFTER_MIN above 0 to
-            ever happen. Off: the panel goes dark but the chip stays awake,
-            as before.
+            ever happen, and so only on battery. Off: the panel goes dark but
+            the chip stays awake, as before.
 
     config UI_SLEEP_OFF_AFTER_MIN
         int "Turn the panel off after this many minutes asleep (0 = never)"
@@ -861,7 +890,8 @@ menu "Deepgram Agent Device"
             is drawn -- the frame timer drops to once a second -- and a touch,
             a session or an alarm turns it back on. With the defaults the clock
             is bright for 2 minutes, dimmed for 3, then off: 5 minutes 45
-            seconds after the last word. 0 keeps the clock up for good.
+            seconds after the last word. 0 keeps the clock up for good. On
+            battery only: on external power the panel never goes off.
 
     choice UI_DEFAULT_ORB_COLOR_CHOICE
         prompt "Default orb colour"
@@ -1030,7 +1060,84 @@ menu "Deepgram Agent Device"
             The session is left alone -- a device that hangs up mid-sentence to
             save power is worse than one that goes dark and keeps talking.
 
+            On battery only: plugged in, charging or not, nothing is dimmed.
+
             0 disables it.
+
+    config WIFI_STA_NO_11AX
+        bool "Join without Wi-Fi 6 (802.11ax): b/g/n only (P4)"
+        depends on ESP_HOSTED_ENABLED
+        default y
+        help
+            Asks the C6 to join with 802.11b/g/n only, as the S3 does.
+
+            On 802.11ax the factory C6 firmware fails for hours at a time: it
+            loses transmit a few seconds into a session's audio uplink ("send
+            queue full", then the socket fails, while frames still arrive), or
+            the link dies while idle and every rejoin is refused. Outside
+            those periods 802.11ax works, which is why this was hard to pin.
+
+            Settled by a 12-hour A/B on 2026-11-19/20, alternating the two
+            settings every 5 minutes, each cycle on a freshly reset C6 so both
+            saw the same conditions: 802.11ax failed 34 of 72 cycles, b/g/n 0
+            of 72, including the 42 b/g/n cycles right beside a failing
+            802.11ax one. Earlier tests had already ruled out the P4
+            firmware, the SDIO clock, the access point (two, and a phone
+            hotspot), power and the speaker; the S3 held its sessions in the
+            same spot.
+
+            The protocol is set either way (b/g/n/ax when this is off), read
+            back, and logged at boot as "EVT wifi protocol set". 802.11ax gains
+            little on 2.4 GHz for a ~32 kB/s audio stream.
+
+    config WIFI_WEDGE_RESET
+        bool "Reset the board when the Wi-Fi co-processor wedges (P4)"
+        depends on ESP_HOSTED_ENABLED
+        default y
+        help
+            The P4's radio is the board's ESP32-C6, over SDIO. A few hours
+            into uptime, with no log line, the C6 can stop passing traffic
+            while still answering control calls -- caught twice on the bench
+            on 2026-11-18. Either it stays associated and nothing reaches even
+            the gateway, or the association drops and every rejoin then fails
+            (reasons 2 and 205; 637 tries over 6 h) while the access point
+            serves everyone else. Rejoining does not clear it; a reset of both
+            chips does, in about 5 s.
+
+            With this on, the device resets itself when either form shows: a
+            run of refused rejoins lasting WIFI_WEDGE_REFUSE_S, or the gateway
+            answering no pings twice running (checked every
+            WIFI_WEDGE_CHECK_S, and at once on a session socket error). A
+            router that is switched off is told apart by its reason code (201,
+            no AP found) and is waited out as before; failed pings count only
+            once that connection has proven itself (a ping answered, or a
+            session reaching Deepgram). Repeat
+            resets back off, 5 min then doubling to an hour. Every step logs
+            an "EVT wifi wedge" line and TLM carries the count as wd=.
+
+            See main/wifi_wedge.h.
+
+    config WIFI_WEDGE_REFUSE_S
+        int "Refused rejoins before a wedge reset (seconds)"
+        depends on WIFI_WEDGE_RESET
+        default 180
+        range 60 1800
+        help
+            How long the access point has to be visible and refusing (any
+            disconnect reason but the no-AP family) before the C6 is taken to
+            be wedged. Long enough that a router finishing its own boot does
+            not trip it.
+
+    config WIFI_WEDGE_CHECK_S
+        int "Gateway check interval (seconds)"
+        depends on WIFI_WEDGE_RESET
+        default 60
+        range 15 600
+        help
+            How often three pings go to the gateway while the device has an
+            address. A failed check is re-asked 10 s later; two failures in a
+            row make the link dead. A wedge is found within about this plus
+            10 s, before anyone taps.
 
     config WIFI_SIGNAL
         bool "Report Wi-Fi signal strength"

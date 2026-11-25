@@ -1,3 +1,24 @@
+# One board per IDF target; main/board.h includes the matching BSP header.
+idf_build_get_property(target IDF_TARGET)
+#
+# PANEL_SIZE is the panel's width in pixels (both are round, so also its
+# height), and what main/ui_scale.h scales the 466 px design to. board.h checks
+# it against the BSP. Each board gets the design's fonts at its own scale: the
+# same lv_font_conv command at 800/466 the size (each file's header has it).
+if(target STREQUAL "esp32s3")
+    set(board_bsp waveshare__esp32_s3_touch_amoled_1_75c)
+    set(panel_size 466)
+    set(clock_fonts font_clock_52.c font_clock_15.c)
+    set(panel_fonts font_panel_18.c font_panel_28.c font_panel_40.c)
+elseif(target STREQUAL "esp32p4")
+    set(board_bsp waveshare__esp32_p4_wifi6_touch_lcd_xc)
+    set(panel_size 800)
+    set(clock_fonts font_clock_89.c font_clock_26.c)
+    set(panel_fonts font_panel_31.c font_panel_48.c font_panel_69.c)
+else()
+    message(FATAL_ERROR "No board for IDF target ${target}. See main/board.h.")
+endif()
+
 idf_component_register(
     SRCS
         main.c
@@ -28,8 +49,7 @@ idf_component_register(
         tz_table.c
         alarms.c
         alarm_sched.c
-        font_clock_52.c
-        font_clock_15.c
+        ${clock_fonts}
         clock_face.c
         ui_clock.c
         ui_paint.c
@@ -42,9 +62,9 @@ idf_component_register(
         panel_geom.c
         ui_panel.c
         screenshot.c
-        font_panel_18.c
-        font_panel_28.c
-        font_panel_40.c
+        net_probe.c
+        wifi_wedge.c
+        ${panel_fonts}
     INCLUDE_DIRS .
     # Flash rodata, no RAM until something reads it. Editing any of these
     # rebuilds, so a page or prompt change is a normal edit-and-flash.
@@ -83,12 +103,13 @@ idf_component_register(
         mbedtls
         json
         esp_codec_dev
-        waveshare__esp32_s3_touch_amoled_1_75c
+        ${board_bsp}
         lvgl__lvgl
         espressif__esp_lvgl_adapter
         espressif__esp-dsp
         espressif__esp-sr
         espressif__button
+        esp_driver_uart
 )
 
 # Minify the portal page into the build directory before it is embedded, so the
@@ -110,5 +131,7 @@ add_dependencies(${COMPONENT_LIB} portal_html)
 # can be regenerated without a diff to merge (the command is in its header).
 # It includes "lvgl/lvgl.h" unless told otherwise, and only LVGL's desktop build
 # tells it; this does, for that one file.
-set_source_files_properties(font_clock_52.c font_clock_15.c font_panel_18.c font_panel_28.c font_panel_40.c
+set_source_files_properties(${clock_fonts} ${panel_fonts}
     PROPERTIES COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)
+
+target_compile_definitions(${COMPONENT_LIB} PRIVATE PANEL_SIZE=${panel_size})

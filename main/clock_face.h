@@ -8,20 +8,23 @@
  *
  * Every constant is Ed's "Orb clock" mockup (OrbClock.dc.html in the design
  * export), at 1:1 device pixels. Sizes there are diameters; here they are
- * radii, halved once where they are named.
+ * radii, halved once where they are named. Those pixels are the 466 px panel's;
+ * PXF() scales them to this board's (see ui_scale.h).
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#define CLOCK_FACE_C        233.0f   /* centre, both axes */
+#include "ui_scale.h"
+
+#define CLOCK_FACE_C        (PANEL_SIZE * 0.5f)   /* centre, both axes */
 
 #define CLOCK_FACE_SPHERE   180      /* Fibonacci points on the sphere */
-#define CLOCK_FACE_SPHERE_R 96.0f
+#define CLOCK_FACE_SPHERE_R PXF(96.0f)
 #define CLOCK_FACE_MINUTES  60
-#define CLOCK_FACE_MIN_R    186.0f
+#define CLOCK_FACE_MIN_R    PXF(186.0f)
 #define CLOCK_FACE_HOURS    12
-#define CLOCK_FACE_HOUR_R   146.0f
+#define CLOCK_FACE_HOUR_R   PXF(146.0f)
 #define CLOCK_FACE_DOTS     (CLOCK_FACE_SPHERE + CLOCK_FACE_MINUTES + CLOCK_FACE_HOURS)
 
 typedef enum {
@@ -61,7 +64,7 @@ void clock_face_build(clock_frame_t *f, float t, int hh, int mm, float ox, float
 /*
  * The sphere alone -- CLOCK_FACE_SPHERE dots into `out` -- centred at (cx, cy)
  * with `radius`: the clock's at CLOCK_FACE_SPHERE_R, the ring screen's smaller.
- * The dots keep their mockup sizes whatever the radius.
+ * The dots keep their mockup sizes whatever the radius (scaled to the panel).
  */
 void clock_face_sphere(clock_dot_t *out, float t, float cx, float cy, float radius);
 

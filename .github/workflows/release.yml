@@ -13,10 +13,21 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: build and attach firmware
+  build:
+    # One board per IDF target (docs/boards.md). Each board builds in its own
+    # job; `publish` attaches them all to one release, or none if either fails.
+    name: build ${{ matrix.target }}
     runs-on: ubuntu-latest
     container: espressif/idf:v5.5.5
+    strategy:
+      matrix:
+        include:
+          # The S3 keeps the asset names every earlier release used, which the
+          # README and docs/index.html link to. The P4 is suffixed.
+          - target: esp32s3
+            suffix: ""
+          - target: esp32p4
+            suffix: "-esp32p4"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -44,52 +55,89 @@ jobs:
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py set-target esp32s3
+          idf.py set-target ${{ matrix.target }}
           idf.py build
 
       # One image at offset 0 -- bootloader, partition table and app together --
-      # so flashing needs no knowledge of this project's custom partitions.csv.
-      # merge-bin writes into build/, not the working directory.
+      # so flashing needs no knowledge of this project's custom partitions.csv,
+      # nor of where each chip keeps its bootloader (0x0 on the S3, 0x2000 on
+      # the P4). merge-bin writes into build/, not the working directory.
       - name: Merge into a single flashable image
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
           idf.py merge-bin -o merged.bin
-          mv build/merged.bin deepgram_agent-merged.bin
-          ls -l deepgram_agent-merged.bin
+          mkdir dist
+          mv build/merged.bin dist/deepgram_agent${{ matrix.suffix }}-merged.bin
+          cp build/deepgram_agent.bin dist/deepgram_agent${{ matrix.suffix }}.bin
+          cp build/deepgram_agent.elf dist/deepgram_agent${{ matrix.suffix }}.elf
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: attach firmware to the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
 
       - name: Release notes
         shell: bash
         run: |
           cat > NOTES.md <<'NOTES'
-          Firmware for the Waveshare **ESP32-S3-Touch-AMOLED-1.75C**.
+          Firmware for two Waveshare boards. Each `-merged.bin` is a single
+          image containing the bootloader, partition table and app. It is built
+          from this repo's tracked defaults, so it holds **no API key and no
+          Wi-Fi network**: on first boot it raises its own WPA2 access point and
+          shows the SSID and passphrase on the panel. Join it, and the captive
+          portal asks for your network and your Deepgram API key.
 
-          `deepgram_agent-merged.bin` is a single image containing the
-          bootloader, partition table and app. It is built from this repo's
-          tracked defaults, so it holds **no API key and no Wi-Fi network** — on
-          first boot it raises its own WPA2 access point and shows the SSID and
-          passphrase on the panel. Join it, and the captive portal asks for your
-          network and your Deepgram API key.
+          | Board | First install | Upgrade |
+          |---|---|---|
+          | ESP32-S3-Touch-AMOLED-1.75C | `deepgram_agent-merged.bin` | `deepgram_agent.bin` |
+          | ESP32-P4-WIFI6-Touch-LCD-3.4C | `deepgram_agent-esp32p4-merged.bin` | `deepgram_agent-esp32p4.bin` |
 
-          Flash it with [esptool](https://github.com/espressif/esptool)
-          (`pip install esptool`), with the board in download mode:
+          Flash with [esptool](https://github.com/espressif/esptool)
+          (`pip install esptool`), with the board in download mode. On the S3:
 
           ```
           esptool.py -c esp32s3 -p /dev/YOUR-PORT write_flash 0x0 deepgram_agent-merged.bin
           ```
 
+          On the P4:
+
+          ```
+          esptool.py -c esp32p4 -p /dev/YOUR-PORT write_flash 0x0 deepgram_agent-esp32p4-merged.bin
+          ```
+
+          **The P4 image runs on P4 chip revision v1.x only**, which is what
+          the 3.4C boards have shipped with so far. `esptool.py -c esp32p4 -p
+          /dev/YOUR-PORT chip_id` prints the revision; a v3.x board needs its
+          own build. See `docs/boards.md`.
+
           **Upgrading from an earlier release?** Flash only the app, which keeps
-          your Wi-Fi network, API key and settings:
+          your Wi-Fi network, API key and settings (use `-c esp32p4` and
+          `deepgram_agent-esp32p4.bin` on the P4):
 
           ```
           esptool.py -c esp32s3 -p /dev/YOUR-PORT write_flash 0x10000 deepgram_agent.bin
           ```
 
-          The merged image above is for a first install; it erases saved
+          The merged images are for a first install; they erase saved
           settings.
 
-          `deepgram_agent.elf` is attached for decoding a backtrace with
-          `idf.py monitor` or `addr2line`; it is not needed to run the firmware.
+          The `.elf` files are attached for decoding a backtrace with
+          `idf.py monitor` or `addr2line`; they are not needed to run the
+          firmware.
           NOTES
 
       - uses: softprops/action-gh-release@v3
@@ -98,7 +146,10 @@ jobs:
           body_path: NOTES.md
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: |
-            deepgram_agent-merged.bin
-            build/deepgram_agent.bin
-            build/deepgram_agent.elf
+            dist/deepgram_agent-merged.bin
+            dist/deepgram_agent.bin
+            dist/deepgram_agent.elf
+            dist/deepgram_agent-esp32p4-merged.bin
+            dist/deepgram_agent-esp32p4.bin
+            dist/deepgram_agent-esp32p4.elf
           fail_on_unmatched_files: true

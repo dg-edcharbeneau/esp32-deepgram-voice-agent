@@ -681,6 +681,11 @@ static void tone_fill(int16_t *out, size_t n, uint32_t *pos, uint32_t len, float
 #define PA_SETTLE_MS 20
 static bool s_pa_on = true;   /* the codec's open turned it on */
 #endif
+/* On battery only. On external power the amplifier stays on, as it always did
+ * before this switch existed -- which also spares the echo canceller the wake
+ * (see CONFIG_AUDIO_PA_IDLE_OFF_MS). Off when the cable went in, it comes back
+ * on with the next sound and stays. Written by main's task. */
+static volatile bool s_pa_ext_power = true;
 
 /*
  * DEEP IDLE (ui.c): THE AUDIO LINK CLOSED. The i2s driver holds an APB_FREQ_MAX
@@ -809,6 +814,11 @@ void audio_io_deep_idle(bool on)
     }
 }
 
+void audio_io_set_external_power(bool external)
+{
+    s_pa_ext_power = external;
+}
+
 static void pa_on(void)
 {
 #if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
@@ -825,7 +835,7 @@ static void pa_idle(void)
 {
 #if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
     const uint32_t now = now_ms();
-    if (s_pa_on && now - s_play_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS &&
+    if (s_pa_on && !s_pa_ext_power && now - s_play_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS &&
         now - s_tone_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS) {
         gpio_set_level(BSP_POWER_AMP_IO, 0);
         s_pa_on = false;

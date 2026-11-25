@@ -2,12 +2,15 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 
+#include "net_probe.h"
 #include "wifi_sta.h"
+#include "wifi_wedge.h"
 
 static const char *TAG = "wifi";
 
@@ -26,6 +29,62 @@ static bool s_stack_ready;
  * a reconnect attempt aimed at the network that just failed.
  */
 static bool s_connecting;
+
+/*
+ * WHAT THE RETRY BUDGET IS FOR, AND WHAT IT IS NOT.
+ *
+ * CONFIG_WIFI_MAX_RETRY exists for the boot-time join: a saved network that
+ * cannot be reached at all -- renamed, moved, a changed password -- has to end
+ * in the setup portal rather than in endless retries, and main.c's wait is
+ * what turns the exhausted budget into the portal.
+ *
+ * Once this station has had an address, losing the network means something
+ * else entirely: a router rebooting, a walk out of range, an access point
+ * switched off for a minute. Nothing waits on the budget any more, so spending
+ * it used to strand the device -- eight tries in about twenty seconds, then
+ * silence until someone power-cycled it. Now the first CONFIG_WIFI_MAX_RETRY
+ * tries still go back to back, for the blip, and after that it keeps trying
+ * for as long as the network is gone, backing off to one attempt every
+ * REJOIN_MAX_MS: a scan is not free on a battery, and a router takes a minute
+ * or two to come back anyway.
+ */
+static bool s_joined;                  /* had an address since wifi_sta_start() */
+static volatile bool s_associated;     /* associated right now */
+static volatile uint32_t s_gen;        /* bumped by start and stop: stale rejoins drop */
+static TaskHandle_t s_rejoin_task;
+static volatile uint32_t s_rejoin_ms;
+static volatile uint32_t s_rejoin_gen;
+
+#define REJOIN_FIRST_MS 5000
+#define REJOIN_MAX_MS   30000
+
+/*
+ * The delayed attempts run here, not on a timer: on a board whose radio is a
+ * co-processor (the P4's C6, over esp_hosted) esp_wifi_connect() is an RPC that
+ * blocks its caller, and neither the esp_timer task nor the event loop should
+ * be the one waiting on it.
+ */
+static void rejoin_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        for (;;) {
+            const uint32_t gen = s_rejoin_gen;
+            vTaskDelay(pdMS_TO_TICKS(s_rejoin_ms));
+            if (!s_connecting || gen != s_gen || s_associated) {
+                break;   /* stopped, restarted, or back by itself meanwhile */
+            }
+            const esp_err_t err = esp_wifi_connect();
+            if (err == ESP_OK) {
+                break;   /* the attempt's own disconnect, if it fails, schedules the next */
+            }
+            /* No event will follow a refused call, so the chain would end
+             * here: try again after the same wait. */
+            ESP_LOGW(TAG, "rejoin: esp_wifi_connect: %s", esp_err_to_name(err));
+        }
+    }
+}
 
 #if CONFIG_WIFI_SIGNAL
 /* ------------------------------------------------------------- signal
@@ -107,8 +166,12 @@ bool wifi_sta_get_signal(wifi_signal_t *out)
      * exist at all -- which is the whole time the provisioning AP owns the
      * radio. Neither is logged: the telemetry loop calls this once a second and
      * a device sitting in the portal would fill the log with it.
+     *
+     * Not even asked while unassociated: through esp_hosted (the P4) the
+     * refusal comes back as an RPC, and esp_hosted logs every refused RPC as a
+     * warning -- one line a second for as long as the network is gone.
      */
-    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+    if (!s_associated || esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
         s_bars = 0;
         return false;
     }
@@ -171,18 +234,46 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         return;
     }
 
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        s_associated = true;
+        return;
+    }
+
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *ev = data;
+        s_associated = false;
         if (!s_connecting) {
             /* Expected while provisioning, and while shutting the station down
              * to hand the radio over. Nothing to retry. */
             return;
         }
+        /* The P4's wedge watchdog reads the reasons: a long run of "the AP
+         * is there and will not have us" is the C6 wedged, not the network
+         * gone. See wifi_wedge.h. */
+        wifi_wedge_note_disconnect(ev->reason);
         if (s_retries < CONFIG_WIFI_MAX_RETRY) {
             s_retries++;
             ESP_LOGW(TAG, "disconnected (reason %d), retry %d/%d",
                      ev->reason, s_retries, CONFIG_WIFI_MAX_RETRY);
             esp_wifi_connect();
+        } else if (s_joined && s_rejoin_task != NULL) {
+            /* Had a network and lost it: keep at it, further apart (see
+             * s_joined). 5, 10, 20, then every 30 s. */
+            const int over = s_retries - CONFIG_WIFI_MAX_RETRY;
+            s_retries++;
+            uint32_t ms = REJOIN_FIRST_MS << (over < 3 ? over : 3);
+            if (ms > REJOIN_MAX_MS) {
+                ms = REJOIN_MAX_MS;
+            }
+            if (over == 0) {
+                ESP_LOGW(TAG, "EVT wifi lost, still trying every %d s at most",
+                         REJOIN_MAX_MS / 1000);
+            }
+            ESP_LOGW(TAG, "disconnected (reason %d), retry %d in %lu s",
+                     ev->reason, s_retries, (unsigned long)(ms / 1000));
+            s_rejoin_ms = ms;
+            s_rejoin_gen = s_gen;
+            xTaskNotifyGive(s_rejoin_task);
         } else {
             ESP_LOGE(TAG, "giving up after %d attempts (last reason %d)",
                      s_retries, ev->reason);
@@ -208,8 +299,14 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *ev = data;
+        if (s_joined && s_retries > 0) {
+            ESP_LOGI(TAG, "EVT wifi back after %d attempts", s_retries);
+        }
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&ev->ip_info.ip));
+        s_associated = true;
+        s_joined = true;
         s_retries = 0;
+        wifi_wedge_note_got_ip();
 #if CONFIG_WIFI_SIGNAL
         /* Here rather than in wifi_sta_start(): the threshold is a property of
          * an association, and the driver rejects it before there is one. */
@@ -243,6 +340,13 @@ esp_err_t wifi_stack_init(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event, NULL, NULL));
 
+    /* Small and idle: it only waits out a delay and asks for a connect. If it
+     * cannot be had, a lost network is simply not retried, as before. */
+    if (xTaskCreate(rejoin_task, "wifi_rejoin", 3072, NULL, 4, &s_rejoin_task) != pdPASS) {
+        s_rejoin_task = NULL;
+        ESP_LOGW(TAG, "no rejoin task: a lost network will not be retried");
+    }
+
     s_stack_ready = true;
     return ESP_OK;
 }
@@ -259,6 +363,21 @@ esp_err_t wifi_sta_start(const char *ssid, const char *pass)
     wifi_config_t sta_cfg = {
         .sta = {
             .threshold.authmode = open ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK,
+            /*
+             * THE STRONGEST ACCESS POINT, NOT THE FIRST.
+             *
+             * The driver's default is a fast scan: channels 1 to 13 in order,
+             * joining the first AP with the right SSID. On a network with two
+             * APs under one name that is the lower channel, however far away
+             * -- and access points move channel on their own. On 2026-11-19
+             * the bench's far AP moved to channel 9, below the near one's 11,
+             * and every join went to it at -80 dBm, where the uplink died
+             * seconds into each session. A full scan costs about a second on
+             * a join that already takes several. Reaches the P4's C6 too:
+             * esp_hosted forwards both fields (rpc_req.c).
+             */
+            .scan_method = WIFI_ALL_CHANNEL_SCAN,
+            .sort_method = WIFI_CONNECT_AP_BY_SIGNAL,
             /* Under max modem sleep the radio wakes for every third beacon
              * (~300 ms). 3 is also the driver's value for 0; named here because
              * deep idle's light sleep is paced by it. */
@@ -273,10 +392,37 @@ esp_err_t wifi_sta_start(const char *ssid, const char *pass)
 
     xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
     s_retries = 0;
+    s_joined = false;
+    s_gen++;
     s_connecting = true;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+#if CONFIG_ESP_HOSTED_ENABLED
+    {
+        /* The C6's protocol, set explicitly either way: its Wi-Fi driver may
+         * keep the last setting in its own flash, so leaving it alone would not
+         * mean 802.11ax. On 802.11ax the factory C6 loses transmit for hours at
+         * a time; b/g/n doesn't (A/B in the Kconfig help). Before start, so the first
+         * join already uses it; read back because a C6 may ignore it. */
+        uint8_t want = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N
+#if !CONFIG_WIFI_STA_NO_11AX
+                     | WIFI_PROTOCOL_11AX
+#endif
+                     ;
+        /* A bench "proto" before a software reset wins (bench builds only). */
+        const uint8_t bench = net_probe_boot_proto();
+        if (bench) {
+            want = bench;
+        }
+        uint8_t got = 0;
+        esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, want);
+        esp_err_t rerr = esp_wifi_get_protocol(WIFI_IF_STA, &got);
+        ESP_LOGW(TAG, "EVT wifi protocol set 0x%02x%s: %s, read back 0x%02x (%s)%s",
+                 want, bench ? " (bench proto)" : "", esp_err_to_name(err), got, esp_err_to_name(rerr),
+                 (rerr == ESP_OK && got != want) ? " -- MISMATCH" : "");
+    }
+#endif
     /*
      * No modem sleep: it adds tens of ms of jitter to a live audio stream.
      *
@@ -313,6 +459,9 @@ esp_err_t wifi_sta_stop(void)
     /* Before esp_wifi_stop(), so the disconnect it provokes is not retried. */
     s_connecting = false;
     s_retries = 0;
+    s_joined = false;
+    s_associated = false;
+    s_gen++;   /* a rejoin already waiting out its delay is dropped */
 #if CONFIG_WIFI_SIGNAL
     /* So a reconnect -- possibly to a different AP entirely -- does not inherit
      * the bucket of the link that just went away, and get promoted out of it. */

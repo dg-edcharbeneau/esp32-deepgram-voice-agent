@@ -28,6 +28,8 @@
 #include "panel_geom.h"
 #include "ui_paint.h"
 #include "ui_panel.h"
+#include "ui_fonts.h"
+#include "ui_scale.h"
 #include "ui_tone.h"
 #if CONFIG_UI_RING_SELFTEST
 #include "screenshot.h"
@@ -35,40 +37,37 @@
 
 static const char *TAG = "ring";
 
-LV_FONT_DECLARE(font_panel_28);
-LV_FONT_DECLARE(font_panel_40);
-
-/* ---------------- the design, at 1:1 ---------------- */
+/* ---------------- the design, at 1:1 on the 466 px panel; PX() scales it ---------------- */
 
 #define COL_SPHERE      0xCFE3FF   /* the orb's dots, on a white orb */
 #define COL_LINE        0xC9CED6   /* the overtime line and the rings */
 
-#define ORB_DY          (-133)     /* the orb's centre, from the panel's */
-#define ORB_R           45.0f
-#define LABEL_DY        (-57)
-#define LINE_DY         (-30)
-#define LINE_SPACE      2          /* letter-spacing of the spaced caps */
-#define LINE_DOT_GAP    18         /* the "·" between its two halves, drawn */
+#define ORB_DY          PX(-133)     /* the orb's centre, from the panel's */
+#define ORB_R           PXF(45.0f)
+#define LABEL_DY        PX(-57)
+#define LINE_DY         PX(-30)
+#define LINE_SPACE      PX(2)          /* letter-spacing of the spaced caps */
+#define LINE_DOT_GAP    PX(18)         /* the "·" between its two halves, drawn */
 
 /* The rings pulsing out of the orb: three, staggered, each growing from just
  * outside it to past the rim and fading as it goes. */
 #define RINGS           3
 #define RING_PERIOD_S   2.4f
-#define RING_FROM       (ORB_R + 8.0f)
-#define RING_TO         260.0f
-#define RING_W          1.5f
+#define RING_FROM       (ORB_R + PXF(8.0f))
+#define RING_TO         PXF(260.0f)
+#define RING_W          PXF(1.5f)
 #define RING_ALPHA      0.45f
 
 /* Where the buttons begin: the top edge of the bottom half, past the gap. */
 #define TOP_END         ((int)(PANEL_C + PANEL_GAP))
 
 /* Timer: one Stop, the whole bottom half. */
-#define STOP_ICON_DY    81
-#define STOP_TEXT_DY    130
+#define STOP_ICON_DY    PX(81)
+#define STOP_TEXT_DY    PX(130)
 /* Alarm: two quarters, the text over the icon in each. */
-#define QUAD_DX         78
-#define QUAD_TEXT_DY    58
-#define QUAD_ICON_DY    95
+#define QUAD_DX         PX(78)
+#define QUAD_TEXT_DY    PX(58)
+#define QUAD_ICON_DY    PX(95)
 
 #define SNOOZE_FADE_MS  1500
 
@@ -160,7 +159,7 @@ static void paint_top(const ui_paint_target_t *t, lv_layer_t *L, const ui_ring_t
     }
 
     const char *label = r->label[0] ? r->label : (r->timer ? "Timer" : "Alarm");
-    ui_paint_text(L, &font_panel_28, pal->text, (int32_t)c, (int32_t)c + LABEL_DY, 0, true, label);
+    ui_paint_text(L, FONT_PANEL_M, pal->text, (int32_t)c, (int32_t)c + LABEL_DY, 0, true, label);
 
     /* "TIME'S UP · +5:11", or the alarm's time for the first half. The dot is
      * drawn rather than set: the 14 px face has no U+00B7. */
@@ -171,13 +170,13 @@ static void paint_top(const ui_paint_target_t *t, lv_layer_t *L, const ui_ring_t
         alarm_fmt_time(r->hh, r->mm, h12, left, sizeof(left));
     }
     overtime((now_ms - r->since_ms) / 1000, right, sizeof(right));
-    const lv_font_t *f = &lv_font_montserrat_14;
+    const lv_font_t *f = FONT_SMALL;
     const int32_t wl = ui_paint_text_width(f, LINE_SPACE, left);
     const int32_t wr = ui_paint_text_width(f, LINE_SPACE, right);
     const int32_t x0 = (int32_t)c - (wl + LINE_DOT_GAP + wr) / 2;
     const int32_t y = (int32_t)c + LINE_DY;
     ui_paint_text(L, f, c_line, x0 + wl / 2, y, LINE_SPACE, true, left);
-    ui_paint_disc(t, (float)(x0 + wl + LINE_DOT_GAP / 2), (float)y + 0.5f, 0.0f, 1.5f, c_line, 1.0f);
+    ui_paint_disc(t, (float)(x0 + wl + LINE_DOT_GAP / 2), (float)y + 0.5f, 0.0f, PXF(1.5f), c_line, 1.0f);
     ui_paint_text(L, f, c_line, x0 + wl + LINE_DOT_GAP + wr / 2, y, LINE_SPACE, true, right);
 }
 
@@ -188,12 +187,12 @@ static void paint_buttons(const ui_paint_target_t *t, lv_layer_t *L, const ui_ri
     if (r->timer) {
         ui_panel_kit_fill(t->px, t->stride, PANEL_SEG_HALF_BOTTOM, pal->primary);
         ui_panel_kit_icon(L, UI_ICON_BELL_OFF, pal->primary_ink, c, c + STOP_ICON_DY);
-        ui_paint_text(L, &font_panel_40, pal->primary_ink, c, c + STOP_TEXT_DY, 0, false, "Stop");
+        ui_paint_text(L, FONT_PANEL_L, pal->primary_ink, c, c + STOP_TEXT_DY, 0, false, "Stop");
         return;
     }
 
     ui_panel_kit_fill(t->px, t->stride, PANEL_SEG_QUAD_BR, pal->primary);
-    ui_paint_text(L, &font_panel_28, pal->primary_ink, c + QUAD_DX, c + QUAD_TEXT_DY, 0, false,
+    ui_paint_text(L, FONT_PANEL_M, pal->primary_ink, c + QUAD_DX, c + QUAD_TEXT_DY, 0, false,
                   "Stop");
     ui_panel_kit_icon(L, UI_ICON_BELL_OFF, pal->primary_ink, c + QUAD_DX, c + QUAD_ICON_DY);
 
@@ -214,7 +213,7 @@ static void paint_buttons(const ui_paint_target_t *t, lv_layer_t *L, const ui_ri
     ui_panel_kit_fill(t->px, t->stride, PANEL_SEG_QUAD_BL, fill);
     char lab[20];
     snprintf(lab, sizeof(lab), "+%d min", s_snooze_min > 0 ? s_snooze_min : 1);
-    ui_paint_text(L, &font_panel_28, ink, c - QUAD_DX, c + QUAD_TEXT_DY, 0, false, lab);
+    ui_paint_text(L, FONT_PANEL_M, ink, c - QUAD_DX, c + QUAD_TEXT_DY, 0, false, lab);
     ui_panel_kit_icon(L, UI_ICON_ALARM, ink, c - QUAD_DX, c + QUAD_ICON_DY);
 }
 

@@ -14,8 +14,15 @@ concurrency:
 
 jobs:
   firmware:
-    name: firmware (ESP-IDF 5.5.5)
+    # One board per IDF target (docs/boards.md): esp32s3 is the
+    # ESP32-S3-Touch-AMOLED-1.75C, esp32p4 the ESP32-P4-WIFI6-Touch-LCD-3.4C.
+    name: firmware ${{ matrix.target }} (ESP-IDF 5.5.5)
     runs-on: ubuntu-latest
+    strategy:
+      # One board failing says nothing about the other; let both report.
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32p4]
     # Pinned exactly, not to the floating v5.5 tag: transport_ws.c carries an
     # #error on a MAJOR.MINOR bump, and local.patch's baseline is the 5.5.5
     # file, so a patch release moving under us would make patch-drift flap.
@@ -30,7 +37,7 @@ jobs:
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py set-target esp32s3
+          idf.py set-target ${{ matrix.target }}
           idf.py build
 
       - name: Size report
@@ -41,7 +48,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: deepgram_agent-app
+          name: deepgram_agent-${{ matrix.target }}
           path: |
             build/deepgram_agent.bin
             build/deepgram_agent.elf

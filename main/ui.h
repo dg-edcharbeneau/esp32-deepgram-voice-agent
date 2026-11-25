@@ -136,6 +136,16 @@ void ui_set_sleep(bool sleep, bool dim);
 /* Whether the display is currently in that state. */
 bool ui_is_asleep(void);
 
+/*
+ * External power (USB) or battery, from main.c; true on a board with no
+ * battery. On external power sleep shows the orb clock at full brightness and
+ * a faster frame rate and never dims or turns the panel off. On battery it
+ * dims and then goes off after CONFIG_UI_SLEEP_DIM_AFTER_MIN /
+ * CONFIG_UI_SLEEP_OFF_AFTER_MIN, counted from the unplug if it was asleep on
+ * the cable. Applied on the next frame.
+ */
+void ui_set_external_power(bool external);
+
 /* Whether the device is in deep idle: the panel dark and the chip free to
  * light-sleep (ui.c). For the TLM line. */
 bool ui_deep_idle(void);

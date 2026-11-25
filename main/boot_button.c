@@ -8,13 +8,14 @@
 #include "alarms.h"
 #include "audio_io.h"
 #include "boot_button.h"
+#include "board.h"
 #include "session_ctl.h"
 #include "ui.h"
 #include "wifi_creds.h"
 
 static const char *TAG = "boot_btn";
 
-#define BOOT_BUTTON_GPIO   0
+#define BOOT_BUTTON_GPIO   BOARD_BOOT_GPIO
 #define FORGET_HOLD_MS     3000
 #if CONFIG_MIC_NS_ENABLE
 /* Long enough to read, short enough that the session's own caption comes back

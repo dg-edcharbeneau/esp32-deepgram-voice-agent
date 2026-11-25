@@ -31,6 +31,7 @@
 #include "bsp/display.h"
 
 #include "ui_face.h"
+#include "ui_scale.h"
 
 static const char *TAG = "face_spectrum";
 
@@ -79,11 +80,11 @@ static const char *TAG = "face_spectrum";
 #define BAR_COUNT (STRIPE_COUNT * 2)
 #define CENTER_X (BSP_LCD_H_RES / 2)
 #define CENTER_Y (BSP_LCD_V_RES / 2)
-#define R_INNER 80   /* where the bars start */
-#define R_LENGTH 138 /* longest a bar can reach beyond R_INNER */
-#define BAR_WIDTH 9
-#define PEAK_THICKNESS 3
-#define PEAK_FALL_PX 2.0f /* peak marker decay per frame */
+#define R_INNER PX(80)   /* where the bars start (466 px design; see ui_scale.h) */
+#define R_LENGTH PX(138) /* longest a bar can reach beyond R_INNER */
+#define BAR_WIDTH PX(9)
+#define PEAK_THICKNESS PX(3)
+#define PEAK_FALL_PX PXF(2.0f) /* peak marker decay per frame */
 
 /* Frames per breath while idle -- 3 s in, 3 s out at the frame timer's period. */
 #define BREATHE_FRAMES 180
@@ -319,10 +320,10 @@ static void render(const ui_render_ctx_t *ctx)
     lv_draw_arc_dsc_t ring_dsc;
     lv_draw_arc_dsc_init(&ring_dsc);
     ring_dsc.color = ring_color;
-    ring_dsc.width = 2;
+    ring_dsc.width = PX(2);
     ring_dsc.center.x = CENTER_X;
     ring_dsc.center.y = CENTER_Y;
-    ring_dsc.radius = R_INNER - 10;
+    ring_dsc.radius = R_INNER - PX(10);
     ring_dsc.start_angle = 0;
     ring_dsc.end_angle = 360;
     ring_dsc.opa = LV_OPA_COVER;
@@ -354,10 +355,10 @@ static void render(const ui_render_ctx_t *ctx)
 
         /* Peak marker floats just past the bar's high-water mark. Skipping the
          * decayed ones roughly halves the draw count when the room is quiet. */
-        if (band_peak[band] < 3.0f) {
+        if (band_peak[band] < PXF(3.0f)) {
             continue;
         }
-        int peak_r = R_INNER + (int)band_peak[band] + 4;
+        int peak_r = R_INNER + (int)band_peak[band] + PX(4);
         line_dsc.width = PEAK_THICKNESS;
         line_dsc.p1.x = (lv_value_precise_t)(CENTER_X + peak_r * s);
         line_dsc.p1.y = (lv_value_precise_t)(CENTER_Y - peak_r * c);

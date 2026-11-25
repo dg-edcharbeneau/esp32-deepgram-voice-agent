@@ -1,9 +1,13 @@
-# Waveshare ESP32-S3-Touch-AMOLED-1.75C -- Deepgram Agent API client
+# Deepgram Agent API client -- settings shared by every board.
 #
-# Board hardware (flash geometry, octal PSRAM, console pins/baud) is kept
-# identical to the sibling spec_analyzer_radial project so the same
-# `idf.py -b 2000000 monitor` habit works across both.
+# One board per IDF target. IDF reads this file first and then
+# sdkconfig.defaults.<target>, so what is here applies everywhere and the
+# target file holds what only exists on, or only suits, that board:
 #
+#   sdkconfig.defaults.esp32s3   Waveshare ESP32-S3-Touch-AMOLED-1.75C
+#   sdkconfig.defaults.esp32p4   Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C
+#
+# The S3 stays the default target: `idf.py set-target esp32p4` picks the other.
 CONFIG_IDF_TARGET="esp32s3"
 
 # --- flash / PSRAM / clocks -------------------------------------------------
@@ -11,14 +15,8 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
-CONFIG_SPIRAM_RODATA=y
-CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=4096
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # Dynamic frequency scaling: 240 MHz while the panel is awake or a session is
 # live (PM locks in ui.c and session_ctl.c), 80 MHz otherwise -- asleep on the
 # orb clock, most of the device's life. Light sleep below; see main.c.
@@ -33,9 +31,6 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 # esp-aes allocation failed and no session could start. Keeping the CPU
 # powered costs on the order of 0.1 mA while asleep.
 # CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP is not set
-CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
-CONFIG_ESP32S3_DATA_CACHE_64KB=y
-CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_FREERTOS_HZ=1000
 
@@ -64,33 +59,9 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # flash (esp_config.h defines MBEDTLS_AES_ROM_TABLES), so no internal RAM.
 # CONFIG_MBEDTLS_HARDWARE_AES is not set
 
-# --- Wi-Fi -----------------------------------------------------------------
-# Agent audio arrives as a steady stream of ~4 kB binary frames; the extra RX
-# buffers keep the stack from dropping them under a burst.
-#
-# TRIED AT 8 AND REVERTED, 2026-09-01. Halving these did what it was supposed to
-# -- 12.8 kB back into the DMA-capable pool, and the esp-aes allocation failures
-# that were dropping Deepgram sessions went to zero. It also introduced a worse
-# failure:
-#
-#   E websocket_client: Could not lock ws-client within 2000 timeout
-#   E transport_ws: Error transport_poll_write(0)
-#   W dg_agent: socket closed (status 0)
-#
-# Zero occurrences of that in every capture before the change; six in the first
-# capture after it. Fewer RX buffers means the MAC defers frames under a burst,
-# TCP stalls, and a TLS write sits in the socket for the full 2 s SEND_TIMEOUT
-# holding the websocket client's mutex -- so every other sender times out trying
-# to take it and the session dies anyway. A memory fault traded for a stall.
-#
-# The warning above is therefore load-bearing, and the 12% rise in dropped audio
-# that came with the change was the leading edge of it rather than an acceptable
-# price. Take DMA-capable memory from DRAW_ROWS in main/ui.c instead; that one
-# costs render granularity, not packets.
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=48
-CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=48
+# --- Wi-Fi / TCP -----------------------------------------------------------
+# The radio's own buffer counts are per board: the S3's are in its target file,
+# and the P4 has no radio (see sdkconfig.defaults.esp32p4).
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 # The send side matters as much as the receive side here, and the stock 5760 is

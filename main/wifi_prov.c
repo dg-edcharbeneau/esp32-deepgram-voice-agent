@@ -7,6 +7,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "soc/soc_caps.h"
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -321,6 +322,9 @@ static esp_err_t scan_handler(httpd_req_t *req)
 static esp_err_t save_handler(httpd_req_t *req)
 {
     s_last_activity = xTaskGetTickCount();
+    /* Logged before anything can refuse it: a save that never shows up here
+     * never reached the device, which is a different fault from one refused. */
+    ESP_LOGI(TAG, "save request, %u bytes", (unsigned)req->content_len);
 
     /*
      * A 32-character SSID and a 63-character password each TRIPLE under
@@ -328,6 +332,7 @@ static esp_err_t save_handler(httpd_req_t *req)
      * old 512 does not cover a legitimate worst case any more.
      */
     if (req->content_len == 0 || req->content_len > BODY_MAX) {
+        ESP_LOGW(TAG, "save refused: body length %u", (unsigned)req->content_len);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
     }
 
@@ -358,6 +363,7 @@ static esp_err_t save_handler(httpd_req_t *req)
     char tz[48] = {0};
     if (!form_get(body, "ssid", ssid, sizeof(ssid)) || ssid[0] == '\0') {
         free(body);
+        ESP_LOGW(TAG, "save refused: no ssid");
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no ssid");
     }
     form_get(body, "pass", pass, sizeof(pass));
@@ -375,10 +381,12 @@ static esp_err_t save_handler(httpd_req_t *req)
      * when a key is stored, because blank has to look safe before anyone uses it.
      */
     if (key[0] != '\0' && !key_is_plausible(key)) {
+        ESP_LOGW(TAG, "save refused: api key has spaces or control characters");
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                    "that key has spaces or control characters in it");
     }
     if (key[0] == '\0' && !api_key_is_stored()) {
+        ESP_LOGW(TAG, "save refused: no api key given and none stored");
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                    "no api key stored yet, so one is required");
     }
@@ -400,10 +408,10 @@ static esp_err_t save_handler(httpd_req_t *req)
 
     /*
      * BLANK MEANS KEEP, like the key -- and a zone the device does not know is
-     * skipped rather than refused. The page reads any answer as "saved", and the
-     * zone is the one field here that can be put right later by voice; failing
-     * the whole save over it would strand someone on the setup network because
-     * their phone reported America/Indiana/Knox.
+     * skipped rather than refused. The zone is the one field here that can be
+     * put right later by voice; failing the whole save over it would strand
+     * someone on the setup network because their phone reported
+     * America/Indiana/Knox.
      */
     if (tz[0] != '\0' && !clock_save_tz(tz)) {
         ESP_LOGW(TAG, "timezone \"%s\" not recognised; not saved", tz);
@@ -525,7 +533,14 @@ const char *wifi_prov_ap_name(void)
 {
     if (s_ap_name[0] == '\0') {
         uint8_t mac[6] = {0};
+#if SOC_WIFI_SUPPORTED
         esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+#else
+        /* No radio on this chip (the P4's Wi-Fi is a coprocessor), so no
+         * SoftAP MAC to derive. The chip's own base MAC is just as unique, and
+         * the name only has to tell two devices apart. */
+        esp_read_mac(mac, ESP_MAC_BASE);
+#endif
         snprintf(s_ap_name, sizeof(s_ap_name), "dg-agent-%02X%02X", mac[4], mac[5]);
     }
     return s_ap_name;

@@ -27,6 +27,8 @@
 
 #include "lvgl.h"
 
+#include "ui_scale.h"
+
 /*
  * Where the glyph baselines sit, measured from the centre of the panel.
  *
@@ -47,8 +49,11 @@
  *
  * Which is worth knowing before changing it: there is nothing to compensate for
  * any more. Move it because the caption should sit somewhere else.
+ *
+ * All of the above is on the 466 px panel; PX() scales it to this board's, and
+ * the arc's font scales with it (FONT_STATUS in ui_fonts.h).
  */
-#define ARC_TEXT_RADIUS 176
+#define ARC_TEXT_RADIUS PX(176)
 
 /*
  * The box the string would touch at this radius, without drawing anything.

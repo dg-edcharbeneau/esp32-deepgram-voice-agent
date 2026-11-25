@@ -29,6 +29,8 @@
 #include "echo.h"
 #include "ui_paint.h"
 #include "ui_panel.h"
+#include "ui_fonts.h"
+#include "ui_scale.h"
 #include "ui_tone.h"
 #if CONFIG_UI_ECHO_SELFTEST
 #include "screenshot.h"
@@ -36,12 +38,10 @@
 
 static const char *TAG = "echo";
 
-LV_FONT_DECLARE(font_panel_40);
-
 #define NVS_NAMESPACE   "dgagent"
 #define NVS_KEY_BEST    "echo_best"
 
-/* ---------------- the design, at 1:1 ---------------- */
+/* ---------------- the design, at 1:1 on the 466 px panel; PX() scales it ---------------- */
 
 /* The quarters, in echo.h's order, as orb_colors.c indices: Phosphor, Clay,
  * Brass and Glass, as the Echo design names them. Indices rather than RGB so
@@ -58,24 +58,24 @@ static const uint16_t QUAD_HZ[4] = {392, 523, 659, 784};
 #define WRONG_MS        600
 #define WON_HZ          784        /* the top quarter's note, held as long */
 
-#define HUB_R           70.0f
-#define HUB_RING_W      3.0f
+#define HUB_R           PXF(70.0f)
+#define HUB_RING_W      PXF(3.0f)
 #define COL_HUB_RING    0x2A2D33   /* the design's, on a white orb */
 /* Both lines sit high enough that TAP TO START, 108 px wide, fits the chord
  * of the hub's inside where it is drawn. */
-#define HUB_BIG_DY      (-10)      /* GO, or the level */
-#define HUB_SMALL_DY    22         /* TAP TO START, or LEVEL */
-#define SMALL_SPACE     2          /* letter-spacing of the spaced caps */
+#define HUB_BIG_DY      PX(-10)      /* GO, or the level */
+#define HUB_SMALL_DY    PX(22)         /* TAP TO START, or LEVEL */
+#define SMALL_SPACE     PX(2)          /* letter-spacing of the spaced caps */
 
 /* Game over, from the centre. */
-#define DOTS_DY         (-148)
-#define DOT_DX          23.0f
-#define DOT_R           6.5f
-#define OVER_TITLE_DY   (-102)
-#define OVER_LINE_DY    (-65)
-#define OVER_LINE_GAP   20         /* between LEVEL n and BEST n */
-#define AGAIN_ICON_DY   75
-#define AGAIN_TEXT_DY   120
+#define DOTS_DY         PX(-148)
+#define DOT_DX          PXF(23.0f)
+#define DOT_R           PXF(6.5f)
+#define OVER_TITLE_DY   PX(-102)
+#define OVER_LINE_DY    PX(-65)
+#define OVER_LINE_GAP   PX(20)         /* between LEVEL n and BEST n */
+#define AGAIN_ICON_DY   PX(75)
+#define AGAIN_TEXT_DY   PX(120)
 
 /* Awake, and exempt from the session's idle timeout, this long after the last
  * press or round. */
@@ -199,15 +199,15 @@ static void paint_hub(const ui_paint_target_t *t, int ox, int oy, lv_layer_t *L,
 
     const int32_t ci = (int32_t)c;
     if (s_game.state == ECHO_READY) {
-        ui_paint_text(L, &font_panel_40, pal->text, ci, ci + HUB_BIG_DY, 0, true, "GO");
-        ui_paint_text(L, &lv_font_montserrat_14, pal->text, ci, ci + HUB_SMALL_DY, 0, true,
+        ui_paint_text(L, FONT_PANEL_L, pal->text, ci, ci + HUB_BIG_DY, 0, true, "GO");
+        ui_paint_text(L, FONT_SMALL, pal->text, ci, ci + HUB_SMALL_DY, 0, true,
                       "TAP TO START");
         return;
     }
     char n[8];
     snprintf(n, sizeof(n), "%d", echo_level(&s_game));
-    ui_paint_text(L, &font_panel_40, pal->text, ci, ci + HUB_BIG_DY, 0, true, n);
-    ui_paint_text(L, &lv_font_montserrat_14, pal->hint, ci, ci + HUB_SMALL_DY, SMALL_SPACE, true,
+    ui_paint_text(L, FONT_PANEL_L, pal->text, ci, ci + HUB_BIG_DY, 0, true, n);
+    ui_paint_text(L, FONT_SMALL, pal->hint, ci, ci + HUB_SMALL_DY, SMALL_SPACE, true,
                   "LEVEL");
 }
 
@@ -269,13 +269,13 @@ static void paint_over(const ui_paint_target_t *t, lv_layer_t *L, const ui_panel
         ui_paint_disc(t, c + ((float)k - 1.5f) * DOT_DX, c + DOTS_DY, 0.0f, DOT_R,
                       orb_colors_rgb(QUAD_COLOR[k]), 1.0f);
     }
-    ui_paint_text(L, &font_panel_40, pal->text, ci, ci + OVER_TITLE_DY, 0, false,
+    ui_paint_text(L, FONT_PANEL_L, pal->text, ci, ci + OVER_TITLE_DY, 0, false,
                   s_game.won ? "You win" : "Game over");
 
     char left[16], right[16];
     snprintf(left, sizeof(left), "LEVEL %d", echo_level(&s_game));
     snprintf(right, sizeof(right), "BEST %u", (unsigned)s_game.best);
-    const lv_font_t *f = &lv_font_montserrat_14;
+    const lv_font_t *f = FONT_SMALL;
     const int32_t wl = ui_paint_text_width(f, SMALL_SPACE, left);
     const int32_t wr = ui_paint_text_width(f, SMALL_SPACE, right);
     const int32_t x0 = ci - (wl + OVER_LINE_GAP + wr) / 2;
@@ -285,7 +285,7 @@ static void paint_over(const ui_paint_target_t *t, lv_layer_t *L, const ui_panel
 
     ui_panel_kit_fill(t->px, t->stride, PANEL_SEG_HALF_BOTTOM, pal->primary);
     ui_panel_kit_icon(L, UI_ICON_REPLAY, pal->primary_ink, ci, ci + AGAIN_ICON_DY);
-    ui_paint_text(L, &font_panel_40, pal->primary_ink, ci, ci + AGAIN_TEXT_DY, 0, false,
+    ui_paint_text(L, FONT_PANEL_L, pal->primary_ink, ci, ci + AGAIN_TEXT_DY, 0, false,
                   "Play again");
 }
 

@@ -14,7 +14,7 @@
 #include "esp_codec_dev_defaults.h"
 
 #include "bsp/esp-bsp.h"
-#include "bsp/esp32_s3_touch_amoled_1_75c.h"
+#include "board.h"
 
 static const char *TAG = "audio_codecs";
 
